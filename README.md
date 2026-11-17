@@ -1,6 +1,15 @@
 # agcad
 
+<p align="center">
+  <img src="logo.svg" width="160" alt="agcad logo — a snowman assembled from primitives"/>
+</p>
+
 A CAD whose primary user is an **AI agent**.
+
+> The logo is the "hello world" of this CAD: three spheres, a cylinder and
+> a couple of boxes, assembled by a parametric program — drawn as an SVG
+> from the same primitives the engine tessellates. See
+> `examples/draw_snowman_family.py` for the living version.
 
 The architecture inverts the usual GUI-first design: the headless core and
 its command bus are the product; the human-facing viewer is just another
