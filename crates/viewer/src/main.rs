@@ -12,7 +12,10 @@ mod net;
 
 
 
+use std::io::{BufRead, BufReader};
+use std::net::TcpStream;
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use agcad_protocol::{EntitySnapshot, Mat4};
 use winit::application::ApplicationHandler;
@@ -563,11 +566,50 @@ struct App {
     last_cursor: Option<(f64, f64)>,
     window: Option<Arc<Window>>,
     state: Option<State>,
+    /// Receives a tick whenever the server broadcasts `scene_changed`.
+    reload_rx: Option<mpsc::Receiver<()>>,
 }
 
 impl App {
     fn new(host: String, port: u16) -> Self {
-        Self { host, port, dragging: false, last_cursor: None, window: None, state: None }
+        Self {
+            host,
+            port,
+            dragging: false,
+            last_cursor: None,
+            window: None,
+            state: None,
+            reload_rx: None,
+        }
+    }
+
+    /// Persistent connection that only listens for `scene_changed`
+    /// notifications; every tick nudges the render loop to re-fetch.
+    fn start_live_listener(&mut self) {
+        let (tx, rx) = mpsc::channel::<()>();
+        self.reload_rx = Some(rx);
+        let host = self.host.clone();
+        let port = self.port;
+        std::thread::spawn(move || {
+            let stream = match TcpStream::connect((host.as_str(), port)) {
+                Ok(s) => s,
+                Err(err) => {
+                    eprintln!("live preview off: cannot connect to {host}:{port}: {err} (press R to refresh)");
+                    return;
+                },
+            };
+            eprintln!("live preview: watching {host}:{port} for scene_changed");
+            for line in BufReader::new(stream).lines() {
+                match line {
+                    Ok(l) if l.contains("scene_changed") => {
+                        let _ = tx.send(());
+                    },
+                    Ok(_) => {},
+                    Err(_) => break,
+                }
+            }
+            eprintln!("live preview: notification connection closed (press R to refresh)");
+        });
     }
 
     fn reload_scene(&mut self) {
@@ -601,6 +643,7 @@ impl ApplicationHandler for App {
                 self.window = Some(window);
                 self.state = Some(state);
                 self.reload_scene();
+                self.start_live_listener();
             },
             Err(err) => {
                 eprintln!("viewer init failed: {err}");
@@ -664,6 +707,16 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Drain any pending scene_changed ticks and reload once.
+        let mut reload = false;
+        if let Some(rx) = &self.reload_rx {
+            while rx.try_recv().is_ok() {
+                reload = true;
+            }
+        }
+        if reload {
+            self.reload_scene();
+        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }

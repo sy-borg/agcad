@@ -1,21 +1,25 @@
 //! `agcad` — the headless server.
 //!
 //! Speaks line-delimited JSON-RPC 2.0 on **stdio** (default) or **TCP**
-//! (`agcad --tcp 7860`). Each TCP connection gets its own engine; stdio
-//! serves a single engine. Banner and diagnostics go to stderr, so stdout
+//! (`agcad --tcp 7860`). Banner and diagnostics go to stderr, so stdout
 //! stays a clean protocol channel — pipe-friendly for agents.
 //!
-//! Every muting command is answered with the full result (including fresh
-//! mesh data), so a client never needs a second round trip to know what it
-//! just created.
+//! Engine sharing:
+//! - stdio: one engine for the single client (isolated, private).
+//! - TCP: ONE shared engine — every connection sees the same documents,
+//!   so an agent drawing over MCP is instantly visible to a viewer.
+//!   After every mutating command the server broadcasts a `scene_changed`
+//!   JSON-RPC notification (no `id`) to all connections; viewers listen
+//!   and refresh themselves.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex, mpsc};
 
 use agcad_core::Engine;
-use agcad_protocol::{Command, RpcError, RpcRequest, RpcResponse};
-use serde_json::{Map, Value};
+use agcad_protocol::{Command, DocId, RpcError, RpcRequest, RpcResponse};
+use serde_json::{Map, Value, json};
 
 fn main() -> ExitCode {
     let mut tcp_port: Option<u16> = None;
@@ -46,19 +50,103 @@ fn main() -> ExitCode {
     }
 }
 
+// --- notification fan-out ------------------------------------------------------
+
+/// Fan-out for `scene_changed` notifications. Sinks are `Arc`'d so dead
+/// connections can be removed by identity.
+struct Broadcaster {
+    sinks: Mutex<Vec<Arc<mpsc::Sender<String>>>>,
+}
+
+impl Broadcaster {
+    fn new() -> Self {
+        Self { sinks: Mutex::new(Vec::new()) }
+    }
+
+    fn add(&self, sink: Arc<mpsc::Sender<String>>) {
+        self.sinks.lock().unwrap().push(sink);
+    }
+
+    fn remove(&self, sink: &Arc<mpsc::Sender<String>>) {
+        self.sinks.lock().unwrap().retain(|s| !Arc::ptr_eq(s, sink));
+    }
+
+    fn send_except(&self, except: &Arc<mpsc::Sender<String>>, line: &str) {
+        for sink in self.sinks.lock().unwrap().iter() {
+            if !Arc::ptr_eq(sink, except) {
+                let _ = sink.send(line.to_string());
+            }
+        }
+    }
+
+    #[allow(dead_code)] // kept for future all-client broadcasts
+    fn send(&self, line: &str) {
+        for sink in self.sinks.lock().unwrap().iter() {
+            let _ = sink.send(line.to_string());
+        }
+    }
+}
+
+fn is_mutating(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::AddBox { .. }
+            | Command::AddSphere { .. }
+            | Command::AddCylinder { .. }
+            | Command::Transform { .. }
+            | Command::SetColor { .. }
+            | Command::Delete { .. }
+            | Command::SetParameter { .. }
+            | Command::RemoveParameter { .. }
+            | Command::CreateDocument { .. }
+            | Command::CloseDocument { .. }
+            | Command::Undo { .. }
+            | Command::Redo { .. }
+    )
+}
+
+fn doc_of(command: &Command) -> Option<DocId> {
+    match command {
+        Command::AddBox { doc, .. }
+        | Command::AddSphere { doc, .. }
+        | Command::AddCylinder { doc, .. }
+        | Command::Transform { doc, .. }
+        | Command::SetColor { doc, .. }
+        | Command::Delete { doc, .. }
+        | Command::SetParameter { doc, .. }
+        | Command::RemoveParameter { doc, .. }
+        | Command::Undo { doc }
+        | Command::Redo { doc }
+        | Command::GetScene { doc }
+        | Command::GetParameters { doc }
+        | Command::CloseDocument { doc } => Some(*doc),
+        Command::CreateDocument { .. } | Command::ListDocuments | Command::Initialize => None,
+    }
+}
+
+fn scene_changed(command: &Command) -> String {
+    let params = match doc_of(command) {
+        Some(doc) => json!({ "doc": doc }),
+        None => json!({}),
+    };
+    json!({ "jsonrpc": "2.0", "method": "scene_changed", "params": params }).to_string()
+}
+
+// --- modes ---------------------------------------------------------------------
+
 fn serve_stdio() -> ExitCode {
-    eprintln!("agcad v0.1.0 | protocol: stdio | docs in-process");
+    eprintln!("agcad v0.2.0 | protocol: stdio | engine: private to this session");
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
 
-    let mut engine = Engine::new();
+    let engine = Mutex::new(Engine::new());
     for line in BufReader::new(stdin).lines() {
         match line {
             Ok(line) => {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Some(response) = handle_line(&mut engine, &line) {
+                if let Some((response, _notify)) = handle_line(&engine, &line, None) {
                     if writeln!(out, "{response}").is_err() {
                         // Client went away.
                         return ExitCode::SUCCESS;
@@ -83,15 +171,19 @@ fn serve_tcp(port: u16) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    eprintln!("agcad v0.1.0 | protocol: tcp | listening on 127.0.0.1:{port}");
+    eprintln!("agcad v0.2.0 | protocol: tcp | listening on 127.0.0.1:{port}");
+    eprintln!("docs: one shared document space for every connection; mutations broadcast scene_changed");
+
+    let engine = Arc::new(Mutex::new(Engine::new()));
+    let bus = Arc::new(Broadcaster::new());
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                // One engine per connection: sessions are isolated, and a
-                // crashed client can never poison another session.
+                let engine = engine.clone();
+                let bus = bus.clone();
                 std::thread::spawn(move || {
-                    if let Err(err) = handle_connection(stream) {
+                    if let Err(err) = handle_connection(stream, engine, bus) {
                         eprintln!("connection ended: {err}");
                     }
                 });
@@ -102,24 +194,58 @@ fn serve_tcp(port: u16) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn handle_connection(stream: TcpStream) -> Result<(), std::io::Error> {
-    let mut writer = stream.try_clone()?;
-    let mut engine = Engine::new();
+type SharedEngine = Arc<Mutex<Engine>>;
+
+fn handle_connection(
+    stream: TcpStream,
+    engine: SharedEngine,
+    bus: Arc<Broadcaster>,
+) -> Result<(), std::io::Error> {
+    let writer = stream.try_clone()?;
+    let (tx, rx) = mpsc::channel::<String>();
+    let tx = Arc::new(tx);
+    bus.add(tx.clone());
+
+    // Writer thread: serializes responses + notifications onto the socket,
+    // so the read loop never blocks on a slow client.
+    std::thread::spawn(move || {
+        let mut writer = writer;
+        for msg in rx {
+            if writeln!(writer, "{msg}").is_err() {
+                break;
+            }
+        }
+    });
+
     for line in BufReader::new(stream).lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(&mut engine, &line) {
-            writeln!(writer, "{response}")?;
+        if let Some((response, notify)) = handle_line(&engine, &line, Some(&bus)) {
+            // The caller gets its response; other connections get the
+            // scene_changed notification. The caller already knows it
+            // changed the scene — echoing it back would pollute its stream.
+            let _ = tx.send(response);
+            if let Some(note) = notify {
+                bus.send_except(&tx, &note);
+            }
         }
     }
+    bus.remove(&tx);
     Ok(())
 }
 
+// --- request handling ------------------------------------------------------------
+
 /// Parse one request line, execute it, serialize the response. Returns
-/// `None` only when no usable request id could be recovered (pure noise).
-fn handle_line(engine: &mut Engine, line: &str) -> Option<String> {
+/// the response plus a `scene_changed` notification to fan out on success
+/// of a mutating command (so callers can order response-before-notify).
+fn handle_line(
+    engine: &Mutex<Engine>,
+    line: &str,
+    _bus: Option<&Broadcaster>,
+) -> Option<(String, Option<String>)> {
     let req: RpcRequest = match serde_json::from_str(line) {
         Ok(req) => req,
         Err(err) => {
@@ -133,14 +259,19 @@ fn handle_line(engine: &mut Engine, line: &str) -> Option<String> {
                 id,
                 RpcError::parse(format!("unparseable request: {err}")),
             ))
-            .ok();
+            .ok()
+            .map(|response| (response, None));
         },
     };
 
     let response = match to_command(&req) {
-        Ok(command) => match engine.execute(command) {
-            Ok(result) => RpcResponse::ok(req.id, result),
-            Err(err) => RpcResponse::err(req.id, RpcError::invalid_params(err.to_string())),
+        Ok(command) => {
+            // Compute the notification *before* the command is consumed.
+            let notify = is_mutating(&command).then(|| scene_changed(&command));
+            match engine.lock().unwrap().execute(command) {
+                Ok(result) => (RpcResponse::ok(req.id, result), notify),
+                Err(err) => (RpcResponse::err(req.id, RpcError::invalid_params(err.to_string())), None),
+            }
         },
         Err(err) => {
             // serde reports unknown methods as "unknown variant".
@@ -149,11 +280,14 @@ fn handle_line(engine: &mut Engine, line: &str) -> Option<String> {
             } else {
                 RpcError::invalid_params(err.to_string())
             };
-            RpcResponse::err(req.id, code)
+            (RpcResponse::err(req.id, code), None)
         },
     };
 
-    serde_json::to_string(&response).ok()
+    let (response, notify) = response;
+    let response = serde_json::to_string(&response).ok()?;
+    // `notify` is already a serialized JSON-RPC line.
+    Some((response, notify))
 }
 
 /// JSON-RPC `method` + `params` -> [`Command`]. The method tag is merged

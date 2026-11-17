@@ -17,6 +17,7 @@ Design rules:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -126,7 +127,17 @@ class McpServer:
     def cad(self) -> Agcad:
         # Spawn the engine lazily so `tools/list` works even without a binary.
         if self._cad is None:
-            self._cad = Agcad.spawn()
+            attach = os.environ.get("AGCAD_CONNECT")
+            if attach:
+                # Live mode: draw into a shared backend (e.g. the one a
+                # viewer is watching) instead of a private engine.
+                host, sep, port = attach.rpartition(":")
+                if not sep:
+                    host, port = "127.0.0.1", attach
+                self._cad = Agcad.connect(host, int(port))
+                print(f"agcad-mcp: attached to shared backend {host}:{port} (live preview)", file=sys.stderr)
+            else:
+                self._cad = Agcad.spawn()
         return self._cad
 
     # -- MCP methods ---------------------------------------------------------

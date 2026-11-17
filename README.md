@@ -86,6 +86,37 @@ This is the substrate for the target workflow: a vision model looks at a
 picture, the agent writes the parametric program, renders it headless,
 compares, and iterates — the user never touches a function.
 
+## Live preview: MCP agent + viewer, one shared scene
+
+The TCP server runs **one shared document space** for all connections, and
+broadcasts a `scene_changed` notification after every mutating command.
+The viewer listens and re-fetches by itself — no refresh key needed.
+
+```sh
+# 1. the shared backend
+./target/debug/agcad --tcp 7860
+
+# 2. point the MCP server at it (opencode config, `environment` field)
+{
+  "mcp": {
+    "servers": {
+      "agcad": {
+        "type": "local",
+        "command": ["/home/sa/src/agcad/.venv/bin/agcad-mcp"],
+        "environment": { "AGCAD_CONNECT": "127.0.0.1:7860" }
+      }
+    }
+  }
+}
+
+# 3. the viewer — it auto-refreshes when the agent draws
+./target/debug/agcad-view --port 7860
+```
+
+Then ask the agent to draw; what it builds through MCP appears in the
+viewer immediately. Without `AGCAD_CONNECT`, the MCP server spawns a
+private engine (isolated, invisible to viewers) — attach mode is opt-in.
+
 ## Exposing it to an agent: MCP
 
 The bus is the API; the MCP server is just another adapter over it
@@ -163,6 +194,8 @@ with Agcad.spawn() as cad:
 
 - [x] Command bus + headless engine + Python client + wgpu viewer (M1)
 - [x] Parametric layer: parameters, expressions, program replay (M2)
+- [x] MCP server + shared-engine live preview: `scene_changed` broadcast,
+      viewer auto-refresh, MCP attach mode (M3)
 - [ ] **Mesh booleans via Manifold** + STL/3MF export — 3D printing needs
       watertight solids more than full B-rep; OCCT can come later
 - [ ] Headless `render_offscreen` (PNG) + camera control — the feedback
