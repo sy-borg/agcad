@@ -1,0 +1,16 @@
+[package]
+name = "agcad-server"
+description = "The agcad headless server: JSON-RPC command bus over stdio or TCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agcad"
+path = "src/main.rs"
+
+[dependencies]
+agcad-protocol.workspace = true
+agcad-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

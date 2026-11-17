@@ -1,0 +1,9 @@
+[package]
+name = "agcad-core"
+description = "Headless agcad engine: documents, entities, history, tessellation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agcad-protocol.workspace = true
