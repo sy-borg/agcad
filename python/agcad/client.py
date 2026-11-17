@@ -48,22 +48,24 @@ class _LineTransport:
 
     def _start_reader(self, readline) -> None:
         def read_loop() -> None:
-            while True:
-                try:
+            try:
+                while True:
                     line = readline()
-                except Exception:
-                    break
-                if not line:
-                    break
-                try:
-                    response = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                rid = response.get("id")
-                if isinstance(rid, int):
-                    with self._cond:
-                        self._responses[rid] = response
-                        self._cond.notify_all()
+                    if not line:
+                        break  # EOF: server went away
+                    try:
+                        response = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    rid = response.get("id")
+                    if isinstance(rid, int):
+                        with self._cond:
+                            self._responses[rid] = response
+                            self._cond.notify_all()
+            finally:
+                # Signal waiters on EOF or read errors, so pending recv()
+                # calls fail fast instead of running out their timeout.
+                self.mark_closed()
         with self._cond:
             self._closed = False
         threading.Thread(target=read_loop, daemon=True).start()
@@ -131,7 +133,12 @@ class AgcadTcpTransport(_LineTransport):
 
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
+        # The connect timeout must NOT linger on the socket: it would make
+        # the reader thread die the first time the connection idles longer
+        # than the timeout (agent sessions idle for minutes), and every
+        # response after that would rot in the buffer.
         self._sock = socket.create_connection((host, port), timeout=10)
+        self._sock.settimeout(None)  # back to blocking mode
         self._file = self._sock.makefile("r", encoding="utf-8")
         self._start_reader(self._file.readline)
 
@@ -189,8 +196,8 @@ class Agcad:
 
     @classmethod
     def connect(cls, host: str = "127.0.0.1", port: int = 7860) -> "Agcad":
-        """Attach to a running server. Note: each connection gets its own
-        isolated document set."""
+        """Attach to a running server. TCP mode shares one document space
+        across all connections; mutations are broadcast to the others."""
         return cls(AgcadTcpTransport(host, port))
 
     # -- plumbing -----------------------------------------------------------
