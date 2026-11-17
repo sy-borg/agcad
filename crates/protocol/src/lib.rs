@@ -9,7 +9,7 @@
 //! one response per line.
 //!
 //! ```json
-//! {"jsonrpc":"2.0","id":1,"method":"add_box","params":{"doc":1,"name":"base","center":[0,0,0],"size":[10,10,10]}}
+//! {"jsonrpc":"2.0","id":1,"method":"add_box","params":{"doc":1,"name":"base","center":[0,0,5],"size":[80,40,"wall*2"]}}
 //! ```
 //!
 //! The server merges `method` into `params` and deserializes the result
@@ -17,13 +17,21 @@
 //! [`CommandResult`] (externally tagged, e.g. `{"entity_created":{...}}`)
 //! or an [`RpcError`].
 //!
+//! ## Parametric model
+//!
+//! Modeling commands are recorded in the document's program. Numeric
+//! arguments may be [`Scalar::Expression`]s referencing named parameters
+//! ("wall", "plate*0.5"). When a parameter changes, the program is
+//! replayed from scratch — deterministically, with identical entity ids.
+//! The program *is* the function; agents author and tune it.
+//!
 //! ## Conventions
 //!
 //! * All IDs are small deterministic integers — agents must be able to
 //!   predict and reuse them.
 //! * All lengths are millimeters, angles degrees, colors RGBA floats 0..1.
 //! * Commands are reversible where it makes sense; `undo`/`redo` are
-//!   per-document.
+//!   per-document and restore parameters + program + geometry atomically.
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +44,18 @@ pub type Vec3 = [f64; 3];
 pub type Rgba = [f32; 4];
 /// Column-major 4x4 transform: `m[col][row]`.
 pub type Mat4 = [[f32; 4]; 4];
+/// A 3-vector whose components may be expressions over document parameters.
+pub type SVec3 = [Scalar; 3];
+
+/// A numeric command argument: a plain number, or an expression string
+/// referencing document parameters (`"wall*2"`, `"plate/2 + 5"`).
+/// Evaluated at execution time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Scalar {
+    Number(f64),
+    Expression(String),
+}
 
 /// A single request envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +116,11 @@ impl RpcResponse {
 
 /// Every operation the bus understands. `method` is the JSON-RPC method
 /// name; all remaining variant fields live inside `params`.
+///
+/// Modeling commands (Add*, Transform, SetColor, Delete) are appended to
+/// the document program and replayed when parameters change. Session
+/// commands (initialize, undo/redo, get_scene, ...) are not part of the
+/// program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Command {
@@ -108,16 +133,16 @@ pub enum Command {
         doc: DocId,
         name: String,
         /// Box center in world space.
-        center: Vec3,
-        size: Vec3,
+        center: SVec3,
+        size: SVec3,
         #[serde(default)]
         color: Option<Rgba>,
     },
     AddSphere {
         doc: DocId,
         name: String,
-        center: Vec3,
-        radius: f64,
+        center: SVec3,
+        radius: Scalar,
         #[serde(default)]
         segments: Option<u32>,
         #[serde(default)]
@@ -126,10 +151,10 @@ pub enum Command {
     AddCylinder {
         doc: DocId,
         name: String,
-        center: Vec3,
-        radius: f64,
+        center: SVec3,
+        radius: Scalar,
         /// Along local +Y.
-        height: f64,
+        height: Scalar,
         #[serde(default)]
         segments: Option<u32>,
         #[serde(default)]
@@ -143,14 +168,27 @@ pub enum Command {
         doc: DocId,
         entity: EntityId,
         #[serde(default)]
-        translation: Option<Vec3>,
+        translation: Option<SVec3>,
         #[serde(default)]
-        rotation_deg: Option<Vec3>,
+        rotation_deg: Option<SVec3>,
         #[serde(default)]
-        scale: Option<Vec3>,
+        scale: Option<SVec3>,
     },
     SetColor { doc: DocId, entity: EntityId, color: Rgba },
     Delete { doc: DocId, entity: EntityId },
+
+    /// Define or update a parameter. The value itself may be an expression
+    /// over *other* parameters (self-reference is rejected). Changing a
+    /// parameter replays the document program.
+    SetParameter {
+        doc: DocId,
+        name: String,
+        value: Scalar,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    RemoveParameter { doc: DocId, name: String },
+    GetParameters { doc: DocId },
 
     Undo { doc: DocId },
     Redo { doc: DocId },
@@ -170,6 +208,9 @@ pub enum CommandResult {
     EntityCreated { doc: DocId, entity: EntityId, mesh: Mesh },
     Transformed { doc: DocId, entity: EntityId },
     Deleted { doc: DocId, entity: EntityId },
+    ParameterSet { doc: DocId, name: String, value: f64 },
+    ParameterRemoved { doc: DocId, name: String },
+    Parameters { doc: DocId, params: Vec<ParamInfo> },
     Undone { doc: DocId },
     Redone { doc: DocId },
     Scene { doc: DocId, entities: Vec<EntitySnapshot> },
@@ -182,9 +223,17 @@ pub struct DocInfo {
     pub entity_count: usize,
 }
 
-/// Triangle mesh in entity-local space (meters: millimeters). Geometry is
-/// baked centered on the entity origin; world placement comes from the
-/// entity transform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamInfo {
+    pub name: String,
+    pub value: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Triangle mesh in entity-local space (millimeters). Geometry is baked
+/// centered on the entity origin; world placement comes from the entity
+/// transform.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,

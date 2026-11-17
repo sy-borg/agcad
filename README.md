@@ -47,17 +47,44 @@ client — as is the Python client an agent drives.
 Line-delimited JSON-RPC 2.0, one request/response per line:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"add_box","params":{"doc":1,"name":"base","center":[0,0,5],"size":[80,40,10]}}
+{"jsonrpc":"2.0","id":1,"method":"add_box","params":{"doc":1,"name":"base","center":[0,0,"wall/2"],"size":[80,40,"wall*2"]}}
 {"jsonrpc":"2.0","id":1,"result":{"entity_created":{"doc":1,"entity":1,"mesh":{...}}}}
 ```
 
 Commands: `initialize`, `list_documents`, `create_document`,
 `close_document`, `add_box`, `add_sphere`, `add_cylinder`, `transform`,
-`set_color`, `delete`, `undo`, `redo`, `get_scene`.
+`set_color`, `delete`, `set_parameter`, `remove_parameter`,
+`get_parameters`, `undo`, `redo`, `get_scene`.
 
 Conventions: millimeters, degrees, RGBA floats. Geometry is baked centered
 on the entity origin; placement comes from `T · Rz · Ry · Rx · S`
 (extrinsic XYZ rotation, applied X then Y then Z). Z is up.
+
+## The parametric layer: the program *is* the function
+
+The user describes intent; **the agent authors a parametric program**:
+
+1. Named parameters (`wall`, `plate_len`) — values may themselves be
+   expressions over other parameters.
+2. Modeling commands with dimensions as expressions: `size = [80, 40,
+   "wall*2"]`.
+3. `set_parameter` replays the whole program: **entity ids are preserved**,
+   geometry regenerates, and undo restores parameters + program + geometry
+   atomically.
+
+Expression grammar is deliberately tiny and safe (`+ - * /`, parentheses,
+identifiers, unary minus) — no functions, no injection surface. Errors are
+agent-shaped: a typo lists the valid parameter names.
+
+```python
+cad.set_parameter(doc, "wall", 2.0, description="plate thickness [mm]")
+base = cad.add_box(doc, "base", center=(0, 0, "wall/2"), size=("plate", 40, "wall*2"))
+cad.set_parameter(doc, "wall", 4.0)   # rebuilds everything, ids unchanged
+```
+
+This is the substrate for the target workflow: a vision model looks at a
+picture, the agent writes the parametric program, renders it headless,
+compares, and iterates — the user never touches a function.
 
 ## Quickstart
 
@@ -88,16 +115,20 @@ with Agcad.spawn() as cad:
 
 ## Roadmap
 
-- [ ] B-rep kernel (OCCT bindings or Manifold for mesh booleans) — the core
-      decision that shapes everything downstream
+- [x] Command bus + headless engine + Python client + wgpu viewer (M1)
+- [x] Parametric layer: parameters, expressions, program replay (M2)
+- [ ] **Mesh booleans via Manifold** + STL/3MF export — 3D printing needs
+      watertight solids more than full B-rep; OCCT can come later
+- [ ] Headless `render_offscreen` (PNG) + camera control — the feedback
+      loop that lets a vision model compare render vs. picture
 - [ ] Sketch/constraint layer (2D solver on top of the bus)
 - [ ] `scene_changed` push notifications for the viewer
 - [ ] PyO3 bindings (native-speed path for hot loops, same API)
-- [ ] Headless screenshots (`render_offscreen` command) so agents can *see*
 - [ ] Occlusion picking in the viewer
 
 ## Status
 
-Milestone 1 complete: bus + engine + server + Python client + wgpu viewer,
-end-to-end tested over both transports. Engine unit tests cover
-determinism, undo/redo and transform composition.
+Milestone 2 complete: the parametric program layer (agent-authored
+functions, deterministic replay, atomic undo) is tested end-to-end; 12
+engine unit tests cover determinism, undo/redo, parameter rebuilds and
+expression safety.

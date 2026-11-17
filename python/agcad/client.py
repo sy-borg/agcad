@@ -231,14 +231,37 @@ class Agcad:
     def close_document(self, doc: int) -> dict[str, Any]:
         return self._request("close_document", doc=doc)
 
+    # -- parameters (the agent-authored "function") ---------------------------
+
+    def set_parameter(
+        self,
+        doc: int,
+        name: str,
+        value: float | str,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Define or update a named parameter. ``value`` may be an
+        expression over other parameters ("wall*2"). Changing a parameter
+        replays the document program: entity ids are preserved, geometry
+        regenerates."""
+        return self._request("set_parameter", doc=doc, name=name, value=value, description=description)
+
+    def remove_parameter(self, doc: int, name: str) -> dict[str, Any]:
+        return self._request("remove_parameter", doc=doc, name=name)
+
+    def get_parameters(self, doc: int) -> list[dict[str, Any]]:
+        return self._request("get_parameters", doc=doc)["params"]
+
     # -- modeling -----------------------------------------------------------
+    # Dimensions accept numbers or expression strings over document
+    # parameters, e.g. size=("plate", 40, "wall*3").
 
     def add_box(
         self,
         doc: int,
         name: str = "box",
-        center: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        size: tuple[float, float, float] = (10.0, 10.0, 10.0),
+        center: tuple[float | str, float | str, float | str] = (0.0, 0.0, 0.0),
+        size: tuple[float | str, float | str, float | str] = (10.0, 10.0, 10.0),
         color: tuple[float, float, float, float] | None = None,
     ) -> dict[str, Any]:
         return self._request("add_box", doc=doc, name=name, center=center, size=size, color=color)
@@ -247,8 +270,8 @@ class Agcad:
         self,
         doc: int,
         name: str = "sphere",
-        center: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        radius: float = 5.0,
+        center: tuple[float | str, float | str, float | str] = (0.0, 0.0, 0.0),
+        radius: float | str = 5.0,
         segments: int | None = None,
         color: tuple[float, float, float, float] | None = None,
     ) -> dict[str, Any]:
@@ -260,9 +283,9 @@ class Agcad:
         self,
         doc: int,
         name: str = "cylinder",
-        center: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        radius: float = 5.0,
-        height: float = 10.0,
+        center: tuple[float | str, float | str, float | str] = (0.0, 0.0, 0.0),
+        radius: float | str = 5.0,
+        height: float | str = 10.0,
         segments: int | None = None,
         color: tuple[float, float, float, float] | None = None,
     ) -> dict[str, Any]:
@@ -276,9 +299,9 @@ class Agcad:
         self,
         doc: int,
         entity: int,
-        translation: tuple[float, float, float] | None = None,
-        rotation_deg: tuple[float, float, float] | None = None,
-        scale: tuple[float, float, float] | None = None,
+        translation: tuple[float | str, float | str, float | str] | None = None,
+        rotation_deg: tuple[float | str, float | str, float | str] | None = None,
+        scale: tuple[float | str, float | str, float | str] | None = None,
     ) -> dict[str, Any]:
         """Set any subset of the placement; omitted parts are kept."""
         return self._request(
