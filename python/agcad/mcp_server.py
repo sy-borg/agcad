@@ -1,0 +1,265 @@
+"""Minimal Model Context Protocol (MCP) server for agcad — stdlib only.
+
+Speaks newline-delimited JSON-RPC 2.0 on stdio (the MCP stdio transport)
+and forwards tool calls to the agcad command bus. Deliberately depends on
+nothing but the `agcad` client package: the protocol surface we need
+(initialize, tools/list, tools/call, ping) is small, and zero deps beats
+SDK version drift.
+
+Design rules:
+- One tool per *intent*, not per command: `agcad_execute` runs a batch of
+  bus commands in one call (MCP round-trips are expensive).
+- Token economy: mesh payloads are summarized to stats (bbox, tri count).
+  Full meshes are available via the Python client, not the model.
+- The `instructions` field in the initialize result teaches the agent the
+  command language — hosts like opencode inject it into the system prompt.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any
+
+from .client import Agcad, AgcadError
+
+SERVER_INFO = {"name": "agcad", "version": "0.2.0"}
+DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+MAX_BATCH = 500
+
+INSTRUCTIONS = """agcad is a headless parametric CAD for 3D printing.
+A document holds a program: every modeling command is recorded, dimensions may be
+expressions over named parameters ("wall*2"). set_parameter replays the program
+deterministically (entity ids stay stable). undo/redo revert one command each and
+restore parameters + program + geometry atomically.
+Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
+Workflow: create_document -> set_parameter(...) -> add primitives with expression
+dimensions -> transform -> agcad_scene to verify. Failed commands report a hint;
+fix the named issue and retry. Export/render milestones are pending."""
+
+EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
+{"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
+Commands: create_document{name}, close_document{doc},
+set_parameter{doc,name,value(number|string expression),description?},
+remove_parameter{doc,name}, get_parameters{doc},
+add_box{doc,name,center:[x,y,z],size:[w,d,h],color?},
+add_sphere{doc,name,center,radius,segments?,color?},
+add_cylinder{doc,name,center,radius,height,segments?,color?},
+transform{doc,entity,translation?,rotation_deg?,scale?} (only provided parts change),
+set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc}.
+Numeric arguments accept expression strings over parameters. Commands run in order;
+execution stops at the first error (reported with a recovery hint)."""
+
+SCENE_DESCRIPTION = """Inspect an agcad document: parameters and entities with
+placement and mesh statistics (bbox, vertex/triangle counts — no raw meshes)."""
+
+TOOLS = [
+    {
+        "name": "agcad_execute",
+        "description": EXECUTE_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "commands": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Command objects, executed in order",
+                },
+            },
+            "required": ["commands"],
+        },
+    },
+    {
+        "name": "agcad_scene",
+        "description": SCENE_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "doc": {"type": "integer", "description": "Document id from create_document"},
+            },
+            "required": ["doc"],
+        },
+    },
+]
+
+
+# --- result summarization (token economy) ------------------------------------
+
+
+def mesh_stats(mesh: dict) -> dict:
+    positions = mesh.get("positions") or []
+    if positions:
+        mins = [min(p[a] for p in positions) for a in range(3)]
+        maxs = [max(p[a] for p in positions) for a in range(3)]
+        bbox = [[round(v, 3) for v in mins], [round(v, 3) for v in maxs]]
+    else:
+        bbox = None
+    return {
+        "verts": len(positions),
+        "tris": len(mesh.get("indices") or []) // 3,
+        "bbox": bbox,
+    }
+
+
+def summarize(obj: Any) -> Any:
+    """Replace every `mesh` payload with its stats, recursively."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k == "mesh" and isinstance(v, dict):
+                out[k] = mesh_stats(v)
+            else:
+                out[k] = summarize(v)
+        return out
+    if isinstance(obj, list):
+        return [summarize(v) for v in obj]
+    return obj
+
+
+# --- the server ---------------------------------------------------------------
+
+
+class McpServer:
+    def __init__(self) -> None:
+        self._cad: Agcad | None = None
+
+    @property
+    def cad(self) -> Agcad:
+        # Spawn the engine lazily so `tools/list` works even without a binary.
+        if self._cad is None:
+            self._cad = Agcad.spawn()
+        return self._cad
+
+    # -- MCP methods ---------------------------------------------------------
+
+    def handle(self, msg: dict) -> dict | None:
+        method = msg.get("method")
+        rid = msg.get("id")
+        if rid is None:
+            return None  # notifications get no response
+        try:
+            if method == "initialize":
+                requested = (msg.get("params") or {}).get("protocolVersion")
+                result = {
+                    # Echo the client's revision when offered (spec-safe:
+                    # answering with a supported version is what counts).
+                    "protocolVersion": requested or DEFAULT_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": SERVER_INFO,
+                    "instructions": INSTRUCTIONS,
+                }
+            elif method == "tools/list":
+                result = {"tools": TOOLS}
+            elif method == "tools/call":
+                params = msg.get("params") or {}
+                result = self._dispatch_tool(params.get("name"), params.get("arguments") or {})
+            elif method == "ping":
+                result = {}
+            else:
+                return self._error(rid, -32601, f"method not found: {method}")
+        except Exception as e:  # noqa: BLE001 — protocol boundary
+            return self._error(rid, -32603, f"{type(e).__name__}: {e}")
+        return {"jsonrpc": "2.0", "id": rid, "result": result}
+
+    @staticmethod
+    def _error(rid: Any, code: int, message: str) -> dict:
+        return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
+
+    # -- tools -----------------------------------------------------------------
+
+    def _dispatch_tool(self, name: Any, args: dict) -> dict:
+        if name == "agcad_execute":
+            return self._tool_execute(args)
+        if name == "agcad_scene":
+            return self._tool_scene(args)
+        return {
+            "content": [{"type": "text", "text": f"unknown tool: {name}"}],
+            "isError": True,
+        }
+
+    def _tool_execute(self, args: dict) -> dict:
+        commands = args.get("commands")
+        if not isinstance(commands, list):
+            return {"content": [{"type": "text", "text": "commands must be an array"}], "isError": True}
+        if len(commands) > MAX_BATCH:
+            return {
+                "content": [{"type": "text", "text": f"batch too large: {len(commands)} > {MAX_BATCH}"}],
+                "isError": True,
+            }
+
+        results: list[dict] = []
+        error: str | None = None
+        for i, cmd in enumerate(commands):
+            if not isinstance(cmd, dict) or "method" not in cmd:
+                error = f"step {i}: command must be an object with a 'method' key"
+                break
+            method = cmd["method"]
+            params = cmd.get("params")
+            if params is None:
+                params = {k: v for k, v in cmd.items() if k != "method"}
+            try:
+                res = self.cad.call(method, params)
+                results.append({"step": i, "method": method, "result": summarize(res)})
+            except AgcadError as e:
+                results.append({"step": i, "method": method, "error": str(e)})
+                error = str(e)
+                break
+            except Exception as e:  # noqa: BLE001
+                results.append({"step": i, "method": method, "error": f"{type(e).__name__}: {e}"})
+                error = "unexpected failure, see last step"
+                break
+
+        payload: dict[str, Any] = {"executed": len(results), "results": results}
+        if error is not None:
+            payload["stopped_early"] = True
+            payload["remaining"] = len(commands) - len(results)
+            payload["hint"] = "fix the error in the last result, then re-send the remaining commands"
+        return {"content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}]}
+
+    def _tool_scene(self, args: dict) -> dict:
+        try:
+            doc = int(args["doc"])
+        except (KeyError, TypeError, ValueError):
+            return {"content": [{"type": "text", "text": "integer 'doc' is required"}], "isError": True}
+        try:
+            scene = self.cad.call("get_scene", {"doc": doc})
+            params = self.cad.call("get_parameters", {"doc": doc})
+        except AgcadError as e:
+            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+
+        entities = []
+        for e in scene["entities"]:
+            stats = mesh_stats(e["mesh"])
+            entities.append(
+                {
+                    "id": e["id"],
+                    "name": e["name"],
+                    "translation": e["translation"],
+                    "rotation_deg": e["rotation_deg"],
+                    "scale": e["scale"],
+                    "color": e["color"],
+                    **stats,
+                }
+            )
+        payload = {"doc": doc, "parameters": params["params"], "entities": entities}
+        return {"content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}]}
+
+
+def main() -> None:
+    """MCP stdio loop: one JSON-RPC message per line."""
+    server = McpServer()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # unparseable lines get no response (id unknowable)
+        response = server.handle(msg)
+        if response is not None:
+            sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

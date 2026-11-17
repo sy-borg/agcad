@@ -6,9 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "agcad"
 version = "0.1.0"
 description = "Python client for agcad — a CAD built for AI agents"
-readme = "../README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [tool.setuptools]
 packages = ["agcad"]
+
+[project.scripts]
+agcad-mcp = "agcad.mcp_server:main"

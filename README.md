@@ -86,6 +86,52 @@ This is the substrate for the target workflow: a vision model looks at a
 picture, the agent writes the parametric program, renders it headless,
 compares, and iterates — the user never touches a function.
 
+## Exposing it to an agent: MCP
+
+The bus is the API; the MCP server is just another adapter over it
+(like the viewer). Ships as a **stdlib-only** MCP server — no SDK, no
+dependency drift — wrapping the Python client:
+
+```sh
+.venv/bin/agcad-mcp        # or: python -m agcad.mcp_server
+```
+
+Two tools (one per *intent*, not per command — MCP round-trips are expensive):
+
+| Tool | What it does |
+|---|---|
+| `agcad_execute` | Batch of bus commands in one call; stops at the first error with a recovery hint |
+| `agcad_scene` | Compact state: parameters + entities with placement and mesh stats (no raw meshes — token economy) |
+
+The initialize handshake returns **server instructions** that MCP hosts
+inject into the agent's system prompt — the agent learns the command
+language from the server itself, no README required.
+
+### opencode
+
+```sh
+opencode mcp add agcad -- /home/sa/src/agcad/.venv/bin/agcad-mcp
+# or in opencode.json(c):
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "agcad": { "type": "local", "command": ["/home/sa/src/agcad/.venv/bin/agcad-mcp"] }
+    }
+  }
+}
+```
+
+Tools then appear as `agcad_agcad_execute` (direct) or
+`tools.agcad.agcad_execute(...)` in Code Mode. The engine lives in the
+server process, so documents persist across tool calls within a session.
+
+### Claude Desktop and other hosts
+
+```json
+{ "mcpServers": { "agcad": { "command": "/home/sa/src/agcad/.venv/bin/agcad-mcp" } } }
+```
+
 ## Quickstart
 
 ```sh
@@ -120,9 +166,12 @@ with Agcad.spawn() as cad:
 - [ ] **Mesh booleans via Manifold** + STL/3MF export — 3D printing needs
       watertight solids more than full B-rep; OCCT can come later
 - [ ] Headless `render_offscreen` (PNG) + camera control — the feedback
-      loop that lets a vision model compare render vs. picture
+      loop that lets a vision model compare render vs. picture; expose it
+      as an MCP tool returning an image content block
 - [ ] Sketch/constraint layer (2D solver on top of the bus)
 - [ ] `scene_changed` push notifications for the viewer
+- [ ] Rust MCP server (single self-contained binary; the Python one is
+      already adapter-clean)
 - [ ] PyO3 bindings (native-speed path for hot loops, same API)
 - [ ] Occlusion picking in the viewer
 

@@ -195,6 +195,11 @@ class Agcad:
 
     # -- plumbing -----------------------------------------------------------
 
+    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Public raw command invocation. Used by the MCP server and power
+        users who want the full bus without typed wrappers."""
+        return self._request(method, **(params or {}))
+
     def _request(self, method: str, **params: Any) -> dict[str, Any]:
         rid = next(self._ids)
         self._t.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
