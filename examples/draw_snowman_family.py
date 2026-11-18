@@ -73,6 +73,9 @@ def main() -> None:
             result = cad.call(method, {"doc": doc, **params})
             if "arm" in params["name"]:
                 arm_ids[params["name"]] = result["entity"]
+            if "hat" in params["name"]:
+                # cylinders are Y-axis (nose convention) — stand hats up
+                cad.transform(doc, result["entity"], rotation_deg=(90, 0, 0))
 
     # Tilt the arms ±20° about Z, from the recorded ids.
     for p, *_ in FAMILY:

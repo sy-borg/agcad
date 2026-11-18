@@ -181,24 +181,41 @@ def _find_server() -> list[str]:
 
 class Agcad:
     """Synchronous, agent-friendly client. Every method maps 1:1 to a
-    command on the bus and raises :class:`AgcadError` on rejection."""
+    command on the bus and raises :class:`AgcadError` on rejection.
 
-    def __init__(self, transport: _LineTransport) -> None:
+    If the connection dies (server restart, network blip) the client
+    reconnects transparently on the next call. Note: documents live in
+    the server's memory, so after a restart the engine is empty — the
+    reconnect just keeps the client usable (the agent sees a clean
+    unknown-document error instead of permanent connection failures)."""
+
+    def __init__(self, transport: _LineTransport, reconnect: tuple | None = None) -> None:
         self._t = transport
         self._ids = itertools.count(1)
+        # How to build a fresh transport: ("tcp", host, port) or ("spawn", argv).
+        self._reconnect = reconnect
 
     # -- constructors -------------------------------------------------------
 
     @classmethod
     def spawn(cls, argv: Iterable[str] | None = None) -> "Agcad":
         """Start a fresh server subprocess (stdio transport)."""
-        return cls(AgcadStdioTransport(argv if argv is not None else _find_server()))
+        args = list(argv) if argv is not None else _find_server()
+        return cls(AgcadStdioTransport(args), reconnect=("spawn", args))
 
     @classmethod
     def connect(cls, host: str = "127.0.0.1", port: int = 7860) -> "Agcad":
         """Attach to a running server. TCP mode shares one document space
         across all connections; mutations are broadcast to the others."""
-        return cls(AgcadTcpTransport(host, port))
+        return cls(AgcadTcpTransport(host, port), reconnect=("tcp", host, port))
+
+    def _fresh_transport(self) -> _LineTransport:
+        if self._reconnect is None:
+            raise AgcadError("connection lost (no reconnect info available)")
+        kind = self._reconnect
+        if kind[0] == "tcp":
+            return AgcadTcpTransport(kind[1], kind[2])
+        return AgcadStdioTransport(kind[1])
 
     # -- plumbing -----------------------------------------------------------
 
@@ -207,7 +224,29 @@ class Agcad:
         users who want the full bus without typed wrappers."""
         return self._request(method, **(params or {}))
 
+    @staticmethod
+    def _is_connection_error(e: AgcadError) -> bool:
+        text = str(e)
+        return any(
+            marker in text
+            for marker in ("connection closed", "connection to server lost", "not running")
+        )
+
     def _request(self, method: str, **params: Any) -> dict[str, Any]:
+        try:
+            return self._do_request(method, **params)
+        except AgcadError as e:
+            if self._is_connection_error(e):
+                # Transport died (server restart, network blip): rebuild it
+                # once and retry, so the client stays usable. A restarted
+                # server has an empty engine — callers get honest
+                # unknown-document errors instead of connection failures.
+                self._t.close()
+                self._t = self._fresh_transport()
+                return self._do_request(method, **params)
+            raise
+
+    def _do_request(self, method: str, **params: Any) -> dict[str, Any]:
         rid = next(self._ids)
         self._t.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
         response = self._t.recv(rid)
