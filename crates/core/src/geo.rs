@@ -67,34 +67,68 @@ pub fn box_mesh(size: [f64; 3]) -> Mesh {
 }
 
 /// UV sphere of `radius` centered on the origin, poles on ±Y.
-/// Vertex layout is stable: `(segments + 1) * segments` vertices.
+/// Vertex layout is stable: one pole vertex per pole plus
+/// `(segments - 1) * segments` ring vertices. Poles are proper triangle
+/// fans — no degenerate quads, so the mesh is a closed solid that mesh
+/// booleans accept.
 pub fn sphere_mesh(radius: f64, segments: u32) -> Mesh {
     let segs = segments.max(3);
     let mut m = Mesh::default();
 
-    for j in 0..=segs {
+    // Top pole (+Y), then rings j = 1..=segs-1, then bottom pole (-Y).
+    let top = 0u32;
+    m.positions.push([0.0, radius as f32, 0.0]);
+    m.normals.push([0.0, 1.0, 0.0]);
+    let mut idx = 1u32;
+    let mut ring_start = vec![0u32; (segs - 1) as usize];
+    for j in 1..segs {
+        ring_start[(j - 1) as usize] = idx;
         let phi = (j as f64 / segs as f64) * std::f64::consts::PI;
         let (sp, cp) = phi.sin_cos();
         for i in 0..segs {
             let theta = (i as f64 / segs as f64) * TAU;
             let (st, ct) = theta.sin_cos();
-            // Y-up sphere.
+            // Y-up sphere; normal = normalized position.
             let n = [sp * ct, cp, sp * st];
             m.positions.push([n[0], n[1], n[2]].map(|v| (v * radius) as f32));
             m.normals.push(n.map(|v| v as f32));
+            idx += 1;
+        }
+    }
+    let bottom = idx;
+    m.positions.push([0.0, -(radius as f32), 0.0]);
+    m.normals.push([0.0, -1.0, 0.0]);
+
+    let ring = |j: u32| -> u32 { ring_start[(j - 1) as usize] };
+
+    // Quads between consecutive rings (j, j+1), j = 1..segs-1. Winding is
+    // CCW from outside (verified by kernel difference behavior).
+    for j in 1..segs - 1 {
+        let a0 = ring(j);
+        let c0 = ring(j + 1);
+        for i in 0..segs {
+            let a = a0 + i;
+            let b = a0 + (i + 1) % segs;
+            let c = c0 + i;
+            let d = c0 + (i + 1) % segs;
+            m.indices.extend_from_slice(&[a, b, c, b, d, c]);
         }
     }
 
-    let cols = segs;
-    for j in 0..segs {
-        for i in 0..segs {
-            let a = j * cols + i;
-            let b = j * cols + (i + 1) % cols;
-            let c = (j + 1) * cols + i;
-            let d = (j + 1) * cols + (i + 1) % cols;
-            let (a, b, c, d) = (a as u32, b as u32, c as u32, d as u32);
-            m.indices.extend_from_slice(&[a, c, b, b, c, d]);
-        }
+    // Top fan: pole to first ring.
+    let r1 = ring(1);
+    for i in 0..segs {
+        let a = r1 + i;
+        let b = r1 + (i + 1) % segs;
+        m.indices.extend_from_slice(&[top, b, a]);
+    }
+
+    // Bottom fan: last ring to pole.
+    let rl = ring(segs - 1);
+    for i in 0..segs {
+        let a = rl + i;
+        let b = rl + (i + 1) % segs;
+        m.indices.extend_from_slice(&[a, b, bottom]);
     }
 
     m
@@ -124,7 +158,9 @@ pub fn cylinder_mesh(radius: f64, height: f64, segments: u32) -> Mesh {
         let j = (i + 1) % segs;
         let b1 = (2 * j) as u32;
         let t1 = (2 * j + 1) as u32;
-        m.indices.extend_from_slice(&[b0, b1, t0, t0, b1, t1]);
+        // CCW from outside: upper ring first, then down to the lower ring
+        // (matches the sphere's ring-quad orientation).
+        m.indices.extend_from_slice(&[t0, t1, b0, t1, b1, b0]);
     }
 
     // Cap helper: fan around a center vertex.
@@ -143,9 +179,9 @@ pub fn cylinder_mesh(radius: f64, height: f64, segments: u32) -> Mesh {
             let a = first + i as u32;
             let b = first + ((i + 1) % segs) as u32;
             if ny > 0.0 {
-                m.indices.extend_from_slice(&[center, a, b]);
-            } else {
                 m.indices.extend_from_slice(&[center, b, a]);
+            } else {
+                m.indices.extend_from_slice(&[a, b, center]);
             }
         }
     };
@@ -174,7 +210,7 @@ mod tests {
 
         let s = sphere_mesh(1.0, 16);
         assert_watertight(&s);
-        assert_eq!(s.positions.len(), 17 * 16);
+        assert_eq!(s.positions.len(), (16 - 1) * 16 + 2);
 
         let c = cylinder_mesh(1.0, 2.0, 12);
         assert_watertight(&c);

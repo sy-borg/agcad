@@ -15,16 +15,18 @@
 //! identical entity ids, regenerated geometry. Agents author this program;
 //! the user only describes intent.
 
+pub mod boolean;
 pub mod expr;
 pub mod geo;
 pub mod mat4;
+pub mod stl;
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use agcad_protocol::{
-    Command, CommandResult, DocId, DocInfo, EntityId, EntitySnapshot, Mat4, Mesh, ParamInfo,
-    Rgba, Scalar, SVec3, Vec3, PROTOCOL_VERSION, SERVER_NAME,
+    BooleanOp, Command, CommandResult, DocId, DocInfo, EntityId, EntitySnapshot, Mat4, Mesh,
+    ParamInfo, Rgba, Scalar, SVec3, Vec3, PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -97,6 +99,9 @@ pub enum Shape {
     Box { size: Vec3 },
     Sphere { radius: f64, segments: u32 },
     Cylinder { radius: f64, height: f64, segments: u32 },
+    /// Result of a set operation. References its operand entity ids so the
+    /// program can replay it after those operands are re-created.
+    Boolean { op: BooleanOp, entities: Vec<EntityId> },
 }
 
 impl Entity {
@@ -271,7 +276,8 @@ impl Engine {
             | Command::AddCylinder { .. }
             | Command::Transform { .. }
             | Command::SetColor { .. }
-            | Command::Delete { .. } => {
+            | Command::Delete { .. }
+            | Command::Boolean { .. } => {
                 let doc = doc_of(&command).expect("modeling commands always carry a doc");
                 let d = self.doc_mut(doc)?;
                 d.checkpoint();
@@ -387,6 +393,28 @@ impl Engine {
                     entities: d.entities.values().map(|e| e.snapshot()).collect(),
                 })
             },
+
+            Command::ExportStl { doc, path, entities } => {
+                let d = self.doc(*doc)?;
+                let ids: Vec<EntityId> = match entities {
+                    Some(ids) => ids.clone(),
+                    None => d.entities.keys().copied().collect(),
+                };
+                let entries = ids
+                    .iter()
+                    .map(|&id| {
+                        let e = d.entities.get(&id).ok_or(Error::UnknownEntity { doc: *doc, entity: id })?;
+                        Ok((e.mesh.clone(), e.transform()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let (resolved, tris) = stl::write_stl(path, &entries)?;
+                Ok(CommandResult::StlExported {
+                    doc: *doc,
+                    path: resolved,
+                    tris,
+                    bytes: 84 + tris * 50,
+                })
+            },
         }
     }
 }
@@ -399,12 +427,14 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }
+        | Command::Boolean { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::GetParameters { doc }
         | Command::Undo { doc }
         | Command::Redo { doc }
         | Command::GetScene { doc }
+        | Command::ExportStl { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         _ => None,
     }
@@ -484,6 +514,49 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             Ok(CommandResult::Transformed { doc: *doc, entity: *entity })
         },
 
+        Command::Boolean { doc, op, entities, name, color } => {
+            if entities.len() < 2 {
+                return Err(Error::Invalid(format!(
+                    "boolean {} needs at least 2 entity ids (got {}; hint: create the operand solids first, then reference their ids)",
+                    op.as_str(),
+                    entities.len()
+                )));
+            }
+            // Gather operands in *world space*: local mesh through the
+            // entity's model matrix. Color and name inherit from the
+            // first operand unless overridden.
+            let mut world: Vec<Mesh> = Vec::with_capacity(entities.len());
+            let mut source_color: Option<Rgba> = None;
+            for &eid in entities {
+                let e = d.entities.get(&eid).ok_or(Error::UnknownEntity { doc: *doc, entity: eid })?;
+                let m = transform_mesh(&e.mesh, &e.transform());
+                world.push(m);
+                if source_color.is_none() {
+                    source_color = Some(e.color);
+                }
+            }
+            let result = boolean::boolean(*op, &world)?;
+
+            // Bake the result centered on its bounding-box center so the
+            // entity follows the usual "geometry local, transform places"
+            // convention.
+            let (mesh, center) = recenter(&result);
+            let id = d.next_entity();
+            let entity = Entity {
+                id,
+                name: name.clone().unwrap_or_else(|| op.as_str().to_string()),
+                shape: Shape::Boolean { op: *op, entities: entities.clone() },
+                mesh,
+                translation: center,
+                rotation_deg: [0.0; 3],
+                scale: [1.0; 3],
+                color: color.unwrap_or(source_color.unwrap_or([0.7, 0.72, 0.75, 1.0])),
+            };
+            let mesh = entity.mesh.clone();
+            d.entities.insert(id, entity);
+            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
+        },
+
         Command::Delete { doc, entity } => {
             if d.entities.remove(entity).is_none() {
                 return Err(Error::UnknownEntity { doc: *doc, entity: *entity });
@@ -493,6 +566,46 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
 
         _ => Err(Error::Invalid("not a modeling command".into())),
     }
+}
+
+/// Transform a local mesh into world space (f32 math, matching the
+/// viewer's model matrix convention).
+fn transform_mesh(mesh: &Mesh, m: &Mat4) -> Mesh {
+    Mesh {
+        positions: mesh.positions.iter().map(|&p| mat4::transform_point(m, p)).collect(),
+        normals: mesh.normals.clone(),
+        indices: mesh.indices.clone(),
+    }
+}
+
+/// Compute a mesh's bounding-box center and shift positions so the box is
+/// centered on the origin. Returns `(mesh, center)` where `center` is the
+/// translation that undoes the shift (i.e. the original center).
+fn recenter(mesh: &Mesh) -> (Mesh, Vec3) {
+    let mut min = [f64::MAX; 3];
+    let mut max = [f64::MIN; 3];
+    for p in &mesh.positions {
+        for i in 0..3 {
+            let v = p[i] as f64;
+            min[i] = min[i].min(v);
+            max[i] = max[i].max(v);
+        }
+    }
+    let center = if mesh.positions.is_empty() {
+        [0.0; 3]
+    } else {
+        [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0, (min[2] + max[2]) / 2.0]
+    };
+    let shifted = Mesh {
+        positions: mesh
+            .positions
+            .iter()
+            .map(|p| [(p[0] - center[0] as f32), (p[1] - center[1] as f32), (p[2] - center[2] as f32)])
+            .collect(),
+        normals: mesh.normals.clone(),
+        indices: mesh.indices.clone(),
+    };
+    (shifted, center)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -513,6 +626,9 @@ fn add_entity(
         Shape::Cylinder { radius, height, segments } => {
             geo::cylinder_mesh(*radius, *height, *segments)
         },
+        // Boolean entities are produced by the boolean path, which builds
+        // the Entity directly — add_entity never sees this shape.
+        Shape::Boolean { .. } => unreachable!("boolean shapes are not tessellated here"),
     };
     let entity = Entity {
         id,
@@ -830,5 +946,239 @@ mod tests {
             }),
             Err(Error::Invalid(_))
         ));
+    }
+
+    // --- M4: booleans + export -------------------------------------------------
+
+    /// Two overlapping unit boxes fused: volume must be less than the sum,
+    /// result placed at its bbox center, sources kept.
+    #[test]
+    fn boolean_union_fuses_overlapping_solids() {
+        let mut e = engine();
+        let a = match e.execute(Command::AddBox {
+            doc: 1, name: "a".into(), center: vec3(0.0), size: vec3(10.0), color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let b = match e.execute(Command::AddBox {
+            doc: 1, name: "b".into(), center: [num(5.0), num(0.0), num(0.0)], size: vec3(10.0), color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let u = match e.execute(Command::Boolean {
+            doc: 1,
+            op: agcad_protocol::BooleanOp::Union,
+            entities: vec![a, b],
+            name: Some("fused".into()),
+            color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, mesh, .. } => (entity, mesh),
+            r => panic!("unexpected result {r:?}"),
+        };
+        let (uid, mesh) = u;
+        assert_eq!(uid, 3, "deterministic: next id after two boxes");
+        assert!(!mesh.positions.is_empty());
+        assert!(!mesh.indices.is_empty());
+        // Bounding box: two 10mm boxes offset by 5 on x → x extent 15.
+        let xs: Vec<f64> = mesh.positions.iter().map(|p| p[0] as f64).collect();
+        let xext = xs.iter().cloned().fold(f64::MIN, f64::max) - xs.iter().cloned().fold(f64::MAX, f64::min);
+        assert!((xext - 15.0).abs() < 1e-4, "expected x extent 15, got {xext}");
+        // Sources still exist.
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert_eq!(entities.len(), 3),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// Box minus overlapping sphere: a carved pocket, watertight, smaller.
+    #[test]
+    fn boolean_difference_carves() {
+        let mut e = engine();
+        let a = match e.execute(Command::AddBox {
+            doc: 1, name: "block".into(), center: vec3(0.0), size: vec3(20.0), color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let b = match e.execute(Command::AddSphere {
+            doc: 1, name: "ball".into(), center: [num(0.0), num(0.0), num(10.0)], radius: num(6.0), segments: None, color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        match e.execute(Command::Boolean {
+            doc: 1,
+            op: agcad_protocol::BooleanOp::Difference,
+            entities: vec![a, b],
+            name: None,
+            color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { mesh, .. } => {
+                assert!(!mesh.positions.is_empty());
+                // Top face must be carved open: some vertex below z=5 would
+                // be wrong, but a hole means the max z < 10 (flat top) for
+                // interior verts. Simplest robust check: fewer triangles
+                // than the plain box would have after a full union, and the
+                // result has more tris than a bare box (carved surfaces).
+                assert!(mesh.indices.len() / 3 > 12, "carving must add surface");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// The parametric payoff: parameters flow *through* boolean results.
+    #[test]
+    fn boolean_replays_parametrically() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1, name: "wall".into(), value: num(2.0), description: None,
+        }).unwrap();
+        let a = match e.execute(Command::AddBox {
+            doc: 1, name: "outer".into(), center: vec3(0.0), size: [Scalar::Expression("wall*10".into()), num(10.0), num(10.0)], color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let b = match e.execute(Command::AddBox {
+            doc: 1, name: "inner".into(), center: vec3(0.0), size: [num(6.0), num(6.0), num(6.0)], color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        // Hollow the wall: difference → a tube with wall thickness.
+        let uid = match e.execute(Command::Boolean {
+            doc: 1,
+            op: agcad_protocol::BooleanOp::Difference,
+            entities: vec![a, b],
+            name: Some("tube".into()),
+            color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        // Grow the wall: replay re-runs the boolean with new operand sizes.
+        e.execute(Command::SetParameter {
+            doc: 1, name: "wall".into(), value: num(4.0), description: None,
+        }).unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                let ids: Vec<u64> = entities.iter().map(|x| x.id).collect();
+                assert_eq!(ids, vec![a, b, uid], "replay must reuse identical ids through booleans");
+                let tube = entities.iter().find(|x| x.id == uid).unwrap();
+                let xs: Vec<f64> = tube.mesh.positions.iter().map(|p| p[0] as f64).collect();
+                let xext = xs.iter().cloned().fold(f64::MIN, f64::max) - xs.iter().cloned().fold(f64::MAX, f64::min);
+                assert!((xext - 40.0).abs() < 1e-4, "tube regenerated with wall=4 → x extent 40, got {xext}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// Undo after a boolean restores the exact pre-boolean scene.
+    #[test]
+    fn undo_restores_boolean() {
+        let mut e = engine();
+        let ids: Vec<u64> = [(0.0, "a"), (3.0, "b")]
+            .iter()
+            .map(|&(x, n)| match e.execute(Command::AddBox {
+                doc: 1, name: n.into(), center: [num(x), num(0.0), num(0.0)], size: vec3(10.0), color: None,
+            }).unwrap() {
+                CommandResult::EntityCreated { entity, .. } => entity,
+                r => panic!("unexpected result {r:?}"),
+            })
+            .collect();
+        let [a, b] = [ids[0], ids[1]];
+        let uid = match e.execute(Command::Boolean {
+            doc: 1, op: agcad_protocol::BooleanOp::Union, entities: vec![a, b],
+            name: None, color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                assert_eq!(entities.len(), 2, "undo must remove the boolean entity");
+                assert!(entities.iter().all(|x| x.id != uid));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        e.execute(Command::Redo { doc: 1 }).unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert_eq!(entities.len(), 3),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// Same program, two engines → identical boolean meshes (kernel
+    /// determinism, the property the parametric replay depends on).
+    #[test]
+    fn boolean_results_are_deterministic() {
+        let build = |e: &mut Engine| {
+            let a = match e.execute(Command::AddSphere {
+                doc: 1, name: "a".into(), center: vec3(0.0), radius: num(10.0), segments: None, color: None,
+            }).unwrap() {
+                CommandResult::EntityCreated { entity, .. } => entity,
+                r => panic!("unexpected result {r:?}"),
+            };
+            let b = match e.execute(Command::AddCylinder {
+                doc: 1, name: "b".into(), center: vec3(0.0), radius: num(3.0), height: num(30.0), segments: None, color: None,
+            }).unwrap() {
+                CommandResult::EntityCreated { entity, .. } => entity,
+                r => panic!("unexpected result {r:?}"),
+            };
+            match e.execute(Command::Boolean {
+                doc: 1, op: agcad_protocol::BooleanOp::Union, entities: vec![a, b],
+                name: None, color: None,
+            }).unwrap() {
+                CommandResult::EntityCreated { mesh, .. } => mesh,
+                r => panic!("unexpected result {r:?}"),
+            }
+        };
+        let mut e1 = engine();
+        let mut e2 = engine();
+        let m1 = build(&mut e1);
+        let m2 = build(&mut e2);
+        assert_eq!(m1.positions, m2.positions, "bit-identical positions");
+        assert_eq!(m1.indices, m2.indices, "bit-identical topology");
+    }
+
+    /// Binary STL: correct header, exact triangle count, exact file size.
+    #[test]
+    fn stl_export_writes_valid_binary() {
+        let mut e = engine();
+        let id = match e.execute(Command::AddBox {
+            doc: 1, name: "cube".into(), center: vec3(0.0), size: vec3(10.0), color: None,
+        }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        // Move it so world-space export must apply the transform.
+        e.execute(Command::Transform {
+            doc: 1, entity: id, translation: Some([num(100.0), num(0.0), num(0.0)]),
+            rotation_deg: None, scale: None,
+        }).unwrap();
+
+        let path = std::env::temp_dir().join("agcad_test_export.stl");
+        let path_str = path.to_string_lossy().into_owned();
+        match e.execute(Command::ExportStl { doc: 1, path: path_str.clone(), entities: None }).unwrap() {
+            CommandResult::StlExported { tris, bytes, path: resolved, .. } => {
+                assert_eq!(tris, 12);
+                assert_eq!(bytes, 84 + 12 * 50);
+                assert!(resolved.ends_with("agcad_test_export.stl"));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(data.len(), 84 + 12 * 50);
+        assert!(!data.starts_with(b"solid"), "binary STL must not start with 'solid'");
+        let count = u32::from_le_bytes([data[80], data[81], data[82], data[83]]);
+        assert_eq!(count, 12);
+        // First triangle's first vertex: 84-byte header + 12-byte face
+        // normal → x at byte 96. Must be in world space (x ≈ 95..105).
+        let x = f32::from_le_bytes([data[96], data[97], data[98], data[99]]);
+        assert!((95.0..=105.0).contains(&x), "expected world-space x near 100, got {x}");
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -205,13 +205,14 @@ with Agcad.spawn() as cad:
 - [x] Parametric layer: parameters, expressions, program replay (M2)
 - [x] MCP server + shared-engine live preview: `scene_changed` broadcast,
       viewer auto-refresh, MCP attach mode (M3)
-- [ ] **Mesh booleans via Manifold** + STL/3MF export — 3D printing needs
-      watertight solids more than full B-rep; OCCT can come later
+- [x] **Mesh booleans via Manifold** (`manifold-rust`, pure Rust, bit-deterministic):
+      `boolean{op: union|difference|intersection}` in world space, result is a
+      new entity that replays parametrically; plus `export_stl` (binary, world
+      space, slicer-ready). 3MF when a project asks for it
 - [ ] Headless `render_offscreen` (PNG) + camera control — the feedback
       loop that lets a vision model compare render vs. picture; expose it
       as an MCP tool returning an image content block
 - [ ] Sketch/constraint layer (2D solver on top of the bus)
-- [ ] `scene_changed` push notifications for the viewer
 - [ ] Rust MCP server (single self-contained binary; the Python one is
       already adapter-clean)
 - [ ] PyO3 bindings (native-speed path for hot loops, same API)

@@ -69,3 +69,12 @@ pub fn scale(s: [f64; 3]) -> Mat4 {
 pub fn compose(t: [f64; 3], rotation_deg: [f64; 3], s: [f64; 3]) -> Mat4 {
     mul(&translation(t), &mul(&rotation_xyz_deg(rotation_deg), &scale(s)))
 }
+
+/// Transform a point by a model matrix (w = 1, no perspective).
+pub fn transform_point(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
+        m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
+        m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
+    ]
+}

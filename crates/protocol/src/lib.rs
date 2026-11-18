@@ -117,10 +117,10 @@ impl RpcResponse {
 /// Every operation the bus understands. `method` is the JSON-RPC method
 /// name; all remaining variant fields live inside `params`.
 ///
-/// Modeling commands (Add*, Transform, SetColor, Delete) are appended to
-/// the document program and replayed when parameters change. Session
-/// commands (initialize, undo/redo, get_scene, ...) are not part of the
-/// program.
+/// Modeling commands (Add*, Transform, SetColor, Delete, Boolean) are
+/// appended to the document program and replayed when parameters change.
+/// Session commands (initialize, undo/redo, get_scene, export_stl, ...)
+/// are not part of the program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Command {
@@ -161,6 +161,24 @@ pub enum Command {
         color: Option<Rgba>,
     },
 
+    /// Boolean set operation over existing entities, evaluated in
+    /// **world space** (each operand's transform is applied first). The
+    /// result becomes a new entity, placed at the center of its bounding
+    /// box with identity rotation/scale. Sources are kept — delete them
+    /// explicitly if you only want the fused result.
+    Boolean {
+        doc: DocId,
+        /// `union`, `difference` or `intersection`.
+        op: BooleanOp,
+        /// Operand entity ids, in order. For `difference` the first id is
+        /// the solid everything else is subtracted from.
+        entities: Vec<EntityId>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
     /// Replaces only the components that are provided (`None` keeps the
     /// current value). Rotation is extrinsic XYZ, applied X, then Y, then Z,
     /// around the entity's own origin.
@@ -194,6 +212,43 @@ pub enum Command {
     Redo { doc: DocId },
 
     GetScene { doc: DocId },
+
+    /// Write a binary STL of the selected entities' **world-space**
+    /// geometry (default: every entity in the document). A session
+    /// command, not part of the program — exporting changes no state.
+    ExportStl {
+        doc: DocId,
+        /// Filesystem path the *server* writes to; absolute paths avoid
+        /// surprises about the server's working directory.
+        path: String,
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+    },
+}
+
+/// Which set operation a [`Command::Boolean`] performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BooleanOp {
+    Union,
+    Difference,
+    Intersection,
+}
+
+impl BooleanOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Union => "union",
+            Self::Difference => "difference",
+            Self::Intersection => "intersection",
+        }
+    }
+}
+
+impl std::fmt::Display for BooleanOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Result of a successfully executed [`Command`]. Externally tagged:
@@ -214,6 +269,7 @@ pub enum CommandResult {
     Undone { doc: DocId },
     Redone { doc: DocId },
     Scene { doc: DocId, entities: Vec<EntitySnapshot> },
+    StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -34,8 +34,9 @@ deterministically (entity ids stay stable). undo/redo revert one command each an
 restore parameters + program + geometry atomically.
 Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
-dimensions -> transform -> agcad_scene to verify. Failed commands report a hint;
-fix the named issue and retry. Export/render milestones are pending."""
+dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
+verify -> export_stl for slicing. Failed commands report a hint; fix the named
+issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
@@ -46,7 +47,12 @@ add_box{doc,name,center:[x,y,z],size:[w,d,h],color?},
 add_sphere{doc,name,center,radius,segments?,color?},
 add_cylinder{doc,name,center,radius,height,segments?,color?},
 transform{doc,entity,translation?,rotation_deg?,scale?} (only provided parts change),
-set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc}.
+boolean{doc,op:"union"|"difference"|"intersection",entities:[ids],name?,color?}
+  (world-space set op; creates a NEW entity, sources are kept — delete them if
+  you only want the fused result; boolean entities replay parametrically),
+set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc},
+export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
+  slicer-ready file; not part of the program, changes no state).
 Numeric arguments accept expression strings over parameters. Commands run in order;
 execution stops at the first error (reported with a recovery hint)."""
 

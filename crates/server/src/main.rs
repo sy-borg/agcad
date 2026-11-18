@@ -96,6 +96,7 @@ fn is_mutating(command: &Command) -> bool {
             | Command::Transform { .. }
             | Command::SetColor { .. }
             | Command::Delete { .. }
+            | Command::Boolean { .. }
             | Command::SetParameter { .. }
             | Command::RemoveParameter { .. }
             | Command::CreateDocument { .. }
@@ -113,12 +114,14 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }
+        | Command::Boolean { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::Undo { doc }
         | Command::Redo { doc }
         | Command::GetScene { doc }
         | Command::GetParameters { doc }
+        | Command::ExportStl { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         Command::CreateDocument { .. } | Command::ListDocuments | Command::Initialize => None,
     }
