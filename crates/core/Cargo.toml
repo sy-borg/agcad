@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 agcad-protocol.workspace = true
 manifold-rust = "0.19.2"
+png = "0.18"

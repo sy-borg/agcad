@@ -48,7 +48,7 @@ try:
     send({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     tools = recv()["result"]["tools"]
     names = [t["name"] for t in tools]
-    assert names == ["agcad_execute", "agcad_scene"], names
+    assert names == ["agcad_execute", "agcad_scene", "agcad_render"], names
     print("tools/list: ok", names)
 
     # --- batch modeling through agcad_execute ------------------------------

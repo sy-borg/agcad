@@ -78,3 +78,68 @@ pub fn transform_point(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
         m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
     ]
 }
+
+/// Transform a homogeneous point (w = 1) by a matrix, returning the 4-vector.
+pub fn transform_h(m: &Mat4, p: [f64; 3]) -> [f64; 4] {
+    let (x, y, z) = (p[0] as f32, p[1] as f32, p[2] as f32);
+    [
+        (m[0][0] * x + m[1][0] * y + m[2][0] * z + m[3][0]) as f64,
+        (m[0][1] * x + m[1][1] * y + m[2][1] * z + m[3][1]) as f64,
+        (m[0][2] * x + m[1][2] * y + m[2][2] * z + m[3][2]) as f64,
+        (m[0][3] * x + m[1][3] * y + m[2][3] * z + m[3][3]) as f64,
+    ]
+}
+
+fn normalize(v: [f64; 3]) -> [f64; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len < 1e-12 { [0.0; 3] } else { [v[0] / len, v[1] / len, v[2] / len] }
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Right-handed look-at view matrix (OpenGL convention: camera looks down
+/// -Z in view space). Falls back to alternate up vectors when `up` is
+/// (anti)parallel to the view direction.
+pub fn look_at(eye: [f64; 3], target: [f64; 3], up: [f64; 3]) -> Mat4 {
+    let f = normalize([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
+    let mut up = up;
+    // If `up` is (anti)parallel to the view direction, pick a fallback.
+    for candidate in [up, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+        let s = normalize(cross(f, candidate));
+        if s[0] * s[0] + s[1] * s[1] + s[2] * s[2] > 0.5 {
+            up = candidate;
+            break;
+        }
+    }
+    let s = normalize(cross(f, up));
+    let u = cross(s, f);
+
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    // Column-major; rows are (s, -s·eye), (u, -u·eye), (-f, f·eye), (0,0,0,1).
+    [
+        [s[0] as f32, u[0] as f32, -f[0] as f32, 0.0],
+        [s[1] as f32, u[1] as f32, -f[1] as f32, 0.0],
+        [s[2] as f32, u[2] as f32, -f[2] as f32, 0.0],
+        [-dot(s, eye) as f32, -dot(u, eye) as f32, dot(f, eye) as f32, 1.0],
+    ]
+}
+
+/// Perspective projection, OpenGL convention (maps the -Z view frustum to
+/// NDC z ∈ [-1, 1]).
+pub fn perspective(fov_y_deg: f64, aspect: f64, near: f64, far: f64) -> Mat4 {
+    let f = (1.0 / (fov_y_deg.to_radians() * 0.5).tan()) as f32;
+    let (near, far) = (near as f32, far as f32);
+    let mut m = identity();
+    m[0][0] = f / (aspect.max(1e-6) as f32);
+    m[1][1] = f;
+    m[2][2] = (far + near) / (near - far);
+    m[2][3] = -1.0;
+    m[3][2] = 2.0 * far * near / (near - far);
+    m
+}

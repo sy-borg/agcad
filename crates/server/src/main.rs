@@ -122,6 +122,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::GetScene { doc }
         | Command::GetParameters { doc }
         | Command::ExportStl { doc, .. }
+        | Command::RenderOffscreen { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         Command::CreateDocument { .. } | Command::ListDocuments | Command::Initialize => None,
     }

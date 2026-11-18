@@ -375,3 +375,28 @@ class Agcad:
     def get_scene(self, doc: int, meshes: bool = True) -> dict[str, Any]:
         """Scene snapshot: entities with transforms, colors and meshes."""
         return self._request("get_scene", doc=doc)
+
+    def export_stl(self, doc: int, path: str, entities: list[int] | None = None) -> dict[str, Any]:
+        """Write a binary STL (world space) — a session command."""
+        return self._request("export_stl", doc=doc, path=path, entities=entities)
+
+    def render_offscreen(
+        self,
+        doc: int,
+        width: int | None = None,
+        height: int | None = None,
+        eye: tuple[float, float, float] | None = None,
+        target: tuple[float, float, float] | None = None,
+        up: tuple[float, float, float] | None = None,
+        fov_deg: float | None = None,
+        background: tuple[float, float, float, float] | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Headless software render to PNG (base64 in the result).
+
+        Omit ``eye`` for an auto-framed 3/4 view of the whole scene.
+        Deterministic: same scene + camera → identical bytes."""
+        return self._request(
+            "render_offscreen", doc=doc, width=width, height=height, eye=eye,
+            target=target, up=up, fov_deg=fov_deg, background=background, path=path,
+        )

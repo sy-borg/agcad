@@ -224,6 +224,31 @@ pub enum Command {
         #[serde(default)]
         entities: Option<Vec<EntityId>>,
     },
+
+    /// Headless software render of the document's world-space scene to a
+    /// PNG, returned inline as base64 (and optionally written to `path`).
+    /// A session command — rendering changes no state. Deterministic:
+    /// same scene + same camera → bit-identical bytes.
+    RenderOffscreen {
+        doc: DocId,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        /// Camera eye; omit for an auto-framed 3/4 view of the scene.
+        #[serde(default)]
+        eye: Option<Vec3>,
+        #[serde(default)]
+        target: Option<Vec3>,
+        #[serde(default)]
+        up: Option<Vec3>,
+        #[serde(default)]
+        fov_deg: Option<f64>,
+        #[serde(default)]
+        background: Option<Rgba>,
+        #[serde(default)]
+        path: Option<String>,
+    },
 }
 
 /// Which set operation a [`Command::Boolean`] performs.
@@ -270,6 +295,16 @@ pub enum CommandResult {
     Redone { doc: DocId },
     Scene { doc: DocId, entities: Vec<EntitySnapshot> },
     StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
+    Rendered {
+        doc: DocId,
+        width: u32,
+        height: u32,
+        /// PNG bytes, base64-encoded (the bus is line-delimited JSON).
+        png_base64: String,
+        /// Set when the command also wrote the PNG to a file.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

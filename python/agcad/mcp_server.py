@@ -35,8 +35,8 @@ restore parameters + program + geometry atomically.
 Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
 dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
-verify -> export_stl for slicing. Failed commands report a hint; fix the named
-issue and retry."""
+verify -> agcad_render to SEE the result -> export_stl for slicing. Failed
+commands report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
@@ -52,12 +52,21 @@ boolean{doc,op:"union"|"difference"|"intersection",entities:[ids],name?,color?}
   you only want the fused result; boolean entities replay parametrically),
 set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc},
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
-  slicer-ready file; not part of the program, changes no state).
+  slicer-ready file; not part of the program, changes no state),
+render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,background?,path?}
+  (headless PNG; prefer the agcad_render tool, which returns the image inline).
 Numeric arguments accept expression strings over parameters. Commands run in order;
 execution stops at the first error (reported with a recovery hint)."""
 
 SCENE_DESCRIPTION = """Inspect an agcad document: parameters and entities with
 placement and mesh statistics (bbox, vertex/triangle counts — no raw meshes)."""
+
+RENDER_DESCRIPTION = """Render the document to a PNG image, returned inline as an
+image content block — so you can SEE the scene and compare it against what the
+user asked for, then iterate. Args: doc, width? (default 800), height? (600),
+eye?/target?/up? as [x,y,z] camera vectors (omit eye for an auto-framed 3/4
+view of the whole scene), fov_deg? (default 40), path? to also save the PNG.
+Headless software render, deterministic; changes no state."""
 
 TOOLS = [
     {
@@ -86,6 +95,25 @@ TOOLS = [
             "required": ["doc"],
         },
     },
+    {
+        "name": "agcad_render",
+        "description": RENDER_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "doc": {"type": "integer", "description": "Document id from create_document"},
+                "width": {"type": "integer", "description": "Image width, default 800"},
+                "height": {"type": "integer", "description": "Image height, default 600"},
+                "eye": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                        "description": "Camera position; omit for auto-framed 3/4 view"},
+                "target": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                "up": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                "fov_deg": {"type": "number", "description": "Vertical field of view, default 40"},
+                "path": {"type": "string", "description": "Also save the PNG to this absolute path"},
+            },
+            "required": ["doc"],
+        },
+    },
 ]
 
 
@@ -108,12 +136,16 @@ def mesh_stats(mesh: dict) -> dict:
 
 
 def summarize(obj: Any) -> Any:
-    """Replace every `mesh` payload with its stats, recursively."""
+    """Replace every `mesh` payload with its stats, recursively. Inline PNG
+    payloads are replaced with a pointer to `agcad_render` (images belong
+    in the vision loop, not in a text dump)."""
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
             if k == "mesh" and isinstance(v, dict):
                 out[k] = mesh_stats(v)
+            elif k == "png_base64" and isinstance(v, str):
+                out[k] = f"<{len(v)} base64 chars — call agcad_render to get this as an image>"
             else:
                 out[k] = summarize(v)
         return out
@@ -188,6 +220,8 @@ class McpServer:
             return self._tool_execute(args)
         if name == "agcad_scene":
             return self._tool_scene(args)
+        if name == "agcad_render":
+            return self._tool_render(args)
         return {
             "content": [{"type": "text", "text": f"unknown tool: {name}"}],
             "isError": True,
@@ -259,6 +293,22 @@ class McpServer:
             )
         payload = {"doc": doc, "parameters": params["params"], "entities": entities}
         return {"content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}]}
+
+    def _tool_render(self, args: dict) -> dict:
+        params = {k: v for k, v in args.items() if v is not None}
+        try:
+            r = self.cad.call("render_offscreen", params)
+        except AgcadError as e:
+            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+        meta = {"doc": r["doc"], "width": r["width"], "height": r["height"], "bytes": len(r["png_base64"])}
+        if "path" in r:
+            meta["saved_to"] = r["path"]
+        return {
+            "content": [
+                {"type": "image", "data": r["png_base64"], "mimeType": "image/png"},
+                {"type": "text", "text": json.dumps(meta, separators=(",", ":"))},
+            ]
+        }
 
 
 def main() -> None:

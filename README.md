@@ -209,9 +209,11 @@ with Agcad.spawn() as cad:
       `boolean{op: union|difference|intersection}` in world space, result is a
       new entity that replays parametrically; plus `export_stl` (binary, world
       space, slicer-ready). 3MF when a project asks for it
-- [ ] Headless `render_offscreen` (PNG) + camera control — the feedback
-      loop that lets a vision model compare render vs. picture; expose it
-      as an MCP tool returning an image content block
+- [x] **Headless `render_offscreen` (PNG) + camera control**: deterministic
+      software rasterizer in core (no GPU needed — works over SSH/CI),
+      auto-framed 3/4 camera by default, explicit eye/target/up/fov when
+      wanted; MCP tool `agcad_render` returns the image inline so the agent
+      can see what it built and iterate
 - [ ] Sketch/constraint layer (2D solver on top of the bus)
 - [ ] Rust MCP server (single self-contained binary; the Python one is
       already adapter-clean)

@@ -19,6 +19,7 @@ pub mod boolean;
 pub mod expr;
 pub mod geo;
 pub mod mat4;
+pub mod render;
 pub mod stl;
 
 use std::collections::BTreeMap;
@@ -415,6 +416,69 @@ impl Engine {
                     bytes: 84 + tris * 50,
                 })
             },
+
+            Command::RenderOffscreen { doc, width, height, eye, target, up, fov_deg, background, path } => {
+                let d = self.doc(*doc)?;
+                let (w, h) = (
+                    width.unwrap_or(800).clamp(16, 4096),
+                    height.unwrap_or(600).clamp(16, 4096),
+                );
+                let bg = background.unwrap_or([0.92, 0.93, 0.96, 1.0]);
+
+                let items: Vec<render::RenderItem<'_>> = d
+                    .entities
+                    .values()
+                    .map(|e| render::RenderItem { mesh: &e.mesh, model: e.transform(), color: e.color })
+                    .collect();
+
+                // Camera: explicit eye wins; otherwise auto-frame the
+                // scene. Explicit eye without target aims at the scene
+                // center — the least-surprising default for agents.
+                let (center, _) = render::scene_bounds(&items);
+                let camera = match eye {
+                    Some(eye) => render::Camera {
+                        eye: *eye,
+                        target: target.map_or(center, |t| t),
+                        up: up.map_or([0.0, 0.0, 1.0], |u| u),
+                        fov_y_deg: fov_deg.unwrap_or(40.0).clamp(5.0, 150.0),
+                    },
+                    None => {
+                        let mut cam = render::Camera::auto(&items, w, h);
+                        if let Some(t) = target {
+                            cam.target = *t;
+                        }
+                        if let Some(u) = up {
+                            cam.up = *u;
+                        }
+                        if let Some(f) = fov_deg {
+                            cam.fov_y_deg = f.clamp(5.0, 150.0);
+                        }
+                        cam
+                    },
+                };
+
+                let (png, width, height) = render::render_png(&items, camera, w, h, bg)?;
+                let resolved = match path {
+                    Some(p) => {
+                        std::fs::write(&p, &png).map_err(|e| {
+                            Error::Invalid(format!("cannot write PNG to '{p}': {e} (hint: use an absolute path the server can write)"))
+                        })?;
+                        Some(
+                            std::fs::canonicalize(&p)
+                                .map(|q| q.to_string_lossy().into_owned())
+                                .unwrap_or(p.clone()),
+                        )
+                    },
+                    None => None,
+                };
+                Ok(CommandResult::Rendered {
+                    doc: *doc,
+                    width,
+                    height,
+                    png_base64: render::base64_encode(&png),
+                    path: resolved,
+                })
+            },
         }
     }
 }
@@ -435,6 +499,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Redo { doc }
         | Command::GetScene { doc }
         | Command::ExportStl { doc, .. }
+        | Command::RenderOffscreen { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         _ => None,
     }
@@ -1144,7 +1209,67 @@ mod tests {
         assert_eq!(m1.indices, m2.indices, "bit-identical topology");
     }
 
-    /// Binary STL: correct header, exact triangle count, exact file size.
+    /// Headless render: valid PNG bytes, echoed dimensions, deterministic.
+    #[test]
+    fn render_offscreen_produces_valid_deterministic_png() {
+        let mut e = engine();
+        e.execute(Command::AddBox {
+            doc: 1, name: "cube".into(), center: vec3(0.0), size: vec3(10.0), color: None,
+        }).unwrap();
+
+        let render = |e: &mut Engine, path: Option<String>| {
+            match e.execute(Command::RenderOffscreen {
+                doc: 1,
+                width: Some(160),
+                height: Some(120),
+                eye: Some([40.0, -60.0, 50.0]),
+                target: Some([0.0, 0.0, 0.0]),
+                up: None,
+                fov_deg: None,
+                background: None,
+                path,
+            }).unwrap() {
+                CommandResult::Rendered { width, height, png_base64, path, .. } => (width, height, png_base64, path),
+                r => panic!("unexpected result {r:?}"),
+            }
+        };
+        let (w, h, b64_1, _) = render(&mut e, None);
+        assert_eq!((w, h), (160, 120));
+        assert!(!b64_1.is_empty());
+
+        // File write: parse the PNG structure straight off disk.
+        let path = std::env::temp_dir().join("agcad_test_render.png");
+        let (_, _, _, written) = render(&mut e, Some(path.to_string_lossy().into_owned()));
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(written.as_deref(), Some(path.to_string_lossy().as_ref()));
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]), "missing PNG signature");
+        // IHDR width/height: big-endian u32 at offsets 16 and 20.
+        let iw = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let ih = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        assert_eq!((iw, ih), (160, 120));
+
+        // Same scene + camera → bit-identical output.
+        let (_, _, b64_2, _) = render(&mut e, None);
+        assert_eq!(b64_1, b64_2, "renders must be bit-identical");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Auto-framed camera on an empty document must not panic.
+    #[test]
+    fn render_offscreen_empty_scene_is_fine() {
+        let mut e = engine();
+        match e.execute(Command::RenderOffscreen {
+            doc: 1, width: None, height: None, eye: None, target: None,
+            up: None, fov_deg: None, background: None, path: None,
+        }).unwrap() {
+            CommandResult::Rendered { width, height, .. } => {
+                assert_eq!((width, height), (800, 600));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// The STL test from M4, kept near the render tests for symmetry.
     #[test]
     fn stl_export_writes_valid_binary() {
         let mut e = engine();
