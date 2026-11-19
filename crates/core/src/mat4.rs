@@ -130,6 +130,20 @@ pub fn look_at(eye: [f64; 3], target: [f64; 3], up: [f64; 3]) -> Mat4 {
     ]
 }
 
+/// Parallel projection: the box `[-half_w, half_w] x [-half_h, half_h]`
+/// (in view space) maps to the full frame, and depth maps to the same
+/// `-1..1` range as [`perspective`] so the rasterizer's depth test is
+/// unchanged. `w` stays 1, so no divide happens.
+pub fn orthographic(half_w: f64, half_h: f64, near: f64, far: f64) -> Mat4 {
+    let mut m = identity();
+    m[0][0] = (1.0 / half_w.max(1e-9)) as f32;
+    m[1][1] = (1.0 / half_h.max(1e-9)) as f32;
+    // z: [-near, -far] -> [-1, 1]
+    m[2][2] = (-2.0 / (far - near)) as f32;
+    m[3][2] = (-(far + near) / (far - near)) as f32;
+    m
+}
+
 /// Perspective projection, OpenGL convention (maps the -Z view frustum to
 /// NDC z ∈ [-1, 1]).
 pub fn perspective(fov_y_deg: f64, aspect: f64, near: f64, far: f64) -> Mat4 {
@@ -142,4 +156,35 @@ pub fn perspective(fov_y_deg: f64, aspect: f64, near: f64, far: f64) -> Mat4 {
     m[2][3] = -1.0;
     m[3][2] = 2.0 * far * near / (near - far);
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orthographic_keeps_size_independent_of_depth() {
+        let m = orthographic(50.0, 40.0, 1.0, 100.0);
+        let near = transform_h(&m, [10.0, 5.0, -1.0]);
+        let far = transform_h(&m, [10.0, 5.0, -100.0]);
+        // Parallel rays: the same x/y projects to the same NDC x/y at any depth.
+        assert_eq!(near[3], 1.0, "ortho w must stay 1");
+        assert_eq!(far[3], 1.0);
+        assert!((near[0] - far[0]).abs() < 1e-6, "{near:?} {far:?}");
+        assert!((near[0] - 0.2).abs() < 1e-6, "{}", near[0]);
+        assert!((near[1] - far[1]).abs() < 1e-6 && (near[1] - 0.125).abs() < 1e-6);
+        // Depth still orders front to back within -1..1.
+        assert!((near[2] + 1.0).abs() < 1e-6, "{}", near[2]);
+        assert!((far[2] - 1.0).abs() < 1e-6, "{}", far[2]);
+    }
+
+    #[test]
+    fn perspective_changes_size_with_depth() {
+        let m = perspective(40.0, 1.0, 1.0, 100.0);
+        let near = transform_h(&m, [10.0, 5.0, -10.0]);
+        let far = transform_h(&m, [10.0, 5.0, -50.0]);
+        let near_x = near[0] / near[3];
+        let far_x = far[0] / far[3];
+        assert!(near_x.abs() > far_x.abs() * 3.0, "{near_x} {far_x}");
+    }
 }

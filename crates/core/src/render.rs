@@ -28,6 +28,10 @@ pub struct Camera {
     pub target: [f64; 3],
     pub up: [f64; 3],
     pub fov_y_deg: f64,
+    /// Parallel projection. `fov_y_deg` then controls the framed height at
+    /// the target distance, so switching a perspective camera to ortho keeps
+    /// the same framing.
+    pub ortho: bool,
 }
 
 /// Fixed view direction for auto-framing: a pleasant 3/4 CAD view
@@ -49,7 +53,7 @@ impl Camera {
             center[2] + dir[2] * dist,
         ];
         let _ = (width, height); // aspect handled by the projection
-        Camera { eye, target: center, up: [0.0, 0.0, 1.0], fov_y_deg: fov }
+        Camera { eye, target: center, up: [0.0, 0.0, 1.0], fov_y_deg: fov, ortho: false }
     }
 }
 
@@ -132,7 +136,14 @@ fn rasterize(items: &[RenderItem<'_>], camera: Camera, width: u32, height: u32, 
     let far = (eye_dist + radius * 2.0) * 2.0;
 
     let view = mat4::look_at(camera.eye, camera.target, camera.up);
-    let proj = mat4::perspective(camera.fov_y_deg, aspect, near, far);
+    let proj = if camera.ortho {
+        // Match the perspective framing at the target plane, then project
+        // with parallel rays: same image, no size change with depth.
+        let half_h = eye_dist * (camera.fov_y_deg.to_radians() * 0.5).tan();
+        mat4::orthographic(half_h * aspect, half_h, near, far)
+    } else {
+        mat4::perspective(camera.fov_y_deg, aspect, near, far)
+    };
     let vp = mat4::mul(&proj, &view);
 
     let mut color = vec![0u8; w * h * 3];
@@ -364,6 +375,7 @@ mod tests {
             target: [0.0, 0.0, 0.0],
             up: [0.0, 1.0, 0.0],
             fov_y_deg: 40.0,
+            ortho: false,
         };
         let rgb = rasterize(&items, camera, 33, 33, [0.0, 0.0, 0.0, 1.0]);
         // Center pixel must be red-ish, corner must be background.

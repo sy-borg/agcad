@@ -212,8 +212,9 @@ with Agcad.spawn() as cad:
 - [x] **Headless `render_offscreen` (PNG) + camera control**: deterministic
       software rasterizer in core (no GPU needed — works over SSH/CI),
       auto-framed 3/4 camera by default, explicit eye/target/up/fov when
-      wanted; MCP tool `agcad_render` returns the image inline so the agent
-      can see what it built and iterate
+      wanted, and `ortho` for parallel front/top/side views; MCP tool
+      `agcad_render` returns the image inline so the agent can see what it
+      built and iterate
 - [x] **Sketch/constraint layer**: sketches are entities (`add_sketch`,
       `add_sketch_line`, `add_sketch_circle`), placed in 3D by the normal
       transform; `constrain{kind: coincident|horizontal|vertical|parallel|
@@ -228,6 +229,22 @@ with Agcad.spawn() as cad:
       so nested loops become holes). Solids inherit the sketch placement,
       follow later sketch edits, replay parametrically, and report `volume`
       + `tris`; negative extrude goes below the sketch plane
+- [ ] **Fillets and chamfers**: `fillet{edges, radius}` / `chamfer{edges,
+      distance}` over an edge-selection query (edges named by the two adjacent
+      faces or by a bounding-box filter, so an agent can target them without
+      clicking). Rounded edges are the difference between a CAD model and a
+      printable-looking part
+- [ ] **3MF export**: multi-object builds, per-object color/material, unit and
+      slicer metadata — STL loses all of it
+- [ ] **Sketches on a face / datum planes**: place a sketch on an existing
+      planar face (or an explicit plane) instead of always on XY, with the
+      normal derived from the face so `extrude` cuts or adds material in the
+      right direction
+- [ ] **Shaded-with-edges rendering**: a thin dark outline where adjacent
+      faces meet (and where a face silhouette crosses). Flat shading alone
+      hides coplanar-depth steps — a solid's front view reads as a blank
+      rectangle, and construction sketches peek out at the base. CAD drawings
+      draw edges for exactly this reason
 - [ ] Rust MCP server (single self-contained binary; the Python one is
       already adapter-clean)
 - [ ] PyO3 bindings (native-speed path for hot loops, same API)
@@ -235,14 +252,21 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 7 complete: sketches → solids. 56 tests cover the solver
+Milestone 7 complete: sketches → solids. 58 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
 delete, STL sketch filtering), and solid construction (extrude volumes,
 nested holes, negative extrusion, revolve around X/Y, partial sweeps,
-profile validation, dependent rebuilds, cross-engine determinism).
+profile validation, dependent rebuilds, cross-engine determinism) plus
+the orthographic camera (parallel projection, depth-independent size).
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
-profile with holes → extrude → STL → render) and
-`examples/revolve_bushing.py`.
+profile with holes → extrude → STL → render),
+`examples/revolve_bushing.py`, and `examples/cross_block.py` — a picture →
+model reproduction: `examples/example_body.png` is read for its two views
+(45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
+profile and extruded, then rendered from a camera fitted to the drawing.
+
+Also in the roadmap but not started: fillets/chamfers with edge selection,
+3MF export, and sketches placed on existing faces or datum planes.

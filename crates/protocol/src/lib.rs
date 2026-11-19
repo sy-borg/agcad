@@ -244,6 +244,11 @@ pub enum Command {
         up: Option<Vec3>,
         #[serde(default)]
         fov_deg: Option<f64>,
+        /// Parallel (orthographic) projection instead of perspective. With
+        /// `fov_deg` this keeps the same framing, but sizes no longer change
+        /// with depth — what standard front/top/side CAD views want.
+        #[serde(default)]
+        ortho: Option<bool>,
         #[serde(default)]
         background: Option<Rgba>,
         #[serde(default)]

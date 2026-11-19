@@ -76,8 +76,9 @@ revolve{doc,sketch,angle_deg?,axis?:"x"|"y",segments?,name?,color?} (profile →
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),
-render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,background?,path?}
-  (headless PNG; prefer the agcad_render tool, which returns the image inline).
+render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,ortho?,background?,path?}
+  (headless PNG; prefer the agcad_render tool, which returns the image inline.
+  ortho:true gives a parallel projection for front/top/side views).
 Numeric arguments accept expression strings over parameters. Commands run in order;
 execution stops at the first error (reported with a recovery hint)."""
 

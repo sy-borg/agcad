@@ -507,12 +507,16 @@ class Agcad:
         fov_deg: float | None = None,
         background: tuple[float, float, float, float] | None = None,
         path: str | None = None,
+        ortho: bool | None = None,
     ) -> dict[str, Any]:
         """Headless software render to PNG (base64 in the result).
 
-        Omit ``eye`` for an auto-framed 3/4 view of the whole scene.
+        Omit ``eye`` for an auto-framed 3/4 view of the whole scene. Set
+        ``ortho=True`` for a parallel projection — the standard front/top/
+        side CAD view, where sizes do not change with depth.
         Deterministic: same scene + camera → identical bytes."""
         return self._request(
             "render_offscreen", doc=doc, width=width, height=height, eye=eye,
             target=target, up=up, fov_deg=fov_deg, background=background, path=path,
+            ortho=ortho,
         )

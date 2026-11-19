@@ -476,7 +476,7 @@ impl Engine {
                 })
             },
 
-            Command::RenderOffscreen { doc, width, height, eye, target, up, fov_deg, background, path } => {
+            Command::RenderOffscreen { doc, width, height, eye, target, up, fov_deg, ortho, background, path } => {
                 let d = self.doc(*doc)?;
                 let (w, h) = (
                     width.unwrap_or(800).clamp(16, 4096),
@@ -500,6 +500,7 @@ impl Engine {
                         target: target.map_or(center, |t| t),
                         up: up.map_or([0.0, 0.0, 1.0], |u| u),
                         fov_y_deg: fov_deg.unwrap_or(40.0).clamp(5.0, 150.0),
+                        ortho: ortho.unwrap_or(false),
                     },
                     None => {
                         let mut cam = render::Camera::auto(&items, w, h);
@@ -511,6 +512,9 @@ impl Engine {
                         }
                         if let Some(f) = fov_deg {
                             cam.fov_y_deg = f.clamp(5.0, 150.0);
+                        }
+                        if let Some(o) = ortho {
+                            cam.ortho = *o;
                         }
                         cam
                     },
@@ -1643,6 +1647,7 @@ mod tests {
                 target: Some([0.0, 0.0, 0.0]),
                 up: None,
                 fov_deg: None,
+                ortho: None,
                 background: None,
                 path,
             }).unwrap() {
@@ -1677,7 +1682,7 @@ mod tests {
         let mut e = engine();
         match e.execute(Command::RenderOffscreen {
             doc: 1, width: None, height: None, eye: None, target: None,
-            up: None, fov_deg: None, background: None, path: None,
+            up: None, fov_deg: None, ortho: None, background: None, path: None,
         }).unwrap() {
             CommandResult::Rendered { width, height, .. } => {
                 assert_eq!((width, height), (800, 600));
