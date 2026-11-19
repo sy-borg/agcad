@@ -97,6 +97,13 @@ fn is_mutating(command: &Command) -> bool {
             | Command::SetColor { .. }
             | Command::Delete { .. }
             | Command::Boolean { .. }
+            | Command::AddSketch { .. }
+            | Command::AddSketchLine { .. }
+            | Command::AddSketchCircle { .. }
+            | Command::Constrain { .. }
+            | Command::RemoveConstraint { .. }
+            | Command::MoveSketchPoint { .. }
+            | Command::DeleteSketchElement { .. }
             | Command::SetParameter { .. }
             | Command::RemoveParameter { .. }
             | Command::CreateDocument { .. }
@@ -115,6 +122,13 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }
         | Command::Boolean { doc, .. }
+        | Command::AddSketch { doc, .. }
+        | Command::AddSketchLine { doc, .. }
+        | Command::AddSketchCircle { doc, .. }
+        | Command::Constrain { doc, .. }
+        | Command::RemoveConstraint { doc, .. }
+        | Command::MoveSketchPoint { doc, .. }
+        | Command::DeleteSketchElement { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::Undo { doc }

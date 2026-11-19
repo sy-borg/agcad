@@ -366,6 +366,81 @@ class Agcad:
     def delete(self, doc: int, entity: int) -> dict[str, Any]:
         return self._request("delete", doc=doc, entity=entity)
 
+    # -- sketches -----------------------------------------------------------
+    # Sketches are 2D constraint-solved drawings placed in 3D by the entity
+    # transform. Coordinates and constraint values may be expression
+    # strings, so sketches re-solve when parameters change.
+
+    def add_sketch(self, doc: int, name: str = "sketch") -> dict[str, Any]:
+        """Create an empty sketch (default placement: XY plane at origin)."""
+        return self._request("add_sketch", doc=doc, name=name)
+
+    def add_sketch_line(
+        self,
+        doc: int,
+        sketch: int,
+        p1: tuple[float | str, float | str],
+        p2: tuple[float | str, float | str],
+    ) -> dict[str, Any]:
+        """Append a line segment (sketch-local mm, expressions allowed)."""
+        return self._request("add_sketch_line", doc=doc, sketch=sketch, p1=list(p1), p2=list(p2))
+
+    def add_sketch_circle(
+        self,
+        doc: int,
+        sketch: int,
+        center: tuple[float | str, float | str],
+        radius: float | str,
+    ) -> dict[str, Any]:
+        """Append a circle (sketch-local mm, expressions allowed)."""
+        return self._request(
+            "add_sketch_circle", doc=doc, sketch=sketch, center=list(center), radius=radius
+        )
+
+    def constrain(
+        self,
+        doc: int,
+        sketch: int,
+        kind: str,
+        refs: list[dict[str, Any]],
+        value: float | str | None = None,
+    ) -> dict[str, Any]:
+        """Add a constraint and re-solve.
+
+        ``kind`` is one of ``coincident``, ``horizontal``, ``vertical``,
+        ``parallel``, ``perpendicular``, ``distance``, ``radius``,
+        ``diameter``. Each ref is ``{"element": id, "point": 0|1}`` for a
+        point or ``{"element": id}`` for a whole element. The result
+        reports ``solved``, ``residual`` and remaining ``dof``.
+        """
+        return self._request(
+            "constrain", doc=doc, sketch=sketch, kind=kind, refs=refs, value=value
+        )
+
+    def remove_constraint(self, doc: int, sketch: int, constraint: int) -> dict[str, Any]:
+        """Remove a constraint by id and re-solve."""
+        return self._request("remove_constraint", doc=doc, sketch=sketch, constraint=constraint)
+
+    def move_sketch_point(
+        self,
+        doc: int,
+        sketch: int,
+        element: int,
+        point: int,
+        to: tuple[float, float],
+    ) -> dict[str, Any]:
+        """Drag a point (0 = line start / circle center, 1 = line end),
+        then re-solve."""
+        return self._request(
+            "move_sketch_point", doc=doc, sketch=sketch, element=element, point=point, to=list(to)
+        )
+
+    def delete_sketch_element(self, doc: int, sketch: int, element: int) -> dict[str, Any]:
+        """Delete an element; constraints referencing it cascade away."""
+        return self._request(
+            "delete_sketch_element", doc=doc, sketch=sketch, element=element
+        )
+
     def undo(self, doc: int) -> dict[str, Any]:
         return self._request("undo", doc=doc)
 

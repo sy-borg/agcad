@@ -35,8 +35,10 @@ restore parameters + program + geometry atomically.
 Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
 dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
-verify -> agcad_render to SEE the result -> export_stl for slicing. Failed
-commands report a hint; fix the named issue and retry."""
+verify -> agcad_render to SEE the result -> export_stl for slicing. Sketches are
+2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
+add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change.
+Failed commands report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
@@ -51,8 +53,22 @@ boolean{doc,op:"union"|"difference"|"intersection",entities:[ids],name?,color?}
   (world-space set op; creates a NEW entity, sources are kept — delete them if
   you only want the fused result; boolean entities replay parametrically),
 set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc},
+add_sketch{doc,name} (empty 2D sketch; place it in 3D with transform),
+add_sketch_line{doc,sketch,p1:[x,y],p2:[x,y]},
+add_sketch_circle{doc,sketch,center:[x,y],radius},
+constrain{doc,sketch,kind,refs,value?} (re-solves; kind is coincident,
+  horizontal, vertical, parallel, perpendicular, distance, radius or diameter;
+  refs are {"element":id,"point":0|1} for points or {"element":id} for whole
+  elements — coincident/distance take 2 point refs, horizontal/vertical 1 line,
+  parallel/perpendicular 2 lines, radius/diameter 1 circle + value;
+  result reports solved/residual/dof),
+remove_constraint{doc,sketch,constraint},
+move_sketch_point{doc,sketch,element,point,to:[x,y]} (0 = line start / circle
+  center, 1 = line end; steers the solver, then re-solves),
+delete_sketch_element{doc,sketch,element} (constraints on it cascade away),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
-  slicer-ready file; not part of the program, changes no state),
+  slicer-ready file; not part of the program, changes no state; sketches are
+  display-only and skipped),
 render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,background?,path?}
   (headless PNG; prefer the agcad_render tool, which returns the image inline).
 Numeric arguments accept expression strings over parameters. Commands run in order;

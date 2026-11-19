@@ -214,7 +214,14 @@ with Agcad.spawn() as cad:
       auto-framed 3/4 camera by default, explicit eye/target/up/fov when
       wanted; MCP tool `agcad_render` returns the image inline so the agent
       can see what it built and iterate
-- [ ] Sketch/constraint layer (2D solver on top of the bus)
+- [x] **Sketch/constraint layer**: sketches are entities (`add_sketch`,
+      `add_sketch_line`, `add_sketch_circle`), placed in 3D by the normal
+      transform; `constrain{kind: coincident|horizontal|vertical|parallel|
+      perpendicular|distance|radius|diameter}` re-solves after every change
+      with a deterministic LM/Gauss-Newton solver. Coordinates and values may
+      be expressions, so sketches re-solve on parameter change. Snapshot
+      reports `solved/residual/dof`; sketches render as ribbons and are
+      skipped by STL export
 - [ ] Rust MCP server (single self-contained binary; the Python one is
       already adapter-clean)
 - [ ] PyO3 bindings (native-speed path for hot loops, same API)
@@ -222,7 +229,9 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 2 complete: the parametric program layer (agent-authored
-functions, deterministic replay, atomic undo) is tested end-to-end; 12
-engine unit tests cover determinism, undo/redo, parameter rebuilds and
-expression safety.
+Milestone 6 complete: sketches and constraints. 35 tests cover the solver
+(rectangles from messy input, radius/diameter, parallel/perpendicular,
+over-constraint reporting, bit-identical determinism, ribbon geometry) and
+the engine path (constraints through the bus, parametric re-solve via
+`set_parameter`, undo/redo, cascade delete, STL sketch filtering,
+cross-engine determinism). See `examples/sketch_bracket.py`.

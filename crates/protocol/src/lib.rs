@@ -249,6 +249,66 @@ pub enum Command {
         #[serde(default)]
         path: Option<String>,
     },
+
+    /// Create an empty sketch: a 2D constraint-solved drawing placed in 3D
+    /// by the entity transform (default: the XY plane at the origin).
+    /// Sketches are recorded in the program like any other modeling
+    /// command, so they replay parametrically — coordinates and constraint
+    /// values may be expressions over parameters.
+    AddSketch { doc: DocId, name: String },
+
+    /// Append a line segment to a sketch. 2D coordinates in sketch-local
+    /// units (mm), may be expressions.
+    AddSketchLine {
+        doc: DocId,
+        sketch: EntityId,
+        p1: [Scalar; 2],
+        p2: [Scalar; 2],
+    },
+
+    /// Append a circle to a sketch.
+    AddSketchCircle {
+        doc: DocId,
+        sketch: EntityId,
+        center: [Scalar; 2],
+        radius: Scalar,
+    },
+
+    /// Add a geometric/numeric constraint to a sketch and re-solve. The
+    /// solver adjusts free element coordinates to satisfy all constraints;
+    /// if it cannot, the constraint is still recorded and the failure is
+    /// reported (over-constrained sketches stay inspectable, not hidden).
+    Constrain {
+        doc: DocId,
+        sketch: EntityId,
+        kind: ConstraintKind,
+        /// Element references, meaning depends on `kind`:
+        /// coincident/distance → two point refs; horizontal/vertical → one
+        /// whole-element ref; parallel/perpendicular → two element refs;
+        /// radius/diameter → one circle ref.
+        refs: Vec<SketchRef>,
+        /// Required by distance/radius/diameter (mm). May be an expression.
+        #[serde(default)]
+        value: Option<Scalar>,
+    },
+
+    /// Remove a constraint by id and re-solve.
+    RemoveConstraint { doc: DocId, sketch: EntityId, constraint: u64 },
+
+    /// Drag a sketch point to new 2D coordinates, then re-solve. Useful
+    /// for steering the solver into a different configuration.
+    MoveSketchPoint {
+        doc: DocId,
+        sketch: EntityId,
+        element: u64,
+        /// 0 = line start / circle center, 1 = line end.
+        point: u8,
+        to: [f64; 2],
+    },
+
+    /// Delete a sketch element; constraints referencing it are removed
+    /// too (cascade), then the sketch re-solves.
+    DeleteSketchElement { doc: DocId, sketch: EntityId, element: u64 },
 }
 
 /// Which set operation a [`Command::Boolean`] performs.
@@ -305,6 +365,21 @@ pub enum CommandResult {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    SketchElementCreated { doc: DocId, sketch: EntityId, element: u64 },
+    SketchElementDeleted { doc: DocId, sketch: EntityId, element: u64 },
+    ConstraintCreated {
+        doc: DocId,
+        sketch: EntityId,
+        constraint: u64,
+        /// Whether the solver satisfied every constraint after this change.
+        solved: bool,
+        /// Worst constraint violation remaining (mm-ish units).
+        residual: f64,
+        /// Approximate degrees of freedom left (vars − equations).
+        dof: i64,
+    },
+    ConstraintRemoved { doc: DocId, sketch: EntityId, constraint: u64 },
+    SketchPointMoved { doc: DocId, sketch: EntityId, element: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +387,78 @@ pub struct DocInfo {
     pub doc: DocId,
     pub name: String,
     pub entity_count: usize,
+}
+
+/// Reference to a point (or a whole element) inside a sketch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SketchRef {
+    /// Sketch element id (from add_sketch_line / add_sketch_circle).
+    pub element: u64,
+    /// `Some(0)` = line start / circle center, `Some(1)` = line end,
+    /// `None` = the whole element (its direction, for line constraints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<u8>,
+}
+
+/// Which relationship a constraint enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintKind {
+    Coincident,
+    Horizontal,
+    Vertical,
+    Parallel,
+    Perpendicular,
+    Distance,
+    Radius,
+    Diameter,
+}
+
+impl ConstraintKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Coincident => "coincident",
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+            Self::Parallel => "parallel",
+            Self::Perpendicular => "perpendicular",
+            Self::Distance => "distance",
+            Self::Radius => "radius",
+            Self::Diameter => "diameter",
+        }
+    }
+}
+
+/// A 2D element of a sketch. Coordinates are sketch-local (mm); the
+/// sketch entity's transform places them in 3D.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SketchElement {
+    Line { id: u64, p1: [f64; 2], p2: [f64; 2] },
+    Circle { id: u64, center: [f64; 2], radius: f64 },
+}
+
+/// One constraint as stored in the sketch (value already resolved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchConstraint {
+    pub id: u64,
+    pub kind: ConstraintKind,
+    pub refs: Vec<SketchRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+}
+
+/// Solver status + contents of a sketch, as reported in snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SketchSnapshot {
+    pub elements: Vec<SketchElement>,
+    pub constraints: Vec<SketchConstraint>,
+    /// Whether the solver satisfied every constraint.
+    pub solved: bool,
+    /// Worst remaining violation across constraints.
+    pub residual: f64,
+    /// Approximate degrees of freedom left (variables − equations).
+    pub dof: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -344,4 +491,8 @@ pub struct EntitySnapshot {
     pub transform: Mat4,
     pub color: Rgba,
     pub mesh: Mesh,
+    /// For sketch entities: elements, constraints and solver status. The
+    /// `mesh` of a sketch holds display ribbons, not printable geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch: Option<SketchSnapshot>,
 }

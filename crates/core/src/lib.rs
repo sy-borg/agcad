@@ -20,14 +20,15 @@ pub mod expr;
 pub mod geo;
 pub mod mat4;
 pub mod render;
+pub mod sketch;
 pub mod stl;
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use agcad_protocol::{
-    BooleanOp, Command, CommandResult, DocId, DocInfo, EntityId, EntitySnapshot, Mat4, Mesh,
-    ParamInfo, Rgba, Scalar, SVec3, Vec3, PROTOCOL_VERSION, SERVER_NAME,
+    BooleanOp, Command, CommandResult, DocId, DocInfo, EntityId, EntitySnapshot, Mat4,
+    Mesh, ParamInfo, Rgba, Scalar, SketchElement, SVec3, Vec3, PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -103,6 +104,18 @@ pub enum Shape {
     /// Result of a set operation. References its operand entity ids so the
     /// program can replay it after those operands are re-created.
     Boolean { op: BooleanOp, entities: Vec<EntityId> },
+    /// A 2D constraint-solved drawing. Coordinates live in sketch-local
+    /// space; the entity transform places the drawing in 3D. Its `mesh`
+    /// holds display ribbons only — sketches are not printable geometry.
+    Sketch {
+        elements: Vec<SketchElement>,
+        constraints: Vec<agcad_protocol::SketchConstraint>,
+        next_element: u64,
+        next_constraint: u64,
+        solved: bool,
+        residual: f64,
+        dof: i64,
+    },
 }
 
 impl Entity {
@@ -121,6 +134,18 @@ impl Entity {
             transform: self.transform(),
             color: self.color,
             mesh: self.mesh.clone(),
+            sketch: match &self.shape {
+                Shape::Sketch { elements, constraints, solved, residual, dof, .. } => {
+                    Some(agcad_protocol::SketchSnapshot {
+                        elements: elements.clone(),
+                        constraints: constraints.clone(),
+                        solved: *solved,
+                        residual: *residual,
+                        dof: *dof,
+                    })
+                },
+                _ => None,
+            },
         }
     }
 }
@@ -278,7 +303,14 @@ impl Engine {
             | Command::Transform { .. }
             | Command::SetColor { .. }
             | Command::Delete { .. }
-            | Command::Boolean { .. } => {
+            | Command::Boolean { .. }
+            | Command::AddSketch { .. }
+            | Command::AddSketchLine { .. }
+            | Command::AddSketchCircle { .. }
+            | Command::Constrain { .. }
+            | Command::RemoveConstraint { .. }
+            | Command::MoveSketchPoint { .. }
+            | Command::DeleteSketchElement { .. } => {
                 let doc = doc_of(&command).expect("modeling commands always carry a doc");
                 let d = self.doc_mut(doc)?;
                 d.checkpoint();
@@ -401,13 +433,22 @@ impl Engine {
                     Some(ids) => ids.clone(),
                     None => d.entities.keys().copied().collect(),
                 };
+                // Sketches are drawings, not printable geometry — skip them.
                 let entries = ids
                     .iter()
+                    .filter(|&&id| {
+                        d.entities.get(&id).map_or(false, |e| !matches!(e.shape, Shape::Sketch { .. }))
+                    })
                     .map(|&id| {
                         let e = d.entities.get(&id).ok_or(Error::UnknownEntity { doc: *doc, entity: id })?;
                         Ok((e.mesh.clone(), e.transform()))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                if entries.is_empty() {
+                    return Err(Error::Invalid(
+                        "nothing to export: no solid entities (hint: sketches are not meshes — extrude them into solids first)".into(),
+                    ));
+                }
                 let (resolved, tris) = stl::write_stl(path, &entries)?;
                 Ok(CommandResult::StlExported {
                     doc: *doc,
@@ -492,6 +533,13 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }
         | Command::Boolean { doc, .. }
+        | Command::AddSketch { doc, .. }
+        | Command::AddSketchLine { doc, .. }
+        | Command::AddSketchCircle { doc, .. }
+        | Command::Constrain { doc, .. }
+        | Command::RemoveConstraint { doc, .. }
+        | Command::MoveSketchPoint { doc, .. }
+        | Command::DeleteSketchElement { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::GetParameters { doc }
@@ -622,6 +670,138 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
         },
 
+        // --- sketches -------------------------------------------------------
+
+        Command::AddSketch { doc, name } => {
+            let id = d.next_entity();
+            let shape = Shape::Sketch {
+                elements: Vec::new(),
+                constraints: Vec::new(),
+                next_element: 1,
+                next_constraint: 1,
+                solved: true,
+                residual: 0.0,
+                dof: 0,
+            };
+            let entity = Entity {
+                id,
+                name: name.clone(),
+                shape,
+                mesh: sketch::display_mesh(&[]),
+                translation: [0.0; 3],
+                rotation_deg: [0.0; 3],
+                scale: [1.0; 3],
+                color: [0.15, 0.55, 0.85, 1.0],
+            };
+            let mesh = entity.mesh.clone();
+            d.entities.insert(id, entity);
+            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
+        },
+
+        Command::AddSketchLine { doc, sketch, p1, p2 } => {
+            let id = {
+                let (p1, p2) = ([d.resolve(&p1[0])?, d.resolve(&p1[1])?], [d.resolve(&p2[0])?, d.resolve(&p2[1])?]);
+                let (elements, _, next_element, ..) = sketch_parts(d, *sketch)?;
+                let id = *next_element;
+                *next_element += 1;
+                elements.push(SketchElement::Line { id, p1, p2 });
+                id
+            };
+            refresh_sketch(d, *sketch)?;
+            Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
+        },
+
+        Command::AddSketchCircle { doc, sketch, center, radius } => {
+            let id = {
+                let (center, radius) = ([d.resolve(&center[0])?, d.resolve(&center[1])?], d.resolve(radius)?);
+                if radius <= 0.0 {
+                    return Err(Error::Invalid(format!("circle radius must be positive (got {radius})")));
+                }
+                let (elements, _, next_element, ..) = sketch_parts(d, *sketch)?;
+                let id = *next_element;
+                *next_element += 1;
+                elements.push(SketchElement::Circle { id, center, radius });
+                id
+            };
+            refresh_sketch(d, *sketch)?;
+            Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
+        },
+
+        Command::Constrain { doc, sketch, kind, refs, value } => {
+            let cid = {
+                let resolved = match value {
+                    Some(v) => Some(d.resolve(&v)?),
+                    None => None,
+                };
+                let (elements, constraints, _, next_constraint, ..) = sketch_parts(d, *sketch)?;
+                sketch::validate(*kind, elements, refs, resolved).map_err(Error::Invalid)?;
+                let cid = *next_constraint;
+                *next_constraint += 1;
+                constraints.push(agcad_protocol::SketchConstraint {
+                    id: cid,
+                    kind: *kind,
+                    refs: refs.clone(),
+                    value: resolved,
+                });
+                cid
+            };
+            let report = refresh_sketch(d, *sketch)?;
+            Ok(sketch_result(SketchOutcome::Constraint(*doc, *sketch, cid, report)))
+        },
+
+        Command::RemoveConstraint { doc, sketch, constraint } => {
+            {
+                let (_, constraints, ..) = sketch_parts(d, *sketch)?;
+                let before = constraints.len();
+                constraints.retain(|c| c.id != *constraint);
+                if constraints.len() == before {
+                    return Err(Error::Invalid(format!(
+                        "sketch {sketch} has no constraint {constraint} (hint: get_scene lists constraint ids)"
+                    )));
+                }
+            }
+            refresh_sketch(d, *sketch)?;
+            Ok(CommandResult::ConstraintRemoved { doc: *doc, sketch: *sketch, constraint: *constraint })
+        },
+
+        Command::MoveSketchPoint { doc, sketch, element, point, to } => {
+            {
+                let (elements, ..) = sketch_parts(d, *sketch)?;
+                let target = elements.iter_mut().find(|e| match e {
+                    SketchElement::Line { id, .. } | SketchElement::Circle { id, .. } => id == element,
+                });
+                match (target, point) {
+                    (Some(SketchElement::Line { p1, .. }), 0) => *p1 = *to,
+                    (Some(SketchElement::Line { p2, .. }), 1) => *p2 = *to,
+                    (Some(SketchElement::Circle { center, .. }), 0) => *center = *to,
+                    _ => {
+                        return Err(Error::Invalid(format!(
+                            "element {element} has no point {point} (hint: 0 = line start / circle center, 1 = line end)"
+                        )));
+                    },
+                }
+            }
+            refresh_sketch(d, *sketch)?;
+            Ok(CommandResult::SketchPointMoved { doc: *doc, sketch: *sketch, element: *element })
+        },
+
+        Command::DeleteSketchElement { doc, sketch, element } => {
+            {
+                let (elements, constraints, ..) = sketch_parts(d, *sketch)?;
+                let before = elements.len();
+                elements.retain(|e| match e {
+                    SketchElement::Line { id, .. } | SketchElement::Circle { id, .. } => *id != *element,
+                });
+                if elements.len() == before {
+                    return Err(Error::UnknownEntity { doc: *doc, entity: *element });
+                }
+                // Cascade: constraints referencing the deleted element go too.
+                constraints.retain(|c| c.refs.iter().all(|r| r.element != *element));
+            }
+            refresh_sketch(d, *sketch)?;
+            Ok(CommandResult::SketchElementDeleted { doc: *doc, sketch: *sketch, element: *element })
+        },
+
         Command::Delete { doc, entity } => {
             if d.entities.remove(entity).is_none() {
                 return Err(Error::UnknownEntity { doc: *doc, entity: *entity });
@@ -630,6 +810,74 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
         },
 
         _ => Err(Error::Invalid("not a modeling command".into())),
+    }
+}
+
+/// Mutable access to a sketch entity's shape fields; error if not a sketch.
+/// Returns `(elements, constraints, next_element, next_constraint, solved,
+/// residual, dof)`.
+#[allow(clippy::type_complexity)]
+fn sketch_parts(
+    d: &mut Document,
+    sketch: EntityId,
+) -> Result<(
+    &mut Vec<SketchElement>,
+    &mut Vec<agcad_protocol::SketchConstraint>,
+    &mut u64,
+    &mut u64,
+    &mut bool,
+    &mut f64,
+    &mut i64,
+)> {
+    let e = d.entity_mut(sketch)?;
+    match &mut e.shape {
+        Shape::Sketch { elements, constraints, next_element, next_constraint, solved, residual, dof } => {
+            Ok((elements, constraints, next_element, next_constraint, solved, residual, dof))
+        },
+        _ => Err(Error::Invalid(format!(
+            "entity {sketch} is not a sketch (hint: create one with add_sketch first)"
+        ))),
+    }
+}
+
+/// Re-solve a sketch from its current elements/constraints and refresh the
+/// display mesh + solver status. Called after every sketch mutation.
+fn refresh_sketch(d: &mut Document, sketch: EntityId) -> Result<sketch::SolveReport> {
+    let (mut elements, constraints) = {
+        let (se, sc, ..) = sketch_parts(d, sketch)?;
+        (se.clone(), sc.clone())
+    };
+    let report = sketch::solve(&mut elements, &constraints);
+    let mesh = sketch::display_mesh(&elements);
+    let (se, sc, _, _, solved, residual, dof) = sketch_parts(d, sketch)?;
+    *se = elements;
+    *sc = constraints;
+    *solved = report.solved;
+    *residual = report.residual;
+    *dof = report.dof;
+    d.entity_mut(sketch)?.mesh = mesh;
+    Ok(report)
+}
+
+/// What a sketch command produced, for building its result.
+enum SketchOutcome {
+    Element(DocId, EntityId, u64),
+    Constraint(DocId, EntityId, u64, sketch::SolveReport),
+}
+
+fn sketch_result(outcome: SketchOutcome) -> CommandResult {
+    match outcome {
+        SketchOutcome::Element(doc, sketch, element) => {
+            CommandResult::SketchElementCreated { doc, sketch, element }
+        },
+        SketchOutcome::Constraint(doc, sketch, constraint, r) => CommandResult::ConstraintCreated {
+            doc,
+            sketch,
+            constraint,
+            solved: r.solved,
+            residual: r.residual,
+            dof: r.dof,
+        },
     }
 }
 
@@ -694,6 +942,8 @@ fn add_entity(
         // Boolean entities are produced by the boolean path, which builds
         // the Entity directly — add_entity never sees this shape.
         Shape::Boolean { .. } => unreachable!("boolean shapes are not tessellated here"),
+        // Sketches are created by AddSketch (with solver state), never here.
+        Shape::Sketch { .. } => unreachable!("sketch shapes are not tessellated here"),
     };
     let entity = Entity {
         id,
@@ -1305,5 +1555,239 @@ mod tests {
         let x = f32::from_le_bytes([data[96], data[97], data[98], data[99]]);
         assert!((95.0..=105.0).contains(&x), "expected world-space x near 100, got {x}");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- sketches -----------------------------------------------------------
+
+    use agcad_protocol::ConstraintKind as K;
+
+    fn pref(element: u64, point: u8) -> agcad_protocol::SketchRef {
+        agcad_protocol::SketchRef { element, point: Some(point) }
+    }
+
+    fn wref(element: u64) -> agcad_protocol::SketchRef {
+        agcad_protocol::SketchRef { element, point: None }
+    }
+
+    fn add_line(e: &mut Engine, sketch: EntityId, p1: [f64; 2], p2: [f64; 2]) -> u64 {
+        match e
+            .execute(Command::AddSketchLine {
+                doc: 1,
+                sketch,
+                p1: [num(p1[0]), num(p1[1])],
+                p2: [num(p2[0]), num(p2[1])],
+            })
+            .unwrap()
+        {
+            CommandResult::SketchElementCreated { element, .. } => element,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn constrain(
+        e: &mut Engine,
+        sketch: EntityId,
+        kind: K,
+        refs: Vec<agcad_protocol::SketchRef>,
+        value: Option<Scalar>,
+    ) -> (u64, bool, f64, i64) {
+        match e
+            .execute(Command::Constrain { doc: 1, sketch, kind, refs, value })
+            .unwrap()
+        {
+            CommandResult::ConstraintCreated { constraint, solved, residual, dof, .. } => {
+                (constraint, solved, residual, dof)
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn sketch_snapshot(e: &mut Engine, sketch: EntityId) -> agcad_protocol::SketchSnapshot {
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => entities
+                .iter()
+                .find(|x| x.id == sketch)
+                .expect("sketch in scene")
+                .sketch
+                .clone()
+                .expect("sketch data in snapshot"),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn add_sketch(e: &mut Engine, name: &str) -> EntityId {
+        match e.execute(Command::AddSketch { doc: 1, name: name.into() }).unwrap() {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// Rectangle profile built purely through the bus: the solver must
+    /// square it up and report the remaining degrees of freedom.
+    #[test]
+    fn sketch_rectangle_via_commands() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        let (a, b, c, d) = (
+            add_line(&mut e, s, [0.0, 0.0], [38.0, 3.0]),
+            add_line(&mut e, s, [38.0, 3.0], [41.0, 31.0]),
+            add_line(&mut e, s, [41.0, 31.0], [-2.0, 28.0]),
+            add_line(&mut e, s, [-2.0, 28.0], [0.0, 0.0]),
+        );
+        constrain(&mut e, s, K::Coincident, vec![pref(a, 1), pref(b, 0)], None);
+        constrain(&mut e, s, K::Coincident, vec![pref(b, 1), pref(c, 0)], None);
+        constrain(&mut e, s, K::Coincident, vec![pref(c, 1), pref(d, 0)], None);
+        constrain(&mut e, s, K::Coincident, vec![pref(d, 1), pref(a, 0)], None);
+        constrain(&mut e, s, K::Horizontal, vec![wref(a)], None);
+        constrain(&mut e, s, K::Horizontal, vec![wref(c)], None);
+        constrain(&mut e, s, K::Vertical, vec![wref(b)], None);
+        constrain(&mut e, s, K::Vertical, vec![wref(d)], None);
+        let (_, solved, residual, _) =
+            constrain(&mut e, s, K::Distance, vec![pref(a, 0), pref(a, 1)], Some(num(40.0)));
+        assert!(solved, "residual {residual}");
+        let (_, solved, _, _) =
+            constrain(&mut e, s, K::Distance, vec![pref(b, 0), pref(b, 1)], Some(num(30.0)));
+        assert!(solved);
+
+        let snap = sketch_snapshot(&mut e, s);
+        assert!(snap.solved);
+        assert_eq!(snap.elements.len(), 4);
+        assert_eq!(snap.constraints.len(), 10);
+        assert_eq!(snap.dof, 16 - 14);
+        let line_len = |id: u64| match snap.elements.iter().find(|x| matches!(x, SketchElement::Line { id: i, .. } if *i == id)).unwrap() {
+            SketchElement::Line { p1, p2, .. } => ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt(),
+            _ => unreachable!(),
+        };
+        assert!((line_len(a) - 40.0).abs() < 1e-5);
+        assert!((line_len(b) - 30.0).abs() < 1e-5);
+        // Sketches contribute display ribbons, never empty geometry.
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                assert!(!entities[0].mesh.positions.is_empty());
+                assert!(entities[0].mesh.positions.iter().all(|p| p[2] == 0.0));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// A distance constraint whose value is an expression re-solves when
+    /// the parameter changes — parametric sketches, not baked drawings.
+    #[test]
+    fn sketch_replays_parametrically() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "w".into(),
+            value: num(40.0),
+            description: None,
+        })
+        .unwrap();
+        let s = add_sketch(&mut e, "profile");
+        let a = add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        constrain(&mut e, s, K::Horizontal, vec![wref(a)], None);
+        constrain(
+            &mut e,
+            s,
+            K::Distance,
+            vec![pref(a, 0), pref(a, 1)],
+            Some(Scalar::Expression("w".into())),
+        );
+        let len_of = |e: &mut Engine, s: EntityId| match sketch_snapshot(e, s).elements[0] {
+            SketchElement::Line { p1, p2, .. } => {
+                ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt()
+            },
+            _ => unreachable!(),
+        };
+        assert!((len_of(&mut e, s) - 40.0).abs() < 1e-5);
+
+        e.execute(Command::SetParameter { doc: 1, name: "w".into(), value: num(65.0), description: None })
+            .unwrap();
+        let after = len_of(&mut e, s);
+        assert!((after - 65.0).abs() < 1e-5, "expected re-solved length 65, got {after}");
+    }
+
+    /// Undo/redo must move constraints and solved geometry atomically.
+    #[test]
+    fn undo_restores_sketch_constraint() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        let a = add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        assert_eq!(sketch_snapshot(&mut e, s).constraints.len(), 0);
+        constrain(&mut e, s, K::Distance, vec![pref(a, 0), pref(a, 1)], Some(num(25.0)));
+        assert_eq!(sketch_snapshot(&mut e, s).constraints.len(), 1);
+
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        assert_eq!(sketch_snapshot(&mut e, s).constraints.len(), 0, "undo must remove the constraint");
+        e.execute(Command::Redo { doc: 1 }).unwrap();
+        assert_eq!(sketch_snapshot(&mut e, s).constraints.len(), 1, "redo must restore it");
+    }
+
+    /// Deleting an element also drops the constraints that referenced it.
+    #[test]
+    fn delete_sketch_element_cascades() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        let a = add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        let b = add_line(&mut e, s, [10.0, 0.0], [10.0, 5.0]);
+        constrain(&mut e, s, K::Coincident, vec![pref(a, 1), pref(b, 0)], None);
+        constrain(&mut e, s, K::Horizontal, vec![wref(a)], None);
+        constrain(&mut e, s, K::Vertical, vec![wref(b)], None);
+        assert_eq!(sketch_snapshot(&mut e, s).constraints.len(), 3);
+
+        e.execute(Command::DeleteSketchElement { doc: 1, sketch: s, element: a }).unwrap();
+        let snap = sketch_snapshot(&mut e, s);
+        assert_eq!(snap.elements.len(), 1);
+        assert_eq!(snap.constraints.len(), 1, "constraints on the deleted line must cascade");
+        assert_eq!(snap.constraints[0].kind, K::Vertical);
+    }
+
+    /// STL export ignores sketches; a document with only sketches is not
+    /// silently exported as an empty file.
+    #[test]
+    fn stl_skips_sketches() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        let path = std::env::temp_dir().join("agcad_sketch_only.stl");
+        let path_str = path.to_string_lossy().to_string();
+        let err = e.execute(Command::ExportStl { doc: 1, path: path_str, entities: None });
+        assert!(err.is_err(), "sketch-only export must fail with a hint");
+
+        e.execute(Command::AddBox {
+            doc: 1,
+            name: "plate".into(),
+            center: vec3(0.0),
+            size: vec3(10.0),
+            color: None,
+        })
+        .unwrap();
+        let path = std::env::temp_dir().join("agcad_sketch_and_box.stl");
+        let path_str = path.to_string_lossy().to_string();
+        match e.execute(Command::ExportStl { doc: 1, path: path_str, entities: None }).unwrap() {
+            CommandResult::StlExported { tris, .. } => assert_eq!(tris, 12, "only the box's 12 triangles"),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two engines fed the same sketch program must agree bit-for-bit.
+    #[test]
+    fn sketch_is_deterministic_across_engines() {
+        let build = || {
+            let mut e = engine();
+            let s = add_sketch(&mut e, "profile");
+            let a = add_line(&mut e, s, [0.0, 0.0], [38.0, 3.0]);
+            let b = add_line(&mut e, s, [38.0, 3.0], [41.0, 31.0]);
+            constrain(&mut e, s, K::Coincident, vec![pref(a, 1), pref(b, 0)], None);
+            constrain(&mut e, s, K::Horizontal, vec![wref(a)], None);
+            constrain(&mut e, s, K::Perpendicular, vec![wref(a), wref(b)], None);
+            constrain(&mut e, s, K::Distance, vec![pref(a, 0), pref(a, 1)], Some(num(25.0)));
+            (sketch_snapshot(&mut e, s), sketch_snapshot(&mut e, s))
+        };
+        let (a, _) = build();
+        let (b, _) = build();
+        assert_eq!(a.elements, b.elements);
+        assert_eq!(a.constraints, b.constraints);
+        assert_eq!(a.residual.to_bits(), b.residual.to_bits());
     }
 }
