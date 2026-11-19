@@ -11,12 +11,19 @@ re-solves and the solid rebuilds.
 Fillets are not in agcad yet (see the roadmap), so the edges here are sharp;
 everything else follows the drawing's proportions.
 
+Writes the committed showcase into ``examples/cross_block/``: ``iso.png``,
+``front.png``, ``cross_block.stl``, and (when ImageMagick is installed) the
+stacked ``compare.png`` used in the README.
+
 Usage: .venv/bin/python examples/cross_block.py
 """
 
 import base64
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, "python")  # noqa: E402
 
@@ -29,13 +36,54 @@ GREEN = (0.85, 1.0, 0.83, 1.0)
 # front panel is 553 x 614 px, so the body is 45 x 45 mm in plan and 50 tall.
 SPAN, ARM, HEIGHT = 45.0, 15.0, 50.0
 
+REFERENCE = os.path.join("examples", "example_body.png")
+OUT_DIR = os.path.join("examples", "cross_block")
+
+
+def compose_showcase(reference: str, iso_png: str, out_path: str) -> None:
+    """Stack the drawing above the render, with labels.
+
+    This is presentation only, so it is optional: without ImageMagick the
+    model and the renders are still produced.
+    """
+    magick = shutil.which("magick")
+    if not magick or not os.path.exists(reference):
+        print("showcase: ImageMagick or the reference drawing missing, skipping compare.png")
+        return
+    tmp = tempfile.mkdtemp(prefix="agcad_showcase_")
+    ref = os.path.join(tmp, "ref.png")
+    iso = os.path.join(tmp, "iso.png")
+    ref_l = os.path.join(tmp, "ref_l.png")
+    iso_l = os.path.join(tmp, "iso_l.png")
+
+    def run(*args: str) -> None:
+        subprocess.run([magick, *args], check=True)
+
+    run(reference, "-resize", "1200x", ref)
+    run(
+        iso_png, "-fuzz", "3%", "-trim", "+repage", "-bordercolor", "white",
+        "-border", "30", "-resize", "x600", "-background", "white",
+        "-gravity", "center", "-extent", "1200x600", iso,
+    )
+    for src, dst, text in [
+        (ref, ref_l, "the drawing (examples/example_body.png)"),
+        (iso, iso_l, "the model agcad rebuilt from it (examples/cross_block.py)"),
+    ]:
+        run(
+            src, "-background", "white", "-gravity", "north", "-splice", "0x46",
+            "-pointsize", "28", "-fill", "black", "-annotate", "+0+8", text, dst,
+        )
+    run(ref_l, iso_l, "-background", "white", "-gravity", "center", "-append", out_path)
+    shutil.rmtree(tmp, ignore_errors=True)
+    print(f"showcase -> {out_path}")
+
 
 def main() -> None:
-    out_dir = "exports"
-    os.makedirs(out_dir, exist_ok=True)
-    stl = os.path.abspath(os.path.join(out_dir, "cross_block.stl"))
-    iso_png = os.path.join(out_dir, "cross_block.png")
-    front_png = os.path.join(out_dir, "cross_block_front.png")
+    os.makedirs(OUT_DIR, exist_ok=True)
+    stl = os.path.abspath(os.path.join(OUT_DIR, "cross_block.stl"))
+    iso_png = os.path.join(OUT_DIR, "iso.png")
+    front_png = os.path.join(OUT_DIR, "front.png")
+    compare_png = os.path.join(OUT_DIR, "compare.png")
 
     cad = Agcad.spawn()
     doc = cad.create_document("cross_block")["doc"]
@@ -106,12 +154,23 @@ def main() -> None:
     )
     print(f"rendered front -> {png['path']}")
 
+    compose_showcase(REFERENCE, iso_png, compare_png)
+
     # Turn a knob: the solid rebuilds from the re-solved sketch.
     cad.set_parameter(doc, "height", 30.0)
     mesh = next(e for e in cad.get_scene(doc)["entities"] if e["id"] == solid["entity"])["mesh"]
     zs = [p[2] for p in mesh["positions"]]
     print(f"height 50 -> 30: solid z extent now {max(zs) - min(zs):.1f} mm")
     cad.set_parameter(doc, "height", 50.0)
+
+    # Persist the instance (program + knob values). The script above is the
+    # recipe; this is the same model with the knobs as they stand, and an
+    # embedded copy of the recipe as provenance.
+    with open(__file__, encoding="utf-8") as f:
+        source = {"language": "python", "text": f.read()}
+    doc_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block.agcad"))
+    saved = cad.save_document(doc, doc_path, source=source)
+    print(f"saved -> {saved['path']} ({saved['bytes']} bytes, {saved['params']} params)")
 
     cad.close()
 

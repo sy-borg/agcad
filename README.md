@@ -28,6 +28,36 @@ client — as is the Python client an agent drives.
 └────────────┘
 ```
 
+## Showcase: a drawing in, a parametric part out
+
+The agent is handed a picture — here `examples/example_body.png`, a front and
+a 3/4 view of a cross block — and writes `examples/cross_block.py`, which
+rebuilds the part as a parametric program:
+
+![the drawing and the model agcad rebuilt from it](examples/cross_block/compare.png)
+
+The dimensions are read off the drawing rather than guessed: its front panel
+is 553 × 614 px at the drawing's own 9 mm scale bar, so the body is
+45 × 45 mm in plan, 15 mm arms and 50 mm tall. The reproduction's camera was
+fitted by comparing silhouettes (0.99 IoU), and its front view matches the
+drawing's aspect to ~0.1% (0.898 vs 0.899). The only visible difference is
+the edge treatment: the drawing has ~1 mm fillets, and fillets are still on
+the roadmap.
+
+The loop this exercises, end to end:
+
+1. **Read** the two views and derive the dimensions.
+2. **Author** a parametric program: `span`/`arm`/`height` parameters, twelve
+   sketch lines, `extrude` into a watertight solid.
+3. **Check** with `render_offscreen` in orthographic mode from the drawing's
+   camera, and compare the silhouette.
+4. **Deliver** `cross_block.stl` for the slicer, and `cross_block.agcad`
+   (program + parameter values) so the part reopens with its knobs intact.
+
+The artifacts live in `examples/cross_block/`: `iso.png`, `front.png`,
+`compare.png`, `cross_block.stl`, `cross_block.agcad`.
+`.venv/bin/python examples/cross_block.py` regenerates them.
+
 ## Layout
 
 | Path | What it is |
@@ -37,7 +67,7 @@ client — as is the Python client an agent drives.
 | `crates/server` | `agcad` binary — line-delimited JSON-RPC on stdio or TCP |
 | `crates/viewer` | `agcad-view` — wgpu renderer, talks only the bus |
 | `python/agcad` | Dependency-free sync Python client (the agent API) |
-| `examples/` | Agent-facing demos |
+| `examples/` | Agent-facing demos; `examples/cross_block/` is the committed showcase |
 
 ## Design rules
 
