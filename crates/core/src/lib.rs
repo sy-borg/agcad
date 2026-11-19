@@ -28,8 +28,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use agcad_protocol::{
-    BooleanOp, Command, CommandResult, DocId, DocInfo, EntityId, EntitySnapshot, Mat4,
-    Mesh, ParamInfo, Rgba, RevolveAxis, Scalar, SketchElement, SVec3, Vec3, PROTOCOL_VERSION,
+    BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EntityId,
+    EntitySnapshot, Mat4, Mesh, ParamInfo, Rgba, RevolveAxis, SavedParameter, Scalar,
+    SketchElement, SourceDoc, SVec3, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION,
     SERVER_NAME,
 };
 
@@ -44,6 +45,8 @@ pub enum Error {
     UnknownDocument(DocId),
     UnknownEntity { doc: DocId, entity: EntityId },
     Invalid(String),
+    /// File-format / document I/O problems. The message is self-contained.
+    Document(String),
     NothingToUndo(DocId),
     NothingToRedo(DocId),
     Replay { step: usize, source: String },
@@ -55,6 +58,7 @@ impl fmt::Display for Error {
             Self::UnknownDocument(d) => write!(f, "unknown document {d} (hint: run create_document first, or list_documents)"),
             Self::UnknownEntity { doc, entity } => write!(f, "document {doc} has no entity {entity} (hint: get_scene lists valid entity ids)"),
             Self::Invalid(msg) => write!(f, "invalid parameters: {msg}"),
+            Self::Document(msg) => write!(f, "{msg}"),
             Self::NothingToUndo(d) => write!(f, "document {d}: nothing to undo"),
             Self::NothingToRedo(d) => write!(f, "document {d}: nothing to redo"),
             Self::Replay { step, source } => write!(f, "program replay failed at step {step}: {source} (hint: undo reverts the parameter change; check that every expression only references defined parameters)"),
@@ -175,6 +179,9 @@ pub struct Document {
     /// Raw modeling commands in execution order — the parametric function.
     program: Vec<Command>,
     params: ParamMap,
+    /// Provenance only: the script that produced this program, if any.
+    /// Saved back out with the document; never executed on open.
+    source: Option<SourceDoc>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
 }
@@ -188,6 +195,7 @@ impl Document {
             entities: BTreeMap::new(),
             program: Vec::new(),
             params: BTreeMap::new(),
+            source: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -256,6 +264,70 @@ impl Document {
             }
         }
         Ok(())
+    }
+
+    /// The durable state: name, parameter values and the program. Derived
+    /// geometry is deliberately not included — opening replays the program.
+    fn snapshot(&self, source: Option<SourceDoc>) -> DocumentSnapshot {
+        let mut program = self.program.clone();
+        // Normalize the doc id: the file is a standalone artifact, and a
+        // constant id makes save -> open -> save a byte-identical round trip.
+        for cmd in &mut program {
+            set_doc(cmd, 1);
+        }
+        DocumentSnapshot {
+            format: DOCUMENT_FORMAT.to_string(),
+            version: DOCUMENT_VERSION,
+            protocol: PROTOCOL_VERSION,
+            name: self.name.clone(),
+            parameters: self
+                .params
+                .iter()
+                .map(|(name, p)| {
+                    (name.clone(), SavedParameter { value: p.value, description: p.description.clone() })
+                })
+                .collect(),
+            program,
+            source: source.or_else(|| self.source.clone()),
+        }
+    }
+}
+
+/// Rebind every `doc` field of a command. Programs are per-document, so
+/// loading a file into a new document id rewrites them in one pass.
+fn set_doc(command: &mut Command, doc: DocId) {
+    match command {
+        Command::AddBox { doc: d, .. }
+        | Command::AddSphere { doc: d, .. }
+        | Command::AddCylinder { doc: d, .. }
+        | Command::Transform { doc: d, .. }
+        | Command::SetColor { doc: d, .. }
+        | Command::Delete { doc: d, .. }
+        | Command::Boolean { doc: d, .. }
+        | Command::AddSketch { doc: d, .. }
+        | Command::AddSketchLine { doc: d, .. }
+        | Command::AddSketchCircle { doc: d, .. }
+        | Command::Constrain { doc: d, .. }
+        | Command::RemoveConstraint { doc: d, .. }
+        | Command::MoveSketchPoint { doc: d, .. }
+        | Command::DeleteSketchElement { doc: d, .. }
+        | Command::Extrude { doc: d, .. }
+        | Command::Revolve { doc: d, .. }
+        | Command::SetParameter { doc: d, .. }
+        | Command::RemoveParameter { doc: d, .. }
+        | Command::GetParameters { doc: d }
+        | Command::Undo { doc: d }
+        | Command::Redo { doc: d }
+        | Command::GetScene { doc: d }
+        | Command::GetProgram { doc: d }
+        | Command::ExportStl { doc: d, .. }
+        | Command::SaveDocument { doc: d, .. }
+        | Command::RenderOffscreen { doc: d, .. }
+        | Command::CloseDocument { doc: d } => *d = doc,
+        Command::Initialize
+        | Command::ListDocuments
+        | Command::CreateDocument { .. }
+        | Command::OpenDocument { .. } => {},
     }
 }
 
@@ -359,10 +431,12 @@ impl Engine {
                     },
                 };
                 d.checkpoint();
-                d.params.insert(name.clone(), Param {
-                    value: resolved,
-                    description: description.clone(),
-                });
+                // A knob turn must not erase the label: when the caller
+                // omits a description, keep the existing one.
+                let description = description
+                    .clone()
+                    .or_else(|| d.params.get(name).and_then(|p| p.description.clone()));
+                d.params.insert(name.clone(), Param { value: resolved, description });
                 match d.replay() {
                     Ok(()) => Ok(CommandResult::ParameterSet {
                         doc: *doc,
@@ -473,6 +547,122 @@ impl Engine {
                     path: resolved,
                     tris,
                     bytes: 84 + tris * 50,
+                })
+            },
+
+            Command::SaveDocument { doc, path, source } => {
+                let d = self.doc(*doc)?;
+                let snapshot = d.snapshot(source.clone());
+                // Pretty + sorted keys + trailing newline: stable bytes, so
+                // two saves of the same model produce identical files.
+                let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {
+                    Error::Document(format!("cannot serialize document {doc}: {e}"))
+                })?;
+                let json = format!("{json}\n");
+                std::fs::write(path, json.as_bytes()).map_err(|e| {
+                    Error::Document(format!(
+                        "cannot write document to '{path}': {e} \
+                         (hint: use an absolute path the server can write)"
+                    ))
+                })?;
+                let resolved = std::fs::canonicalize(path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.clone());
+                Ok(CommandResult::DocumentSaved {
+                    doc: *doc,
+                    path: resolved,
+                    bytes: json.len(),
+                    commands: snapshot.program.len(),
+                    params: snapshot.parameters.len(),
+                })
+            },
+
+            Command::OpenDocument { path, name } => {
+                let text = std::fs::read_to_string(path).map_err(|e| {
+                    Error::Document(format!(
+                        "cannot read document '{path}': {e} \
+                         (hint: use an absolute path the server can read)"
+                    ))
+                })?;
+                let snap: DocumentSnapshot = serde_json::from_str(&text).map_err(|e| {
+                    Error::Document(format!(
+                        "cannot parse document '{path}': {e} \
+                         (hint: .agcad files are JSON written by save_document)"
+                    ))
+                })?;
+                if snap.format != DOCUMENT_FORMAT {
+                    return Err(Error::Document(format!(
+                        "'{path}' is not an agcad document (format: '{}'; \
+                         hint: the file must start with {{\"format\": \"{DOCUMENT_FORMAT}\"}})",
+                        snap.format
+                    )));
+                }
+                if snap.version > DOCUMENT_VERSION {
+                    return Err(Error::Document(format!(
+                        "document '{path}' is version {} but this build reads up to \
+                         {DOCUMENT_VERSION} (hint: upgrade the server)",
+                        snap.version
+                    )));
+                }
+
+                let doc = self.next_doc;
+                let stored_name = if snap.name.trim().is_empty() {
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "document".into())
+                } else {
+                    snap.name.clone()
+                };
+                let mut d = Document::new(doc, name.clone().unwrap_or(stored_name));
+                d.params = snap
+                    .parameters
+                    .iter()
+                    .map(|(k, p)| {
+                        (k.clone(), Param { value: p.value, description: p.description.clone() })
+                    })
+                    .collect();
+                d.source = snap.source.clone();
+                d.program = snap.program;
+                for cmd in &mut d.program {
+                    set_doc(cmd, doc);
+                }
+                // Rebuild geometry from the program. If it fails, nothing is
+                // inserted, so the engine never holds a half-open document.
+                d.replay().map_err(|e| {
+                    Error::Document(format!(
+                        "document '{path}' failed to replay ({e}; hint: the file may use \
+                         features this build lacks, or reference an undefined parameter)"
+                    ))
+                })?;
+
+                let result = CommandResult::DocumentOpened {
+                    doc,
+                    name: d.name.clone(),
+                    commands: d.program.len(),
+                    params: d.params.len(),
+                    entities: d.entities.len(),
+                };
+                self.next_doc += 1;
+                self.docs.insert(doc, d);
+                Ok(result)
+            },
+
+            Command::GetProgram { doc } => {
+                let d = self.doc(*doc)?;
+                Ok(CommandResult::Program {
+                    doc: *doc,
+                    name: d.name.clone(),
+                    params: d
+                        .params
+                        .iter()
+                        .map(|(name, p)| ParamInfo {
+                            name: name.clone(),
+                            value: p.value,
+                            description: p.description.clone(),
+                        })
+                        .collect(),
+                    program: d.program.clone(),
                 })
             },
 
@@ -2236,5 +2426,296 @@ mod tests {
         .unwrap();
         let snap = entity_snapshot(&mut e, id);
         assert_eq!(snap.translation, [0.0, 0.0, 10.0], "solid must follow the sketch placement");
+    }
+
+    /// Turning a knob (no description passed) must keep the label the
+    /// author wrote — the whole point of "the user only turns parameters".
+    #[test]
+    fn changing_a_parameter_keeps_its_description() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "wall".into(),
+            value: num(2.0),
+            description: Some("wall thickness".into()),
+        })
+        .unwrap();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "wall".into(),
+            value: num(3.0),
+            description: None,
+        })
+        .unwrap();
+        match e.execute(Command::GetParameters { doc: 1 }).unwrap() {
+            CommandResult::Parameters { params, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].value, 3.0);
+                assert_eq!(params[0].description.as_deref(), Some("wall thickness"));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    // --- save / open ---------------------------------------------------------
+
+    /// Deterministic signature of a document's entities: ids, names, exact
+    /// placement and mesh bits. Comparing the serialized snapshots catches
+    /// any drift in replay.
+    fn entities_json(e: &mut Engine, doc: DocId) -> String {
+        match e.execute(Command::GetScene { doc }).unwrap() {
+            CommandResult::Scene { entities, .. } => serde_json::to_string(&entities).unwrap(),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    /// Z extent of the whole scene (solids and sketch ribbons both sit at
+    /// z = 0..height, so this measures the extrusion).
+    fn scene_z_extent(e: &mut Engine, doc: DocId) -> f64 {
+        match e.execute(Command::GetScene { doc }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                let zs: Vec<f64> = entities
+                    .iter()
+                    .flat_map(|x| x.mesh.positions.iter().map(|p| p[2] as f64))
+                    .collect();
+                let hi = zs.iter().cloned().fold(f64::MIN, f64::max);
+                let lo = zs.iter().cloned().fold(f64::MAX, f64::min);
+                hi - lo
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn temp_file(name: &str) -> (std::path::PathBuf, String) {
+        let path = std::env::temp_dir().join(name);
+        let s = path.to_string_lossy().into_owned();
+        (path, s)
+    }
+
+    #[test]
+    fn save_open_round_trips_a_parametric_document() {
+        let (path, path_s) = temp_file("agcad_roundtrip.agcad");
+
+        let mut a = engine();
+        a.execute(Command::SetParameter {
+            doc: 1,
+            name: "thickness".into(),
+            value: num(5.0),
+            description: Some("plate".into()),
+        })
+        .unwrap();
+        let (sketch, _) = rect_sketch(&mut a, 30.0, 20.0);
+        let (_, volume, _) = extrude(&mut a, sketch, Scalar::Expression("thickness".into()));
+        assert!((volume - 3000.0).abs() < 1e-6);
+        let before = entities_json(&mut a, 1);
+
+        match a
+            .execute(Command::SaveDocument { doc: 1, path: path_s.clone(), source: None })
+            .unwrap()
+        {
+            CommandResult::DocumentSaved { bytes, commands, params, path, .. } => {
+                assert!(bytes > 0);
+                // add_sketch + 4 lines + 8 constraints + extrude
+                assert_eq!(commands, 14);
+                assert_eq!(params, 1);
+                assert!(path.ends_with("agcad_roundtrip.agcad"), "{path}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let mut b = Engine::new();
+        match b
+            .execute(Command::OpenDocument { path: path_s.clone(), name: None })
+            .unwrap()
+        {
+            CommandResult::DocumentOpened { doc, name, commands, params, entities } => {
+                assert_eq!(doc, 1, "a fresh engine allocates id 1");
+                assert_eq!(name, "test");
+                assert_eq!(commands, 14);
+                assert_eq!(params, 1);
+                assert_eq!(entities, 2, "sketch + solid");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        // Replay must reproduce ids, placement and every mesh bit.
+        assert_eq!(before, entities_json(&mut b, 1));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_is_byte_stable_across_reopen() {
+        let (p1, p1s) = temp_file("agcad_stable_a.agcad");
+        let (p2, p2s) = temp_file("agcad_stable_b.agcad");
+
+        let mut a = engine();
+        rect_sketch(&mut a, 10.0, 10.0);
+        let source = SourceDoc { language: "python".into(), text: "print('hi')\n".into() };
+        a.execute(Command::SaveDocument {
+            doc: 1,
+            path: p1s.clone(),
+            source: Some(source),
+        })
+        .unwrap();
+
+        // Open in a fresh engine, then save again without passing a source:
+        // the provenance stored on the document must come back out.
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: p1s.clone(), name: None }).unwrap();
+        b.execute(Command::SaveDocument { doc: 1, path: p2s.clone(), source: None }).unwrap();
+
+        let first = std::fs::read(&p1).unwrap();
+        let second = std::fs::read(&p2).unwrap();
+        assert_eq!(first, second, "save -> open -> save must be a no-op diff");
+
+        let text = String::from_utf8(first).unwrap();
+        assert!(text.contains("\"format\": \"agcad-document\""));
+        assert!(text.contains("\"version\": 1"));
+        assert!(text.contains("print('hi')"), "source is preserved as provenance");
+        // The file is the program, not the geometry.
+        assert!(!text.contains("\"mesh\""));
+        assert!(!text.contains("positions"));
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn open_rejects_bad_files_with_actionable_hints() {
+        let (path, path_s) = temp_file("agcad_bad.agcad");
+
+        std::fs::write(&path, "{ not json").unwrap();
+        let err = Engine::new()
+            .execute(Command::OpenDocument { path: path_s.clone(), name: None })
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot parse document"), "{err}");
+        assert!(err.to_string().contains("save_document"), "{err}");
+
+        std::fs::write(&path, r#"{"format":"something-else","version":1,"name":"x"}"#).unwrap();
+        let err = Engine::new()
+            .execute(Command::OpenDocument { path: path_s.clone(), name: None })
+            .unwrap_err();
+        assert!(err.to_string().contains("not an agcad document"), "{err}");
+
+        std::fs::write(&path, r#"{"format":"agcad-document","version":99,"name":"x"}"#).unwrap();
+        let err = Engine::new()
+            .execute(Command::OpenDocument { path: path_s.clone(), name: None })
+            .unwrap_err();
+        assert!(err.to_string().contains("version 99"), "{err}");
+
+        let err = Engine::new()
+            .execute(Command::OpenDocument {
+                path: "/nonexistent/nope.agcad".into(),
+                name: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot read document"), "{err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The file's commands are normalized to doc 1 so saves are stable; on
+    /// open they must be rebound to the id the engine actually allocated,
+    /// or replay would target a document that does not exist.
+    #[test]
+    fn open_rebinds_doc_ids_so_the_program_still_replays() {
+        let (path, path_s) = temp_file("agcad_rebind.agcad");
+
+        let mut a = engine();
+        a.execute(Command::SetParameter {
+            doc: 1,
+            name: "h".into(),
+            value: num(4.0),
+            description: None,
+        })
+        .unwrap();
+        let (sketch, _) = rect_sketch(&mut a, 20.0, 20.0);
+        extrude(&mut a, sketch, Scalar::Expression("h".into()));
+        a.execute(Command::SaveDocument { doc: 1, path: path_s.clone(), source: None })
+            .unwrap();
+
+        // The fresh engine already owns doc 1, so the opened file lands on 2.
+        let mut b = engine();
+        match b
+            .execute(Command::OpenDocument { path: path_s.clone(), name: Some("copy".into()) })
+            .unwrap()
+        {
+            CommandResult::DocumentOpened { doc, name, .. } => {
+                assert_eq!(doc, 2);
+                assert_eq!(name, "copy");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert!((scene_z_extent(&mut b, 2) - 4.0).abs() < 1e-6);
+
+        // A parameter change replays the whole program against doc 2.
+        b.execute(Command::SetParameter {
+            doc: 2,
+            name: "h".into(),
+            value: num(9.0),
+            description: None,
+        })
+        .unwrap();
+        assert!((scene_z_extent(&mut b, 2) - 9.0).abs() < 1e-6);
+
+        // The original document is untouched.
+        assert!((scene_z_extent(&mut a, 1) - 4.0).abs() < 1e-6);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn get_program_exposes_params_and_expression_arguments() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "thickness".into(),
+            value: num(6.0),
+            description: Some("plate".into()),
+        })
+        .unwrap();
+        let (sketch, _) = rect_sketch(&mut e, 10.0, 10.0);
+        extrude(&mut e, sketch, Scalar::Expression("thickness".into()));
+
+        match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { name, params, program, .. } => {
+                assert_eq!(name, "test");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "thickness");
+                assert_eq!(params[0].value, 6.0);
+                assert_eq!(params[0].description.as_deref(), Some("plate"));
+
+                let distances: Vec<_> = program
+                    .iter()
+                    .filter_map(|c| match c {
+                        Command::Extrude { distance, .. } => Some(distance.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(distances.len(), 1);
+                assert!(
+                    matches!(&distances[0], Scalar::Expression(s) if s == "thickness"),
+                    "the program keeps the expression, not the resolved number"
+                );
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn save_empty_document_round_trips() {
+        let (path, path_s) = temp_file("agcad_empty.agcad");
+        let mut a = engine();
+        a.execute(Command::SaveDocument { doc: 1, path: path_s.clone(), source: None })
+            .unwrap();
+
+        let mut b = Engine::new();
+        match b.execute(Command::OpenDocument { path: path_s.clone(), name: None }).unwrap() {
+            CommandResult::DocumentOpened { commands, params, entities, .. } => {
+                assert_eq!((commands, params, entities), (0, 0, 0));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

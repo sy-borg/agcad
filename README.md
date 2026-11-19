@@ -229,6 +229,15 @@ with Agcad.spawn() as cad:
       so nested loops become holes). Solids inherit the sketch placement,
       follow later sketch edits, replay parametrically, and report `volume`
       + `tris`; negative extrude goes below the sketch plane
+- [x] **Document persistence**: `save_document` writes a `.agcad` file — the
+      program plus the current parameter values, no geometry — and
+      `open_document` replays it into a new document with bit-identical ids
+      and meshes. Saves are byte-stable (save → open → save is a no-op diff),
+      and the original script can ride along as provenance (never executed).
+      `get_program` exposes the same data to any client; the Python client's
+      `export_python` renders it back into a runnable script. The `.py` is
+      the recipe; the `.agcad` is the instance — recipe plus the knobs as the
+      user left them
 - [ ] **Fillets and chamfers**: `fillet{edges, radius}` / `chamfer{edges,
       distance}` over an edge-selection query (edges named by the two adjacent
       faces or by a bounding-box filter, so an agent can target them without
@@ -252,21 +261,25 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 7 complete: sketches → solids. 58 tests cover the solver
+Milestone 7 complete: sketches → solids. 65 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
 delete, STL sketch filtering), and solid construction (extrude volumes,
 nested holes, negative extrusion, revolve around X/Y, partial sweeps,
 profile validation, dependent rebuilds, cross-engine determinism) plus
-the orthographic camera (parallel projection, depth-independent size).
+the orthographic camera (parallel projection, depth-independent size), and
+document persistence (save/open round-trips, byte-stable saves, doc-id
+rebinding, corrupt/newer-file hints, parameters keeping their descriptions).
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL → render),
-`examples/revolve_bushing.py`, and `examples/cross_block.py` — a picture →
+`examples/revolve_bushing.py`, `examples/cross_block.py` — a picture →
 model reproduction: `examples/example_body.png` is read for its two views
 (45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
-profile and extruded, then rendered from a camera fitted to the drawing.
+profile and extruded, then rendered from a camera fitted to the drawing —
+and `examples/save_load.py` (save → open in a fresh engine → change a knob →
+export back to Python and run it).
 
 Also in the roadmap but not started: fillets/chamfers with edge selection,
 3MF export, and sketches placed on existing faces or datum planes.

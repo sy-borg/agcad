@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 agcad-protocol.workspace = true
+serde_json.workspace = true
 manifold-rust = "0.19.2"
 clipper2-rust = "1.2.0"
 png = "0.18"

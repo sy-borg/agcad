@@ -109,6 +109,7 @@ fn is_mutating(command: &Command) -> bool {
             | Command::SetParameter { .. }
             | Command::RemoveParameter { .. }
             | Command::CreateDocument { .. }
+            | Command::OpenDocument { .. }
             | Command::CloseDocument { .. }
             | Command::Undo { .. }
             | Command::Redo { .. }
@@ -140,9 +141,14 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::GetScene { doc }
         | Command::GetParameters { doc }
         | Command::ExportStl { doc, .. }
+        | Command::SaveDocument { doc, .. }
+        | Command::GetProgram { doc }
         | Command::RenderOffscreen { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
-        Command::CreateDocument { .. } | Command::ListDocuments | Command::Initialize => None,
+        Command::CreateDocument { .. }
+        | Command::OpenDocument { .. }
+        | Command::ListDocuments
+        | Command::Initialize => None,
     }
 }
 

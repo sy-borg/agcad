@@ -38,8 +38,10 @@ dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
 verify -> agcad_render to SEE the result -> export_stl for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change ->
-extrude/revolve turns a closed profile into a printable solid. Failed commands
-report a hint; fix the named issue and retry."""
+extrude/revolve turns a closed profile into a printable solid. Persist a model with
+save_document -> .agcad (JSON program + current parameter values, replayed on
+open_document); a Python client script is the authoring source, not the file.
+Failed commands report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
@@ -73,6 +75,13 @@ extrude{doc,sketch,distance,name?,color?} (closed profile → watertight solid a
 revolve{doc,sketch,angle_deg?,axis?:"x"|"y",segments?,name?,color?} (profile →
   solid of revolution around an in-plane axis, default 360°; profile must stay on
   one side of the axis),
+save_document{doc,path,source?} (writes a .agcad JSON file: the program plus
+  the current parameter values; geometry is rebuilt by replay, so the file stays
+  small and diffable; source={language,text} is provenance only, never executed;
+  save -> open -> save is a no-op diff; session command, changes no state),
+open_document{path,name?} (loads a .agcad file as a NEW document and replays it;
+  returns doc, name, counts; the stored name is used unless name overrides),
+get_program{doc} (read-only program + parameters — what a save would write),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),

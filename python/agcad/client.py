@@ -346,6 +346,23 @@ class Agcad:
             segments=segments, color=color,
         )
 
+    def boolean(
+        self,
+        doc: int,
+        op: str,
+        entities: list[int],
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Union/difference/intersection of world-space solids → new entity.
+
+        Sources are kept; delete them if you only want the fused result.
+        For ``difference`` the first id is the base.
+        """
+        return self._request(
+            "boolean", doc=doc, op=op, entities=entities, name=name, color=color
+        )
+
     def transform(
         self,
         doc: int,
@@ -491,6 +508,109 @@ class Agcad:
     def get_scene(self, doc: int, meshes: bool = True) -> dict[str, Any]:
         """Scene snapshot: entities with transforms, colors and meshes."""
         return self._request("get_scene", doc=doc)
+
+    # -- persistence ---------------------------------------------------------
+
+    def save_document(
+        self,
+        doc: int,
+        path: str,
+        source: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Write the document to a ``.agcad`` file.
+
+        The file is JSON holding the program and the current parameter
+        values — not the geometry, which is rebuilt deterministically by
+        replay on open. ``source`` may carry the original script as
+        provenance (``{"language": "python", "text": ...}``); it is never
+        executed. Saves are byte-stable: save → open → save is a no-op diff.
+        """
+        return self._request("save_document", doc=doc, path=path, source=source)
+
+    def open_document(self, path: str, name: str | None = None) -> dict[str, Any]:
+        """Open a ``.agcad`` file as a new document and replay its program.
+
+        Returns ``doc`` (the new id), ``name``, and command/parameter/entity
+        counts. The stored name is used unless ``name`` overrides it.
+        """
+        return self._request("open_document", path=path, name=name)
+
+    def get_program(self, doc: int) -> dict[str, Any]:
+        """Read-only view of the program and parameters.
+
+        Returns ``name``, ``params`` and ``program`` (the modeling commands
+        with expression arguments intact). This is exactly what
+        :meth:`save_document` writes, available to any client.
+        """
+        return self._request("get_program", doc=doc)
+
+    def export_python(self, doc: int, path: str | None = None) -> str:
+        """Render the document's program as a runnable Python script.
+
+        The engine stores a language-neutral program; this is its Python
+        view, with typed client calls and every parameter value baked in.
+        Re-running the script rebuilds the same model, so it also works as a
+        readable, diffable save format. Writes ``path`` when given.
+
+        (Generation lives here, not in the engine: the Python method names
+        belong to this client, not to the core.)
+        """
+        snap = self.get_program(doc)
+        name = snap["name"]
+        params = snap.get("params", [])
+        program = snap.get("program", [])
+
+        out = [
+            f'"""Generated from the agcad document {name!r}.',
+            "",
+            "Re-running this script rebuilds the model: it is an ordinary",
+            "client, so edit it freely or keep it as the project's source.",
+            '"""',
+            "",
+            "from agcad import Agcad",
+            "",
+            "",
+            "def main() -> None:",
+            "    cad = Agcad.spawn()",
+            f'    doc = cad.create_document({name!r})["doc"]',
+            "",
+        ]
+        if params:
+            out.append("    # knobs — the user-facing parameters")
+            for p in params:
+                desc = p.get("description")
+                if desc:
+                    out.append(
+                        f"    cad.set_parameter(doc, {p['name']!r}, {p['value']!r}, {desc!r})"
+                    )
+                else:
+                    out.append(f"    cad.set_parameter(doc, {p['name']!r}, {p['value']!r})")
+            out.append("")
+        out.append("    # program")
+        for cmd in program:
+            method = cmd["method"]
+            args = [
+                (k, v)
+                for k, v in cmd.items()
+                if k not in ("method", "doc") and v is not None
+            ]
+            one_line = f"    cad.{method}(doc" + "".join(
+                f", {k}={v!r}" for k, v in args
+            ) + ")"
+            if len(one_line) <= 96:
+                out.append(one_line)
+            else:
+                out.append(f"    cad.{method}(")
+                out.append("        doc,")
+                out.extend(f"        {k}={v!r}," for k, v in args)
+                out.append("    )")
+        out += ["", "    cad.close()", "", "", 'if __name__ == "__main__":', "    main()"]
+
+        text = "\n".join(out) + "\n"
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        return text
 
     def export_stl(self, doc: int, path: str, entities: list[int] | None = None) -> dict[str, Any]:
         """Write a binary STL (world space) — a session command."""

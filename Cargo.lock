@@ -32,6 +32,7 @@ dependencies = [
  "clipper2-rust",
  "manifold-rust",
  "png",
+ "serde_json",
 ]
 
 [[package]]

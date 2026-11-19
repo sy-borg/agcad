@@ -38,6 +38,12 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const SERVER_NAME: &str = "agcad";
 
+/// Magic value in a saved document's `format` field.
+pub const DOCUMENT_FORMAT: &str = "agcad-document";
+/// File format version written by this build. Bump when the on-disk shape
+/// changes incompatibly; readers reject versions they do not know.
+pub const DOCUMENT_VERSION: u32 = 1;
+
 pub type DocId = u64;
 pub type EntityId = u64;
 pub type Vec3 = [f64; 3];
@@ -225,6 +231,35 @@ pub enum Command {
         entities: Option<Vec<EntityId>>,
     },
 
+    /// Write the document to a `.agcad` file: its program plus the current
+    /// parameter values (see [`DocumentSnapshot`]). Geometry is not stored;
+    /// opening replays the program. A session command — saving changes no
+    /// state. The file is pretty-printed and byte-stable, so save → open →
+    /// save is a no-op diff.
+    SaveDocument {
+        doc: DocId,
+        path: String,
+        /// Optional authoring source to embed as provenance. Opening a
+        /// document never executes it; it is documentation.
+        #[serde(default)]
+        source: Option<SourceDoc>,
+    },
+
+    /// Open a saved document as a new document (new id) and replay its
+    /// program. Returns the new id and counts. The stored name wins unless
+    /// `name` is given.
+    OpenDocument {
+        path: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+
+    /// Read-only view of the document's program and parameters — what a
+    /// save would write. Useful for clients that render their own language
+    /// (e.g. the Python client's `export_python`); the engine stays
+    /// language-agnostic.
+    GetProgram { doc: DocId },
+
     /// Headless software render of the document's world-space scene to a
     /// PNG, returned inline as base64 (and optionally written to `path`).
     /// A session command — rendering changes no state. Deterministic:
@@ -399,6 +434,26 @@ pub enum CommandResult {
     Redone { doc: DocId },
     Scene { doc: DocId, entities: Vec<EntitySnapshot> },
     StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
+    DocumentSaved {
+        doc: DocId,
+        path: String,
+        bytes: usize,
+        commands: usize,
+        params: usize,
+    },
+    DocumentOpened {
+        doc: DocId,
+        name: String,
+        commands: usize,
+        params: usize,
+        entities: usize,
+    },
+    Program {
+        doc: DocId,
+        name: String,
+        params: Vec<ParamInfo>,
+        program: Vec<Command>,
+    },
     Rendered {
         doc: DocId,
         width: u32,
@@ -440,6 +495,54 @@ pub struct DocInfo {
     pub doc: DocId,
     pub name: String,
     pub entity_count: usize,
+}
+
+/// The on-disk form of a document (`.agcad`, JSON).
+///
+/// It stores the *parametric function* — the program and the current
+/// parameter values — and nothing derived. Geometry is rebuilt by replaying
+/// the program on open, which is deterministic (same program + parameters →
+/// identical ids and meshes, bit for bit). Storing meshes would let the file
+/// drift from the program; not storing them keeps the file small and
+/// diffable.
+///
+/// `program` commands are normalized to `doc: 1` on write and rebound to the
+/// document's real id on open, so save → open → save is byte-identical.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSnapshot {
+    /// Must equal [`DOCUMENT_FORMAT`].
+    pub format: String,
+    /// File format version ([`DOCUMENT_VERSION`] when written).
+    pub version: u32,
+    /// Protocol version that produced the file (diagnostics).
+    #[serde(default)]
+    pub protocol: u32,
+    pub name: String,
+    /// Current parameter values, sorted by name.
+    #[serde(default)]
+    pub parameters: std::collections::BTreeMap<String, SavedParameter>,
+    /// Modeling commands in execution order.
+    #[serde(default)]
+    pub program: Vec<Command>,
+    /// Original authoring source, for provenance only. Opening a document
+    /// replays `program`; it never executes `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceDoc>,
+}
+
+/// One parameter in a saved document: the engine stores the resolved value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedParameter {
+    pub value: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Provenance for a document: the script an agent wrote to build it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceDoc {
+    pub language: String,
+    pub text: String,
 }
 
 /// Reference to a point (or a whole element) inside a sketch.
