@@ -309,6 +309,45 @@ pub enum Command {
     /// Delete a sketch element; constraints referencing it are removed
     /// too (cascade), then the sketch re-solves.
     DeleteSketchElement { doc: DocId, sketch: EntityId, element: u64 },
+
+    /// Extrude a closed sketch profile into a printable solid along the
+    /// sketch normal. The sketch must be made of closed loops (lines that
+    /// form loops, and/or circles); holes are handled (a circle inside a
+    /// loop becomes a through-hole). The result is a watertight solid
+    /// placed by the sketch's transform, and it follows later sketch edits.
+    Extrude {
+        doc: DocId,
+        sketch: EntityId,
+        /// Height along the sketch normal (mm). Negative extrudes the other
+        /// way. May be an expression.
+        distance: Scalar,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
+    /// Revolve a closed sketch profile around an in-plane axis into a
+    /// printable solid. The profile must lie entirely on one side of the
+    /// axis (touching it is fine).
+    Revolve {
+        doc: DocId,
+        sketch: EntityId,
+        /// Sweep angle in degrees (default 360). May be an expression.
+        #[serde(default)]
+        angle_deg: Option<Scalar>,
+        /// Axis to revolve around, in sketch-local coordinates
+        /// (default: the sketch's X axis).
+        #[serde(default)]
+        axis: Option<RevolveAxis>,
+        /// Segments around the revolution; omit for an automatic count.
+        #[serde(default)]
+        segments: Option<u32>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
 }
 
 /// Which set operation a [`Command::Boolean`] performs.
@@ -380,6 +419,15 @@ pub enum CommandResult {
     },
     ConstraintRemoved { doc: DocId, sketch: EntityId, constraint: u64 },
     SketchPointMoved { doc: DocId, sketch: EntityId, element: u64 },
+    /// A sketch was turned into a solid (extrude/revolve). `volume` is the
+    /// enclosed volume in mm³ — a quick printability sanity check.
+    SolidCreated {
+        doc: DocId,
+        entity: EntityId,
+        sketch: EntityId,
+        volume: f64,
+        tris: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,6 +473,25 @@ impl ConstraintKind {
             Self::Distance => "distance",
             Self::Radius => "radius",
             Self::Diameter => "diameter",
+        }
+    }
+}
+
+/// Which in-plane axis a revolve turns around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevolveAxis {
+    /// The sketch's local X axis (profile revolves in the XZ plane).
+    X,
+    /// The sketch's local Y axis (profile revolves in the YZ plane).
+    Y,
+}
+
+impl RevolveAxis {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Y => "y",
         }
     }
 }

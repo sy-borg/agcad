@@ -37,8 +37,9 @@ Workflow: create_document -> set_parameter(...) -> add primitives with expressio
 dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
 verify -> agcad_render to SEE the result -> export_stl for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
-add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change.
-Failed commands report a hint; fix the named issue and retry."""
+add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change ->
+extrude/revolve turns a closed profile into a printable solid. Failed commands
+report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
@@ -66,6 +67,12 @@ remove_constraint{doc,sketch,constraint},
 move_sketch_point{doc,sketch,element,point,to:[x,y]} (0 = line start / circle
   center, 1 = line end; steers the solver, then re-solves),
 delete_sketch_element{doc,sketch,element} (constraints on it cascade away),
+extrude{doc,sketch,distance,name?,color?} (closed profile → watertight solid along
+  the sketch normal; negative distance extrudes the other way; nested loops become
+  holes; the solid follows later sketch edits; returns volume + tris),
+revolve{doc,sketch,angle_deg?,axis?:"x"|"y",segments?,name?,color?} (profile →
+  solid of revolution around an in-plane axis, default 360°; profile must stay on
+  one side of the axis),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),

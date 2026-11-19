@@ -441,6 +441,47 @@ class Agcad:
             "delete_sketch_element", doc=doc, sketch=sketch, element=element
         )
 
+    # -- sketch → solid ------------------------------------------------------
+
+    def extrude(
+        self,
+        doc: int,
+        sketch: int,
+        distance: float | str,
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Extrude a closed sketch profile along the sketch normal.
+
+        Holes are handled (nested loops alternate solid/hole). A negative
+        distance extrudes the other way. The solid follows later sketch
+        edits and replays parametrically. Returns ``volume`` and ``tris``.
+        """
+        return self._request(
+            "extrude", doc=doc, sketch=sketch, distance=distance, name=name, color=color
+        )
+
+    def revolve(
+        self,
+        doc: int,
+        sketch: int,
+        angle_deg: float | str | None = None,
+        axis: str | None = None,
+        segments: int | None = None,
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Revolve a closed sketch profile around an in-plane axis.
+
+        ``axis`` is ``"x"`` (default) or ``"y"`` in sketch-local coordinates;
+        ``angle_deg`` defaults to 360. The profile must stay on one side of
+        the axis (touching is fine).
+        """
+        return self._request(
+            "revolve", doc=doc, sketch=sketch, angle_deg=angle_deg, axis=axis,
+            segments=segments, name=name, color=color,
+        )
+
     def undo(self, doc: int) -> dict[str, Any]:
         return self._request("undo", doc=doc)
 

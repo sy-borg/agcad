@@ -29,6 +29,7 @@ name = "agcad-core"
 version = "0.1.0"
 dependencies = [
  "agcad-protocol",
+ "clipper2-rust",
  "manifold-rust",
  "png",
 ]

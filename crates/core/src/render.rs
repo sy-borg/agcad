@@ -143,6 +143,10 @@ fn rasterize(items: &[RenderItem<'_>], camera: Camera, width: u32, height: u32, 
     let mut depth = vec![f64::INFINITY; w * h];
 
     let key = normalize(KEY_LIGHT);
+    // Headlight direction is constant per frame. Using the vector to each
+    // triangle's first vertex instead makes large flat faces shade in visible
+    // facets (each triangle gets a slightly different headlight term).
+    let head_dir = normalize(sub(camera.eye, camera.target));
 
     for item in items {
         // World-space positions (f32 math, matching the viewer convention).
@@ -166,7 +170,7 @@ fn rasterize(items: &[RenderItem<'_>], camera: Camera, width: u32, height: u32, 
 
             // Flat shading: ambient + key light + camera headlight.
             let lam = dot(n, key).max(0.0);
-            let head = dot(n, view_dir).max(0.0);
+            let head = dot(n, head_dir).max(0.0);
             let intensity = (0.30 + 0.62 * lam + 0.18 * head).min(1.0);
             let tri_color: [u8; 3] =
                 [0, 1, 2].map(|i| ((item.color[i] as f64 * intensity).clamp(0.0, 1.0) * 255.0) as u8);

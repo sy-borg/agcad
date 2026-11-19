@@ -93,7 +93,7 @@ fn to_manifold(mesh: &Mesh) -> Result<Manifold, Error> {
 
 /// Manifold solid → agcad `Mesh` (f32, indexed), with per-vertex normals
 /// accumulated from adjacent faces (smooth shading for curved results).
-fn from_manifold(solid: &Manifold) -> Mesh {
+pub(crate) fn from_manifold(solid: &Manifold) -> Mesh {
     let m = solid.get_mesh_gl64(0);
     let positions: Vec<[f32; 3]> = m
         .vert_properties

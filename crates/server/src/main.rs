@@ -104,6 +104,8 @@ fn is_mutating(command: &Command) -> bool {
             | Command::RemoveConstraint { .. }
             | Command::MoveSketchPoint { .. }
             | Command::DeleteSketchElement { .. }
+            | Command::Extrude { .. }
+            | Command::Revolve { .. }
             | Command::SetParameter { .. }
             | Command::RemoveParameter { .. }
             | Command::CreateDocument { .. }
@@ -129,6 +131,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::RemoveConstraint { doc, .. }
         | Command::MoveSketchPoint { doc, .. }
         | Command::DeleteSketchElement { doc, .. }
+        | Command::Extrude { doc, .. }
+        | Command::Revolve { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::Undo { doc }

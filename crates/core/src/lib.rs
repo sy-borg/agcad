@@ -21,6 +21,7 @@ pub mod geo;
 pub mod mat4;
 pub mod render;
 pub mod sketch;
+pub mod solid;
 pub mod stl;
 
 use std::collections::BTreeMap;
@@ -28,7 +29,8 @@ use std::fmt;
 
 use agcad_protocol::{
     BooleanOp, Command, CommandResult, DocId, DocInfo, EntityId, EntitySnapshot, Mat4,
-    Mesh, ParamInfo, Rgba, Scalar, SketchElement, SVec3, Vec3, PROTOCOL_VERSION, SERVER_NAME,
+    Mesh, ParamInfo, Rgba, RevolveAxis, Scalar, SketchElement, SVec3, Vec3, PROTOCOL_VERSION,
+    SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -115,6 +117,20 @@ pub enum Shape {
         solved: bool,
         residual: f64,
         dof: i64,
+    },
+    /// A solid made by extruding a sketch profile along its normal. Keeps
+    /// the source sketch id so it can rebuild when the sketch changes.
+    Extrude {
+        sketch: EntityId,
+        /// Extrusion height (mm); negative extrudes the other way.
+        distance: f64,
+    },
+    /// A solid made by revolving a sketch profile around an in-plane axis.
+    Revolve {
+        sketch: EntityId,
+        angle_deg: f64,
+        axis: RevolveAxis,
+        segments: Option<u32>,
     },
 }
 
@@ -310,7 +326,9 @@ impl Engine {
             | Command::Constrain { .. }
             | Command::RemoveConstraint { .. }
             | Command::MoveSketchPoint { .. }
-            | Command::DeleteSketchElement { .. } => {
+            | Command::DeleteSketchElement { .. }
+            | Command::Extrude { .. }
+            | Command::Revolve { .. } => {
                 let doc = doc_of(&command).expect("modeling commands always carry a doc");
                 let d = self.doc_mut(doc)?;
                 d.checkpoint();
@@ -540,6 +558,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::RemoveConstraint { doc, .. }
         | Command::MoveSketchPoint { doc, .. }
         | Command::DeleteSketchElement { doc, .. }
+        | Command::Extrude { doc, .. }
+        | Command::Revolve { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::GetParameters { doc }
@@ -618,6 +638,11 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             }
             if let Some(s) = scale {
                 e.scale = s;
+            }
+            let is_sketch = matches!(e.shape, Shape::Sketch { .. });
+            if is_sketch {
+                // Solids built from the sketch follow its placement.
+                rebuild_dependents(d, *doc, *entity)?;
             }
             Ok(CommandResult::Transformed { doc: *doc, entity: *entity })
         },
@@ -707,7 +732,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 elements.push(SketchElement::Line { id, p1, p2 });
                 id
             };
-            refresh_sketch(d, *sketch)?;
+            refresh_sketch(d, *doc, *sketch)?;
             Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
         },
 
@@ -723,7 +748,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 elements.push(SketchElement::Circle { id, center, radius });
                 id
             };
-            refresh_sketch(d, *sketch)?;
+            refresh_sketch(d, *doc, *sketch)?;
             Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
         },
 
@@ -745,7 +770,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 });
                 cid
             };
-            let report = refresh_sketch(d, *sketch)?;
+            let report = refresh_sketch(d, *doc, *sketch)?;
             Ok(sketch_result(SketchOutcome::Constraint(*doc, *sketch, cid, report)))
         },
 
@@ -760,7 +785,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     )));
                 }
             }
-            refresh_sketch(d, *sketch)?;
+            refresh_sketch(d, *doc, *sketch)?;
             Ok(CommandResult::ConstraintRemoved { doc: *doc, sketch: *sketch, constraint: *constraint })
         },
 
@@ -781,7 +806,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     },
                 }
             }
-            refresh_sketch(d, *sketch)?;
+            refresh_sketch(d, *doc, *sketch)?;
             Ok(CommandResult::SketchPointMoved { doc: *doc, sketch: *sketch, element: *element })
         },
 
@@ -798,19 +823,154 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 // Cascade: constraints referencing the deleted element go too.
                 constraints.retain(|c| c.refs.iter().all(|r| r.element != *element));
             }
-            refresh_sketch(d, *sketch)?;
+            refresh_sketch(d, *doc, *sketch)?;
             Ok(CommandResult::SketchElementDeleted { doc: *doc, sketch: *sketch, element: *element })
+        },
+
+        // --- sketch → solid -------------------------------------------------
+
+        Command::Extrude { doc, sketch, distance, name, color } => {
+            let distance = d.resolve(distance)?;
+            if distance.abs() < 1e-9 {
+                return Err(Error::Invalid(
+                    "extrude distance must be non-zero (hint: a negative distance extrudes the other way)"
+                        .into(),
+                ));
+            }
+            let (loops, (translation, rotation_deg, scale)) = sketch_profile(d, *doc, *sketch)?;
+            let (mesh, volume) = solid::extrude(&loops, distance)?;
+            let tris = mesh.indices.len() / 3;
+            let id = d.next_entity();
+            d.entities.insert(
+                id,
+                Entity {
+                    id,
+                    name: name.clone().unwrap_or_else(|| "extrude".into()),
+                    shape: Shape::Extrude { sketch: *sketch, distance },
+                    mesh,
+                    translation,
+                    rotation_deg,
+                    scale,
+                    color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                },
+            );
+            Ok(CommandResult::SolidCreated { doc: *doc, entity: id, sketch: *sketch, volume, tris })
+        },
+
+        Command::Revolve { doc, sketch, angle_deg, axis, segments, name, color } => {
+            let angle = match angle_deg {
+                Some(v) => d.resolve(v)?,
+                None => 360.0,
+            };
+            if !(angle.is_finite()) || angle <= 0.0 {
+                return Err(Error::Invalid(format!(
+                    "revolve angle must be a positive number of degrees (got {angle})"
+                )));
+            }
+            let axis = axis.unwrap_or(RevolveAxis::X);
+            let segments = segments.map(|n| n.clamp(3, 512));
+            let (loops, (translation, rotation_deg, scale)) = sketch_profile(d, *doc, *sketch)?;
+            let (mesh, volume) = solid::revolve(&loops, angle, axis, segments)?;
+            let tris = mesh.indices.len() / 3;
+            let id = d.next_entity();
+            d.entities.insert(
+                id,
+                Entity {
+                    id,
+                    name: name.clone().unwrap_or_else(|| "revolve".into()),
+                    shape: Shape::Revolve { sketch: *sketch, angle_deg: angle, axis, segments },
+                    mesh,
+                    translation,
+                    rotation_deg,
+                    scale,
+                    color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                },
+            );
+            Ok(CommandResult::SolidCreated { doc: *doc, entity: id, sketch: *sketch, volume, tris })
         },
 
         Command::Delete { doc, entity } => {
             if d.entities.remove(entity).is_none() {
                 return Err(Error::UnknownEntity { doc: *doc, entity: *entity });
             }
+            // Deleting a sketch also removes the solids built from it —
+            // otherwise replay would hit a dangling sketch reference.
+            let dependents: Vec<EntityId> = d
+                .entities
+                .iter()
+                .filter(|(_, e)| match e.shape {
+                    Shape::Extrude { sketch, .. } | Shape::Revolve { sketch, .. } => sketch == *entity,
+                    _ => false,
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in dependents {
+                d.entities.remove(&id);
+            }
             Ok(CommandResult::Deleted { doc: *doc, entity: *entity })
         },
 
         _ => Err(Error::Invalid("not a modeling command".into())),
     }
+}
+
+/// Closed profile loops of a sketch plus its placement, for extrude/revolve.
+#[allow(clippy::type_complexity)]
+fn sketch_profile(
+    d: &Document,
+    doc: DocId,
+    sketch: EntityId,
+) -> Result<(Vec<Vec<[f64; 2]>>, (Vec3, Vec3, Vec3))> {
+    let e = d.entities.get(&sketch).ok_or(Error::UnknownEntity { doc, entity: sketch })?;
+    match &e.shape {
+        Shape::Sketch { elements, .. } => Ok((
+            sketch::profile_loops(elements).map_err(Error::Invalid)?,
+            (e.translation, e.rotation_deg, e.scale),
+        )),
+        _ => Err(Error::Invalid(format!(
+            "entity {sketch} is not a sketch (hint: create one with add_sketch, then extrude it)"
+        ))),
+    }
+}
+
+/// Rebuild every extrude/revolve that references `sketch`, so solids follow
+/// sketch edits immediately — not only on the next full replay. The sketch's
+/// placement is copied too, so moving/rotating a sketch carries its solids.
+fn rebuild_dependents(d: &mut Document, doc: DocId, sketch: EntityId) -> Result<()> {
+    let ids: Vec<EntityId> = d.entities.keys().copied().collect();
+    for id in ids {
+        let kind = match d.entities.get(&id) {
+            Some(e) => match e.shape {
+                Shape::Extrude { sketch: s, distance } if s == sketch => Some(ExtrudeKind::Extrude(distance)),
+                Shape::Revolve { sketch: s, angle_deg, axis, segments } if s == sketch => {
+                    Some(ExtrudeKind::Revolve(angle_deg, axis, segments))
+                },
+                _ => None,
+            },
+            None => None,
+        };
+        let Some(kind) = kind else { continue };
+
+        let (loops, placement) = sketch_profile(d, doc, sketch)?;
+        let (mesh, _volume) = match kind {
+            ExtrudeKind::Extrude(distance) => solid::extrude(&loops, distance),
+            ExtrudeKind::Revolve(angle, axis, segments) => solid::revolve(&loops, angle, axis, segments),
+        }
+        .map_err(|e| {
+            Error::Invalid(format!(
+                "cannot rebuild entity {id} from sketch {sketch}: {e} (hint: delete the solid first if you want to change the profile)"
+            ))
+        })?;
+        let e = d.entity_mut(id)?;
+        e.mesh = mesh;
+        (e.translation, e.rotation_deg, e.scale) = placement;
+    }
+    Ok(())
+}
+
+enum ExtrudeKind {
+    Extrude(f64),
+    Revolve(f64, RevolveAxis, Option<u32>),
 }
 
 /// Mutable access to a sketch entity's shape fields; error if not a sketch.
@@ -842,7 +1002,7 @@ fn sketch_parts(
 
 /// Re-solve a sketch from its current elements/constraints and refresh the
 /// display mesh + solver status. Called after every sketch mutation.
-fn refresh_sketch(d: &mut Document, sketch: EntityId) -> Result<sketch::SolveReport> {
+fn refresh_sketch(d: &mut Document, doc: DocId, sketch: EntityId) -> Result<sketch::SolveReport> {
     let (mut elements, constraints) = {
         let (se, sc, ..) = sketch_parts(d, sketch)?;
         (se.clone(), sc.clone())
@@ -856,6 +1016,8 @@ fn refresh_sketch(d: &mut Document, sketch: EntityId) -> Result<sketch::SolveRep
     *residual = report.residual;
     *dof = report.dof;
     d.entity_mut(sketch)?.mesh = mesh;
+    // Solids built from this sketch must follow it immediately.
+    rebuild_dependents(d, doc, sketch)?;
     Ok(report)
 }
 
@@ -944,6 +1106,11 @@ fn add_entity(
         Shape::Boolean { .. } => unreachable!("boolean shapes are not tessellated here"),
         // Sketches are created by AddSketch (with solver state), never here.
         Shape::Sketch { .. } => unreachable!("sketch shapes are not tessellated here"),
+        // Solids are built by Extrude/Revolve, which create their entities
+        // directly with the kernel's mesh.
+        Shape::Extrude { .. } | Shape::Revolve { .. } => {
+            unreachable!("extrude/revolve shapes are not tessellated here")
+        },
     };
     let entity = Entity {
         id,
@@ -1789,5 +1956,280 @@ mod tests {
         assert_eq!(a.elements, b.elements);
         assert_eq!(a.constraints, b.constraints);
         assert_eq!(a.residual.to_bits(), b.residual.to_bits());
+    }
+
+    // --- sketch → solid -----------------------------------------------------
+
+    /// A properly constrained rectangle profile (closed loop, axis-aligned),
+    /// so later constraints edit it without tearing the loop apart.
+    fn rect_sketch(e: &mut Engine, w: f64, h: f64) -> (EntityId, [u64; 4]) {
+        let s = add_sketch(e, "profile");
+        let a = add_line(e, s, [0.0, 0.0], [w, 0.0]);
+        let b = add_line(e, s, [w, 0.0], [w, h]);
+        let c = add_line(e, s, [w, h], [0.0, h]);
+        let d = add_line(e, s, [0.0, h], [0.0, 0.0]);
+        for (p, q) in [(a, b), (b, c), (c, d), (d, a)] {
+            constrain(e, s, K::Coincident, vec![pref(p, 1), pref(q, 0)], None);
+        }
+        constrain(e, s, K::Horizontal, vec![wref(a)], None);
+        constrain(e, s, K::Horizontal, vec![wref(c)], None);
+        constrain(e, s, K::Vertical, vec![wref(b)], None);
+        constrain(e, s, K::Vertical, vec![wref(d)], None);
+        (s, [a, b, c, d])
+    }
+
+    fn extrude(e: &mut Engine, sketch: EntityId, distance: Scalar) -> (EntityId, f64, usize) {
+        match e
+            .execute(Command::Extrude { doc: 1, sketch, distance, name: None, color: None })
+            .unwrap()
+        {
+            CommandResult::SolidCreated { entity, volume, tris, .. } => (entity, volume, tris),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn entity_snapshot(e: &mut Engine, id: EntityId) -> EntitySnapshot {
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => entities.into_iter().find(|x| x.id == id).unwrap(),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn extrude_sketch_creates_printable_solid() {
+        let mut e = engine();
+        let (s, _) = rect_sketch(&mut e, 40.0, 30.0);
+        let (id, volume, tris) = extrude(&mut e, s, num(5.0));
+        assert!((volume - 40.0 * 30.0 * 5.0).abs() < 1e-6, "volume {volume}");
+        assert_eq!(tris, 12, "a rectangle extrusion is a box");
+        let z = extent(&mut e, id, 2);
+        assert!((z - 5.0).abs() < 1e-6, "z extent {z}");
+        // The solid inherits the sketch placement (base on the sketch plane).
+        let snap = entity_snapshot(&mut e, id);
+        let sketch = entity_snapshot(&mut e, s);
+        assert_eq!(snap.translation, sketch.translation);
+        assert_eq!(snap.rotation_deg, sketch.rotation_deg);
+    }
+
+    #[test]
+    fn extrude_turns_nested_circle_into_a_hole() {
+        let mut e = engine();
+        let (s, _) = rect_sketch(&mut e, 40.0, 30.0);
+        let c = match e
+            .execute(Command::AddSketchCircle {
+                doc: 1,
+                sketch: s,
+                center: [num(20.0), num(15.0)],
+                radius: num(5.0),
+            })
+            .unwrap()
+        {
+            CommandResult::SketchElementCreated { element, .. } => element,
+            r => panic!("unexpected result {r:?}"),
+        };
+        constrain(&mut e, s, K::Radius, vec![wref(c)], Some(num(5.0)));
+        let (_, volume, _) = extrude(&mut e, s, num(2.0));
+        let expected = (40.0 * 30.0 - std::f64::consts::PI * 25.0) * 2.0;
+        assert!((volume - expected).abs() / expected < 0.01, "volume {volume} vs {expected}");
+    }
+
+    /// Adding a constraint *after* the extrude must update the solid now,
+    /// not only on the next full replay.
+    #[test]
+    fn solid_follows_later_sketch_edits() {
+        let mut e = engine();
+        let (s, [bottom, ..]) = rect_sketch(&mut e, 40.0, 30.0);
+        let (id, volume, _) = extrude(&mut e, s, num(5.0));
+        assert!((volume - 6000.0).abs() < 1e-6);
+        constrain(&mut e, s, K::Distance, vec![pref(bottom, 0), pref(bottom, 1)], Some(num(60.0)));
+        let snap = entity_snapshot(&mut e, id);
+        let xs: Vec<f64> = snap.mesh.positions.iter().map(|p| p[0] as f64).collect();
+        let width = xs.iter().cloned().fold(f64::MIN, f64::max) - xs.iter().cloned().fold(f64::MAX, f64::min);
+        assert!((width - 60.0).abs() < 1e-4, "solid width {width} did not follow the constraint");
+        // Volume follows too: 60 × 30 × 5.
+        let zs: Vec<f64> = snap.mesh.positions.iter().map(|p| p[2] as f64).collect();
+        let depth = zs.iter().cloned().fold(f64::MIN, f64::max) - zs.iter().cloned().fold(f64::MAX, f64::min);
+        assert!((width * 30.0 * depth - 9000.0).abs() < 1.0, "volume {:.1}", width * 30.0 * depth);
+    }
+
+    #[test]
+    fn extrude_replays_parametrically() {
+        let mut e = engine();
+        e.execute(Command::SetParameter { doc: 1, name: "thickness".into(), value: num(4.0), description: None })
+            .unwrap();
+        let (s, _) = rect_sketch(&mut e, 20.0, 20.0);
+        let (id, before, _) = extrude(&mut e, s, Scalar::Expression("thickness".into()));
+        assert!((before - 1600.0).abs() < 1e-6, "volume {before}");
+        e.execute(Command::SetParameter { doc: 1, name: "thickness".into(), value: num(10.0), description: None })
+            .unwrap();
+        let snap = entity_snapshot(&mut e, id);
+        let zs: Vec<f64> = snap.mesh.positions.iter().map(|p| p[2] as f64).collect();
+        let z = zs.iter().cloned().fold(f64::MIN, f64::max) - zs.iter().cloned().fold(f64::MAX, f64::min);
+        assert!((z - 10.0).abs() < 1e-6, "z extent after parameter change: {z}");
+    }
+
+    #[test]
+    fn negative_extrude_builds_below_the_sketch_plane() {
+        let mut e = engine();
+        let (s, _) = rect_sketch(&mut e, 10.0, 10.0);
+        let (id, volume, _) = extrude(&mut e, s, num(-3.0));
+        assert!((volume - 300.0).abs() < 1e-6);
+        let snap = entity_snapshot(&mut e, id);
+        let zs: Vec<f64> = snap.mesh.positions.iter().map(|p| p[2] as f64).collect();
+        let (lo, hi) = (
+            zs.iter().cloned().fold(f64::MAX, f64::min),
+            zs.iter().cloned().fold(f64::MIN, f64::max),
+        );
+        assert!((lo + 3.0).abs() < 1e-6 && hi.abs() < 1e-6, "z {lo}..{hi}");
+    }
+
+    #[test]
+    fn revolve_sketch_makes_a_tube() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        add_line(&mut e, s, [0.0, 5.0], [20.0, 5.0]);
+        add_line(&mut e, s, [20.0, 5.0], [20.0, 10.0]);
+        add_line(&mut e, s, [20.0, 10.0], [0.0, 10.0]);
+        add_line(&mut e, s, [0.0, 10.0], [0.0, 5.0]);
+        match e
+            .execute(Command::Revolve {
+                doc: 1,
+                sketch: s,
+                angle_deg: None,
+                axis: None,
+                segments: Some(256),
+                name: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::SolidCreated { volume, tris, .. } => {
+                let expected = std::f64::consts::PI * (100.0 - 25.0) * 20.0;
+                assert!((volume - expected).abs() / expected < 0.005, "volume {volume} vs {expected}");
+                assert!(tris > 100);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn open_profile_is_rejected_with_a_hint() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        add_line(&mut e, s, [10.0, 0.0], [10.0, 10.0]);
+        let err = e
+            .execute(Command::Extrude { doc: 1, sketch: s, distance: num(5.0), name: None, color: None })
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("profile is open"), "{msg}");
+        // The failed command must not leave a program entry behind.
+        assert_eq!(entity_snapshot(&mut e, s).id, s);
+    }
+
+    #[test]
+    fn revolve_rejects_a_profile_crossing_the_axis() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        add_line(&mut e, s, [0.0, -5.0], [20.0, -5.0]);
+        add_line(&mut e, s, [20.0, -5.0], [20.0, 10.0]);
+        add_line(&mut e, s, [20.0, 10.0], [0.0, 10.0]);
+        add_line(&mut e, s, [0.0, 10.0], [0.0, -5.0]);
+        let err = e
+            .execute(Command::Revolve {
+                doc: 1,
+                sketch: s,
+                angle_deg: None,
+                axis: None,
+                segments: None,
+                name: None,
+                color: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("crosses the revolve axis"), "{err}");
+    }
+
+    #[test]
+    fn deleting_a_sketch_cascades_to_its_solids() {
+        let mut e = engine();
+        let (s, _) = rect_sketch(&mut e, 10.0, 10.0);
+        extrude(&mut e, s, num(2.0));
+        e.execute(Command::Delete { doc: 1, entity: s }).unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert!(entities.is_empty(), "solid should cascade"),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn extruded_solid_exports_to_stl() {
+        let mut e = engine();
+        let (s, _) = rect_sketch(&mut e, 10.0, 10.0);
+        extrude(&mut e, s, num(5.0));
+        let path = std::env::temp_dir().join("agcad_extrude.stl");
+        let path_str = path.to_string_lossy().to_string();
+        match e.execute(Command::ExportStl { doc: 1, path: path_str, entities: None }).unwrap() {
+            CommandResult::StlExported { tris, bytes, .. } => {
+                assert_eq!(tris, 12);
+                assert_eq!(bytes, 84 + 12 * 50);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn extrude_is_deterministic_across_engines() {
+        let build = || {
+            let mut e = engine();
+            let (s, _) = rect_sketch(&mut e, 33.0, 17.0);
+            let (id, volume, _) = extrude(&mut e, s, num(4.5));
+            let snap = entity_snapshot(&mut e, id);
+            (snap.mesh.positions, snap.mesh.indices, volume.to_bits())
+        };
+        assert_eq!(build(), build());
+    }
+
+    #[test]
+    fn undo_restores_extrude() {
+        let mut e = engine();
+        let (s, _) = rect_sketch(&mut e, 10.0, 10.0);
+        let (id, volume, _) = extrude(&mut e, s, num(2.0));
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                assert_eq!(entities.len(), 1, "undo removes the solid");
+                assert_eq!(entities[0].id, s);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        e.execute(Command::Redo { doc: 1 }).unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                let solid = entities.iter().find(|x| x.id == id).expect("solid restored");
+                let zs: Vec<f64> = solid.mesh.positions.iter().map(|p| p[2] as f64).collect();
+                let z = zs.iter().cloned().fold(f64::MIN, f64::max) - zs.iter().cloned().fold(f64::MAX, f64::min);
+                assert!((z - 2.0).abs() < 1e-6);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert!((volume - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transforming_a_sketch_moves_its_solids() {
+        let mut e = engine();
+        let (s, _) = rect_sketch(&mut e, 10.0, 10.0);
+        let (id, _, _) = extrude(&mut e, s, num(2.0));
+        e.execute(Command::Transform {
+            doc: 1,
+            entity: s,
+            translation: Some([num(0.0), num(0.0), num(10.0)]),
+            rotation_deg: None,
+            scale: None,
+        })
+        .unwrap();
+        let snap = entity_snapshot(&mut e, id);
+        assert_eq!(snap.translation, [0.0, 0.0, 10.0], "solid must follow the sketch placement");
     }
 }

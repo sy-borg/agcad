@@ -222,6 +222,12 @@ with Agcad.spawn() as cad:
       be expressions, so sketches re-solve on parameter change. Snapshot
       reports `solved/residual/dof`; sketches render as ribbons and are
       skipped by STL export
+- [x] **Sketch → solid**: `extrude{distance}` and `revolve{angle_deg, axis}`
+      turn closed profiles into watertight printable solids (Manifold's
+      extrusion/revolution constructors + Clipper2 even-odd profile cleanup,
+      so nested loops become holes). Solids inherit the sketch placement,
+      follow later sketch edits, replay parametrically, and report `volume`
+      + `tris`; negative extrude goes below the sketch plane
 - [ ] Rust MCP server (single self-contained binary; the Python one is
       already adapter-clean)
 - [ ] PyO3 bindings (native-speed path for hot loops, same API)
@@ -229,9 +235,14 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 6 complete: sketches and constraints. 35 tests cover the solver
+Milestone 7 complete: sketches → solids. 56 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
-over-constraint reporting, bit-identical determinism, ribbon geometry) and
-the engine path (constraints through the bus, parametric re-solve via
-`set_parameter`, undo/redo, cascade delete, STL sketch filtering,
-cross-engine determinism). See `examples/sketch_bracket.py`.
+over-constraint reporting, bit-identical determinism), the engine path
+(constraints through the bus, parametric re-solve, undo/redo, cascade
+delete, STL sketch filtering), and solid construction (extrude volumes,
+nested holes, negative extrusion, revolve around X/Y, partial sweeps,
+profile validation, dependent rebuilds, cross-engine determinism).
+
+End-to-end printable examples: `examples/printable_bracket.py` (constrained
+profile with holes → extrude → STL → render) and
+`examples/revolve_bushing.py`.

@@ -414,6 +414,184 @@ fn solve_linear(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
     Some(out)
 }
 
+// --- profiles ---------------------------------------------------------------
+
+/// Extract closed profile loops (sketch-local 2D) for extrusion/revolve.
+///
+/// Circles are tessellated into closed loops; line segments must form
+/// simple closed loops (every endpoint shared by exactly two segments).
+/// Holes are *not* classified here — the solid builder applies the even-odd
+/// rule, so nested loops become holes regardless of drawing order or
+/// direction.
+pub fn profile_loops(elements: &[SketchElement]) -> Result<Vec<Vec<[f64; 2]>>, String> {
+    if elements.is_empty() {
+        return Err("sketch is empty (hint: add lines or a circle first)".into());
+    }
+
+    // Endpoint matching tolerance. Solved coincidences agree to ~1e-8 mm;
+    // scale the tolerance with the drawing so large sketches still match.
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    let mut grow = |p: [f64; 2]| {
+        for i in 0..2 {
+            lo[i] = lo[i].min(p[i]);
+            hi[i] = hi[i].max(p[i]);
+        }
+    };
+    for e in elements {
+        match e {
+            SketchElement::Line { p1, p2, .. } => {
+                grow(*p1);
+                grow(*p2);
+            },
+            SketchElement::Circle { center, radius, .. } => {
+                grow([center[0] - radius, center[1] - radius]);
+                grow([center[0] + radius, center[1] + radius]);
+            },
+        }
+    }
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2)).sqrt();
+    let tol = (diag * 1e-6).max(1e-6);
+
+    let mut loops: Vec<Vec<[f64; 2]>> = Vec::new();
+
+    // Circles are closed loops by themselves.
+    for e in elements {
+        if let SketchElement::Circle { center, radius, .. } = e {
+            if *radius <= tol {
+                return Err(format!(
+                    "circle at ({:.3}, {:.3}) has radius {radius:.4}; a profile needs positive radii",
+                    center[0], center[1]
+                ));
+            }
+            let n = ((radius * 60.0).sqrt().ceil() as usize).clamp(24, 256);
+            let mut lp = Vec::with_capacity(n);
+            for i in 0..n {
+                let t = i as f64 * std::f64::consts::TAU / n as f64;
+                lp.push([center[0] + radius * t.cos(), center[1] + radius * t.sin()]);
+            }
+            loops.push(lp);
+        }
+    }
+
+    // Line segments → endpoint graph → closed loops.
+    let mut segs: Vec<([f64; 2], [f64; 2])> = Vec::new();
+    for e in elements {
+        if let SketchElement::Line { p1, p2, .. } = e {
+            let len = ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt();
+            if len > tol {
+                segs.push((*p1, *p2));
+            }
+        }
+    }
+
+    if !segs.is_empty() {
+        let mut nodes: Vec<[f64; 2]> = Vec::new();
+        let mut seg_nodes: Vec<[usize; 2]> = Vec::with_capacity(segs.len());
+        for (a, b) in &segs {
+            let ia = cluster(&mut nodes, *a, tol);
+            let ib = cluster(&mut nodes, *b, tol);
+            if ia == ib {
+                return Err(format!(
+                    "line at ({:.3}, {:.3}) has zero length; remove it or re-solve the sketch",
+                    a[0], a[1]
+                ));
+            }
+            seg_nodes.push([ia, ib]);
+        }
+
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+        for (si, [a, b]) in seg_nodes.iter().enumerate() {
+            adj[*a].push(si);
+            adj[*b].push(si);
+        }
+        for (ni, list) in adj.iter().enumerate() {
+            if list.len() == 1 {
+                return Err(format!(
+                    "profile is open at ({:.3}, {:.3}): a line end is not connected \
+                     (hint: close the loop with lines or a coincident constraint)",
+                    nodes[ni][0], nodes[ni][1]
+                ));
+            }
+            if list.len() > 2 {
+                return Err(format!(
+                    "profile branches at ({:.3}, {:.3}): {} line ends meet there \
+                     (hint: profiles must be simple closed loops)",
+                    nodes[ni][0], nodes[ni][1], list.len()
+                ));
+            }
+        }
+
+        let mut used = vec![false; segs.len()];
+        for start in 0..segs.len() {
+            if used[start] {
+                continue;
+            }
+            let start_node = seg_nodes[start][0];
+            let mut pts = vec![nodes[start_node]];
+            let (mut cur, mut at) = (start, start_node);
+            loop {
+                used[cur] = true;
+                let [a, b] = seg_nodes[cur];
+                let next = if a == at { b } else { a };
+                if next == start_node {
+                    break;
+                }
+                pts.push(nodes[next]);
+                at = next;
+                match adj[at].iter().copied().find(|&s| !used[s]) {
+                    Some(s) => cur = s,
+                    None => {
+                        return Err(format!(
+                            "profile is open at ({:.3}, {:.3}) (hint: close the loop)",
+                            nodes[at][0], nodes[at][1]
+                        ));
+                    },
+                }
+            }
+            if pts.len() < 3 {
+                return Err("profile loop has fewer than 3 corners (hint: remove duplicate lines)".into());
+            }
+            if signed_area(&pts).abs() <= tol * tol {
+                return Err(format!(
+                    "profile loop near ({:.3}, {:.3}) has zero area (hint: lines must enclose a region)",
+                    pts[0][0], pts[0][1]
+                ));
+            }
+            loops.push(pts);
+        }
+    }
+
+    if loops.is_empty() {
+        return Err(
+            "sketch has no closed profile (hint: draw closed lines or add a circle, then extrude)".into(),
+        );
+    }
+    Ok(loops)
+}
+
+/// Find an existing node within `tol` of `p`, or add it. First match wins, so
+/// the clustering is deterministic in element order.
+fn cluster(nodes: &mut Vec<[f64; 2]>, p: [f64; 2], tol: f64) -> usize {
+    for (i, q) in nodes.iter().enumerate() {
+        if (q[0] - p[0]).hypot(q[1] - p[1]) <= tol {
+            return i;
+        }
+    }
+    nodes.push(p);
+    nodes.len() - 1
+}
+
+/// Signed polygon area (positive = counter-clockwise).
+fn signed_area(pts: &[[f64; 2]]) -> f64 {
+    let mut a = 0.0;
+    for i in 0..pts.len() {
+        let p = pts[i];
+        let q = pts[(i + 1) % pts.len()];
+        a += p[0] * q[1] - q[0] * p[1];
+    }
+    a * 0.5
+}
+
 // --- display geometry ------------------------------------------------------------
 
 /// Tessellate a sketch into thin ribbon triangles so the existing viewer,
