@@ -3001,13 +3001,26 @@ mod tests {
         assert_eq!(after.rotation_deg, before.rotation_deg);
         assert_eq!(after.scale, before.scale);
         assert_eq!(after.name, before.name);
-        // The fillet is tangent to the faces, so the rotated bounding box is
-        // unchanged: the rounding happens inside it.
-        for (a, b) in after.world_bbox.min.iter().zip(before.world_bbox.min.iter()) {
-            assert!((a - b).abs() < 1e-3, "{:?} vs {:?}", after.world_bbox, before.world_bbox);
-        }
-        for (a, b) in after.world_bbox.max.iter().zip(before.world_bbox.max.iter()) {
-            assert!((a - b).abs() < 1e-3, "{:?} vs {:?}", after.world_bbox, before.world_bbox);
+        // The fillet is tangent to the faces, so the *local* mesh bounds are
+        // unchanged: the rounding happens inside them. (The tight world bbox
+        // of a rotated box does shrink — its extreme point was the very
+        // corner the fillet rounded — so that is not the invariant to check.)
+        let local_bbox = |m: &Mesh| {
+            let mut lo = [f64::MAX; 3];
+            let mut hi = [f64::MIN; 3];
+            for p in &m.positions {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k] as f64);
+                    hi[k] = hi[k].max(p[k] as f64);
+                }
+            }
+            (lo, hi)
+        };
+        let (blo, bhi) = local_bbox(&before.mesh);
+        let (alo, ahi) = local_bbox(&after.mesh);
+        for k in 0..3 {
+            assert!((alo[k] - blo[k]).abs() < 1e-3, "{alo:?} vs {blo:?}");
+            assert!((ahi[k] - bhi[k]).abs() < 1e-3, "{ahi:?} vs {bhi:?}");
         }
         // The local mesh is still a watertight solid.
         assert!(fillet::signed_volume(&after.mesh) > 0.0);

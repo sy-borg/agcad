@@ -87,11 +87,15 @@ pub fn normalize(v: [f64; 3]) -> [f64; 3] {
 }
 
 struct EdgeRecord {
-    /// Directed edge as first seen — fixes the orientation used for the
-    /// convexity test.
+    /// Directed edge as first seen on a non-degenerate triangle — fixes the
+    /// orientation used for the convexity test.
     a: u32,
     b: u32,
-    n1: [f64; 3],
+    /// The first and second face normals. `None` until a non-degenerate
+    /// triangle uses the edge: a zero-area triangle has no normal, but it
+    /// still shares the edge, and ignoring it would make a closed solid look
+    /// open (a boolean can leave a zero-area flap on a tangent seam).
+    n1: Option<[f64; 3]>,
     n2: Option<[f64; 3]>,
     count: u32,
 }
@@ -110,20 +114,35 @@ pub fn sharp_edges(mesh: &Mesh, min_angle_deg: f64) -> Result<Vec<SharpEdge>, Er
         let (i0, i1, i2) = (tri[0], tri[1], tri[2]);
         let (p0, p1, p2) = (positions[i0 as usize], positions[i1 as usize], positions[i2 as usize]);
         let n = normalize(cross(sub(p1, p0), sub(p2, p0)));
-        if dot(n, n) < 0.5 {
-            continue; // degenerate triangle: no normal, no edges
-        }
+        let degenerate = dot(n, n) < 0.5;
         for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
             let key = if a < b { (a, b) } else { (b, a) };
             match map.get_mut(&key) {
                 Some(rec) => {
                     rec.count += 1;
-                    if rec.n2.is_none() {
-                        rec.n2 = Some(n);
+                    if !degenerate {
+                        if rec.n1.is_none() {
+                            rec.n1 = Some(n);
+                            // The flap's winding is meaningless; take the
+                            // orientation from the first real triangle.
+                            rec.a = a;
+                            rec.b = b;
+                        } else if rec.n2.is_none() {
+                            rec.n2 = Some(n);
+                        }
                     }
                 },
                 None => {
-                    map.insert(key, EdgeRecord { a, b, n1: n, n2: None, count: 1 });
+                    map.insert(
+                        key,
+                        EdgeRecord {
+                            a,
+                            b,
+                            n1: if degenerate { None } else { Some(n) },
+                            n2: None,
+                            count: 1,
+                        },
+                    );
                 },
             }
         }
@@ -146,8 +165,9 @@ pub fn sharp_edges(mesh: &Mesh, min_angle_deg: f64) -> Result<Vec<SharpEdge>, Er
                 p[0], p[1], p[2], rec.count
             )));
         }
-        let n2 = rec.n2.unwrap_or(rec.n1);
-        if dot(rec.n1, n2) >= min_cos {
+        let Some(n1) = rec.n1 else { continue }; // only zero-area flaps
+        let n2 = rec.n2.unwrap_or(n1);
+        if dot(n1, n2) >= min_cos {
             continue; // coplanar or a tessellation seam, not a real edge
         }
         // Keep the direction the convexity test used: `rec.n1` is the normal
@@ -157,8 +177,8 @@ pub fn sharp_edges(mesh: &Mesh, min_angle_deg: f64) -> Result<Vec<SharpEdge>, Er
         let a = positions[rec.a as usize];
         let b = positions[rec.b as usize];
         let d = sub(b, a);
-        let convex = dot(cross(rec.n1, n2), d) > 0.0;
-        out.push(SharpEdge { a, b, n1: rec.n1, n2, convex });
+        let convex = dot(cross(n1, n2), d) > 0.0;
+        out.push(SharpEdge { a, b, n1, n2, convex });
     }
     Ok(out)
 }

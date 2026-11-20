@@ -73,10 +73,27 @@ fn to_manifold(mesh: &Mesh) -> Result<Manifold, Error> {
         .collect();
     let tris: Vec<u64> = mesh.indices.iter().map(|&i| remap[i as usize]).collect();
 
+    // The import tolerance becomes the kernel's epsilon. Our meshes are f32,
+    // so a boolean can emit vertices a few f32 ulps apart; on a filleted
+    // tessellated rim that leaves zero-length edges, and welding by exact bits
+    // afterwards turns them into non-manifold seams. A handful of f32 ulps
+    // (floored at 10 nm, far below any printable feature) lets the kernel
+    // treat them as one vertex.
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for p in &verts {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+    let tolerance = (5e-7 * diag).max(3e-4);
     let m = MeshGL64 {
         num_prop: 3,
         vert_properties: verts.iter().flat_map(|p| p.to_vec()).collect(),
         tri_verts: tris,
+        tolerance,
         ..Default::default()
     };
     let solid = Manifold::from_mesh_gl64(&m);

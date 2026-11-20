@@ -14,11 +14,16 @@
 //! filled). That is the same tool for both, only the boolean flips — which
 //! is also why a chamfer on an inside corner adds material, as it should.
 //!
-//! Each selected edge is one boolean against the running result. Edges are
-//! selected from the *original* mesh, so overlapping tools near a shared
-//! vertex are all applied; the corner where three fillets meet is the
-//! intersection of the three cylinders (a small, printable curved triangle)
-//! rather than a single spherical patch.
+//! The tools are applied in one boolean per convexity. Edges are selected
+//! from the *original* mesh, so overlapping tools near a shared vertex are
+//! all applied; the corner where three fillets meet is the intersection of
+//! the three cylinders (a small, printable curved triangle) rather than a
+//! single spherical patch.
+//!
+//! Edges that continue almost straight — the facets of a tessellated rim —
+//! are one band, not a run of corners: their tools overlap at the joint and
+//! are cut together. A tool per facet, mitered at every joint, is both slow
+//! and numerically fragile once the result is rounded back to f32.
 //!
 //! Concave tools add material *outside* the part, so a concave edge that ends
 //! on a treated rim needs one extra cut: the rim's round is mirrored across
@@ -192,7 +197,37 @@ pub fn apply(
         }
     }
 
+    // Adjacent selected edges that continue almost straight (the facets of a
+    // tessellated rim) are one continuous edge, not a corner. Their tools
+    // must overlap at the joint instead of stopping at it: two flat end caps
+    // leave a wedge, and mitering every facet joint produces slivers that
+    // collapse when the result is rounded back to f32. cos 30°: a facet turn
+    // of up to 30° is still "straight" for this purpose.
+    let cos_joint = 0.866;
+    let continues = |p: [f64; 3], convex: bool, dir: [f64; 3], skip: usize| {
+        at.get(&key(p)).is_some_and(|here| {
+            let mut any = false;
+            for &j in here {
+                if j == skip {
+                    continue;
+                }
+                let o = selected[j];
+                if o.convex != convex || edges::dot(o.direction(), dir).abs() <= cos_joint {
+                    return false;
+                }
+                any = true;
+            }
+            any
+        })
+    };
+
+    // Collect the tools and cut once per convexity. Cutting once per edge is
+    // mathematically the same, but the kernel retriangulates the faces around
+    // every cut; on a tessellated rim (one tool per facet) that compounds into
+    // tens of thousands of triangles.
     let mut current = mesh.clone();
+    let mut convex_tools: Vec<Mesh> = Vec::new();
+    let mut concave_tools: Vec<Mesh> = Vec::new();
     for (i, edge) in selected.iter().enumerate() {
         // Where two selected edges meet, the mitering step below handles the
         // corner, so the tool must stop at the endpoint. Where an edge simply
@@ -205,38 +240,27 @@ pub fn apply(
         let shared = |p: [f64; 3]| at.get(&key(p)).is_some_and(|v| v.len() > 1);
         let dir = edge.direction();
         let blend = size * 2.0;
-        let (ext_a, ext_b) = if edge.convex {
-            (
-                if shared(edge.a) || butt_face(edge.a, dir) { 0.0 } else { blend },
-                if shared(edge.b) || butt_face(edge.b, dir) { 0.0 } else { blend },
-            )
-        } else {
-            (0.0, 0.0)
+        // At a smooth joint the tools overlap a little so the swept band is
+        // continuous; the overshoot is more than the wedge a 30° turn leaves.
+        let joint = size * 0.5;
+        let end_ext = |p: [f64; 3]| {
+            if continues(p, edge.convex, dir, i) {
+                joint
+            } else if edge.convex && !shared(p) && !butt_face(p, dir) {
+                blend
+            } else {
+                0.0
+            }
         };
+        let (ext_a, ext_b) = (end_ext(edge.a), end_ext(edge.b));
         let mut corner_tool = tool(edge, kind, ext_a, ext_b)?;
         if let Some(trim) = void_trims.get(&i) {
             corner_tool = boolean::boolean(BooleanOp::Difference, &[corner_tool, trim.clone()])?;
         }
-        // Convex: cut the corner sliver away. Concave: fill it in.
-        let op = if edge.convex { BooleanOp::Difference } else { BooleanOp::Union };
-        let m = edge.midpoint();
-        current = boolean::boolean(op, &[current, corner_tool]).map_err(|e| {
-            Error::Invalid(format!(
-                "{} failed at the edge through ({:.2}, {:.2}, {:.2}): {e} (hint: the {} size \
-                 may be too large for the faces around this edge)",
-                kind.name(),
-                m[0],
-                m[1],
-                m[2],
-                kind.name()
-            ))
-        })?;
-        if current.indices.is_empty() {
-            return Err(Error::Invalid(format!(
-                "{} removed the whole solid at the edge through ({:.2}, {:.2}, {:.2}) \
-                 (hint: the {} size is larger than the faces around this edge)",
-                kind.name(), m[0], m[1], m[2], kind.name()
-            )));
+        if edge.convex {
+            convex_tools.push(corner_tool);
+        } else {
+            concave_tools.push(corner_tool);
         }
     }
 
@@ -262,8 +286,9 @@ pub fn apply(
                 if ei.convex != ej.convex {
                     continue;
                 }
-                // Collinear neighbours have no corner to miter.
-                if edges::dot(ei.direction(), ej.direction()).abs() > 0.999 {
+                // Edges that continue almost straight are one swept band,
+                // not a corner to miter.
+                if edges::dot(ei.direction(), ej.direction()).abs() > cos_joint {
                     continue;
                 }
                 let a = match extended.get(&i) {
@@ -294,16 +319,39 @@ pub fn apply(
             }
         }
     }
-    if !convex_corners.is_empty() {
-        let merged = boolean::boolean(BooleanOp::Union, &convex_corners)?;
-        current = boolean::boolean(BooleanOp::Difference, &[current, merged])?;
+    current = apply_tools(&current, &convex_tools, BooleanOp::Difference, kind.name())?;
+    if current.indices.is_empty() {
+        return Err(Error::Invalid(format!(
+            "{} removed the whole solid (hint: the {} size is larger than the faces around \
+             the selected edges)",
+            kind.name(),
+            kind.name()
+        )));
     }
-    if !concave_corners.is_empty() {
-        let merged = boolean::boolean(BooleanOp::Union, &concave_corners)?;
-        current = boolean::boolean(BooleanOp::Union, &[current, merged])?;
-    }
+    current = apply_tools(&current, &concave_tools, BooleanOp::Union, kind.name())?;
+    // Miters are separate from the tool groups: the corner piece is the
+    // intersection of two *extended* tools, so unioning it with the finite
+    // tools would give the boolean coincident faces.
+    current = apply_tools(&current, &convex_corners, BooleanOp::Difference, kind.name())?;
+    current = apply_tools(&current, &concave_corners, BooleanOp::Union, kind.name())?;
 
     Ok((current, selected.len() as u32))
+}
+
+/// Apply a group of tools with one boolean. A single cut (instead of one per
+/// edge) keeps the kernel from retriangulating the same faces over and over,
+/// which matters for a tessellated rim with a tool per facet.
+fn apply_tools(current: &Mesh, tools: &[Mesh], op: BooleanOp, name: &str) -> Result<Mesh, Error> {
+    if tools.is_empty() {
+        return Ok(current.clone());
+    }
+    let merged = boolean::boolean(BooleanOp::Union, tools)?;
+    boolean::boolean(op, &[current.clone(), merged]).map_err(|e| {
+        Error::Invalid(format!(
+            "{name} failed: {e} (hint: the {name} size may be too large for the faces around \
+             the selected edges)"
+        ))
+    })
 }
 
 /// Mirror a mesh across the plane through `p` with unit normal `n`, reversing
@@ -355,9 +403,21 @@ fn tool(
     let v = edges::normalize(edges::scale(edge.n2, sign));
     let w = edge.direction();
 
+    // Poke the tool a hair through both faces so its flat sides are not
+    // exactly coplanar with the part's. The extra sliver is outside a convex
+    // tool (cuts nothing) and inside the solid for a concave one (already
+    // material); the kernel's import tolerance folds away the thin flaps this
+    // can leave on a tangent seam.
+    let bleed = size * 1e-3;
     let profile = match kind {
-        Kind::Chamfer(_) => vec![[0.0, 0.0], [size, 0.0], [0.0, size]],
-        Kind::Fillet(_) => fillet_profile(size, edge),
+        Kind::Chamfer(_) => vec![
+            [-bleed, -bleed],
+            [size, -bleed],
+            [size, 0.0],
+            [0.0, size],
+            [-bleed, size],
+        ],
+        Kind::Fillet(_) => fillet_profile(size, edge, bleed),
     };
 
     // Reuse the tested 2D→3D extrusion (it normalizes the loop with Clipper
@@ -386,13 +446,13 @@ fn tool(
 
 /// The rounded corner: square `[0, r]²` minus the quarter disc centered at
 /// `(r, r)`, i.e. the corner, both face setbacks, and the tangent arc.
-fn fillet_profile(r: f64, edge: &SharpEdge) -> Vec<[f64; 2]> {
+fn fillet_profile(r: f64, edge: &SharpEdge, bleed: f64) -> Vec<[f64; 2]> {
     // The arc spans the angle between the two faces: 90° on a box corner.
     let arc_deg = edges::dot(edge.n1, edge.n2).clamp(-1.0, 1.0).acos().to_degrees();
     // 16 facets per 90°: fine enough that flat shading reads as a round
     // surface at print scale, cheap enough to boolean quickly.
     let steps = ((arc_deg / 90.0) * 16.0).ceil().max(6.0) as usize;
-    let mut pts = vec![[0.0, 0.0], [r, 0.0]];
+    let mut pts = vec![[-bleed, -bleed], [r, -bleed], [r, 0.0]];
     // Center at (r, r); the arc runs from angle -90° (tangent to face 2) to
     // -180° (tangent to face 1), bulging toward the corner.
     for i in 1..steps {
@@ -401,6 +461,7 @@ fn fillet_profile(r: f64, edge: &SharpEdge) -> Vec<[f64; 2]> {
         pts.push([r + r * theta.cos(), r + r * theta.sin()]);
     }
     pts.push([0.0, r]);
+    pts.push([-bleed, r]);
     pts
 }
 
@@ -468,6 +529,26 @@ mod tests {
         for p in &m.positions {
             assert!(p[0].abs() <= 5.001 && p[1].abs() <= 5.001 && p[2].abs() <= 5.001);
         }
+    }
+
+    #[test]
+    fn a_tessellated_rim_fillets_as_one_band() {
+        // A cylinder's rim is many short facets. They have to act as one
+        // continuous band: treating every facet joint as a corner used to
+        // produce tens of thousands of triangles and a non-manifold seam.
+        let cyl = geo::cylinder_mesh(8.0, 10.0, 32);
+        let before = signed_volume(&cyl);
+        let (m, n) = apply(&cyl, Kind::Fillet(1.5), &all_edges(), 30.0).unwrap();
+        assert_eq!(n, 64, "32 facets on the top rim and 32 on the bottom");
+        assert_closed(&m);
+        assert!(
+            m.indices.len() / 3 < 8000,
+            "{} triangles: the rim is not one band",
+            m.indices.len() / 3
+        );
+        let after = signed_volume(&m);
+        assert!(after < before, "the fillets cut material");
+        assert!((before - after) / before < 0.05, "{before} -> {after}");
     }
 
     #[test]

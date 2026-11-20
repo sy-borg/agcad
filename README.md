@@ -310,7 +310,10 @@ with Agcad.spawn() as cad:
       tools meet are mitered, and a 30° threshold keeps tessellation seams out.
       Omitting `edges` rounds the whole solid in one pass: inside corners are
       filled and the added material is trimmed where it meets a rounded rim,
-      so a reflex corner gets a blend instead of a fin
+      so a reflex corner gets a blend instead of a fin. A tessellated rim (a
+      cylinder's edge circle) is treated as one continuous band, with one
+      boolean per convexity, so filleting a whole cylinder or a boss stays
+      fast and watertight
 - [ ] **3MF export**: multi-object builds, per-object color/material, unit and
       slicer metadata — STL loses all of it
 - [ ] **Sketches on a face / datum planes**: place a sketch on an existing
@@ -329,7 +332,7 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 9 complete: fillets and chamfers. 91 tests cover the solver
+Milestone 9 complete: fillets and chamfers. 92 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
@@ -341,8 +344,9 @@ persistence (save/open round-trips, byte-stable saves, doc-id rebinding,
 corrupt/newer-file hints, parameters keeping their descriptions), and edge
 treatment (sharp-edge extraction on welded meshes with a tessellation-angle
 threshold, geometric filters, convex vs concave handling, single-pass
-all-edge rounding with clean reflex corners, in-place reshapes that survive
-rotation, replay, sketch edits and save/open).
+all-edge rounding with clean reflex corners, tessellated rims as one band,
+in-place reshapes that survive rotation, replay, sketch edits and
+save/open).
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL → render),

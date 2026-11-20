@@ -79,7 +79,8 @@ chamfer{doc,entity,distance,edges?,min_angle_deg?} (flat bevel, same in-place
     {convex:true|false} — only outside corners / only inside corners,
   min_angle_deg (default 30) is how sharp a face pair must be to count as an edge;
   it keeps tessellation seams of curved surfaces out. Omitting `edges` rounds
-  every sharp edge in one pass, inside corners included. When treating rims and
+  every sharp edge in one pass, inside corners included, and treats a
+  tessellated rim (a cylinder's edge circle) as one continuous band. When treating rims and
   vertical edges with separate commands, apply rim treatments first: the later
   vertical fillet trims the rim band cleanly, while re-cutting an already
   rounded rim is slow and noisy.
