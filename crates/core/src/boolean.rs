@@ -91,8 +91,14 @@ fn to_manifold(mesh: &Mesh) -> Result<Manifold, Error> {
     Ok(solid)
 }
 
-/// Manifold solid → agcad `Mesh` (f32, indexed), with per-vertex normals
-/// accumulated from adjacent faces (smooth shading for curved results).
+/// Manifold solid → agcad `Mesh` (f32, indexed).
+///
+/// Normals are crease-aware: faces that meet at more than [`CREASE_DEG`] keep
+/// a hard edge, while gentle facets (a fillet's arc, a tessellated cylinder)
+/// share a smooth normal. That needs one vertex per triangle corner, so the
+/// result has 3× the triangle count in vertices — harmless, because every
+/// consumer that needs topology (`boolean::to_manifold`, `edges::weld`)
+/// welds by exact position bits anyway.
 pub(crate) fn from_manifold(solid: &Manifold) -> Mesh {
     let m = solid.get_mesh_gl64(0);
     let positions: Vec<[f32; 3]> = m
@@ -100,35 +106,93 @@ pub(crate) fn from_manifold(solid: &Manifold) -> Mesh {
         .chunks_exact(3)
         .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
         .collect();
+    let indices: Vec<u32> = m.tri_verts.iter().map(|&i| i as u32).collect();
+    crease_mesh(&positions, &indices)
+}
 
-    // Accumulate face normals onto shared vertices, then normalize.
-    let mut normals = vec![[0.0f32; 3]; positions.len()];
-    for tri in m.tri_verts.chunks_exact(3) {
-        let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-        if a >= positions.len() || b >= positions.len() || c >= positions.len() {
-            continue;
-        }
-        let (p0, p1, p2) = (positions[a], positions[b], positions[c]);
+/// Faces meeting at less than this angle are shaded as one smooth surface.
+pub(crate) const CREASE_DEG: f64 = 35.0;
+
+/// Rebuild a mesh with per-corner normals that only average faces within
+/// [`CREASE_DEG`] of the corner's own triangle. Used after a world-space
+/// operation is mapped back into an entity's local frame, where cached
+/// normals would be wrong.
+pub(crate) fn crease_mesh(positions: &[[f32; 3]], indices: &[u32]) -> Mesh {
+    // Weld by exact bits first: adjacency is by *position*, so duplicated
+    // vertices from an earlier crease pass do not split the smoothing
+    // groups.
+    use std::collections::BTreeMap;
+    let mut ids: BTreeMap<[u32; 3], u32> = BTreeMap::new();
+    let mut welded: Vec<[f32; 3]> = Vec::new();
+    let mut remap: Vec<u32> = Vec::with_capacity(positions.len());
+    for p in positions {
+        let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+        let id = *ids.entry(key).or_insert_with(|| {
+            welded.push(*p);
+            (welded.len() - 1) as u32
+        });
+        remap.push(id);
+    }
+    let tris: Vec<[u32; 3]> = indices
+        .chunks_exact(3)
+        .map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]])
+        .collect();
+
+    // Face normals and the faces meeting at each welded vertex.
+    let face_normal = |t: &[u32; 3]| -> [f32; 3] {
+        let p = |i: u32| welded[i as usize];
+        let (p0, p1, p2) = (p(t[0]), p(t[1]), p(t[2]));
         let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
         let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-        let n = [
+        [
             e1[1] * e2[2] - e1[2] * e2[1],
             e1[2] * e2[0] - e1[0] * e2[2],
             e1[0] * e2[1] - e1[1] * e2[0],
-        ];
-        for &v in tri {
-            let slot = &mut normals[v as usize];
-            slot[0] += n[0];
-            slot[1] += n[1];
-            slot[2] += n[2];
-        }
-    }
-    for n in normals.iter_mut() {
-        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        if len > 1e-12 {
-            *n = [n[0] / len, n[1] / len, n[2] / len];
+        ]
+    };
+    let normals: Vec<[f32; 3]> = tris.iter().map(face_normal).collect();
+    let mut around: Vec<Vec<usize>> = vec![Vec::new(); welded.len()];
+    for (ti, t) in tris.iter().enumerate() {
+        for &v in t {
+            around[v as usize].push(ti);
         }
     }
 
-    Mesh { positions, normals, indices: m.tri_verts.iter().map(|&i| i as u32).collect() }
+    let min_cos = CREASE_DEG.to_radians().cos() as f32;
+    let mut out_positions = Vec::with_capacity(tris.len() * 3);
+    let mut out_normals = Vec::with_capacity(tris.len() * 3);
+    let mut out_indices = Vec::with_capacity(tris.len() * 3);
+    for (ti, t) in tris.iter().enumerate() {
+        let own = normals[ti];
+        for &v in t {
+            let mut acc = [0.0f32; 3];
+            for &other in &around[v as usize] {
+                let n = normals[other];
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                if len < 1e-12 {
+                    continue;
+                }
+                let unit = [n[0] / len, n[1] / len, n[2] / len];
+                let own_len = (own[0] * own[0] + own[1] * own[1] + own[2] * own[2]).sqrt();
+                let own_unit =
+                    [own[0] / own_len, own[1] / own_len, own[2] / own_len];
+                let d = unit[0] * own_unit[0] + unit[1] * own_unit[1] + unit[2] * own_unit[2];
+                if d >= min_cos {
+                    acc[0] += unit[0];
+                    acc[1] += unit[1];
+                    acc[2] += unit[2];
+                }
+            }
+            let len = (acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]).sqrt();
+            let n = if len > 1e-12 {
+                [acc[0] / len, acc[1] / len, acc[2] / len]
+            } else {
+                own
+            };
+            out_positions.push(welded[v as usize]);
+            out_normals.push(n);
+            out_indices.push((out_positions.len() - 1) as u32);
+        }
+    }
+    Mesh { positions: out_positions, normals: out_normals, indices: out_indices }
 }

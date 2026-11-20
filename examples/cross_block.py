@@ -8,12 +8,17 @@ The plus profile is drawn as twelve parametric lines and extruded, so the
 shape is driven by `span`, `arm` and `height` — change one and the sketch
 re-solves and the solid rebuilds.
 
-Fillets are not in agcad yet (see the roadmap), so the edges here are sharp;
-everything else follows the drawing's proportions.
+The script keeps a sharp baseline for the silhouette comparison, then
+demonstrates agcad's edge tools on the same program: `chamfer` the top rim
+and `fillet` the twelve vertical edges, driven by the `bevel` and `round_r`
+knobs. (Rim treatments come before vertical ones: re-cutting an already
+rounded rim is not meaningful.)
 
 Writes the committed showcase into ``examples/cross_block/``: ``iso.png``,
-``front.png``, ``cross_block.stl``, and (when ImageMagick is installed) the
-stacked ``compare.png`` used in the README.
+``front.png``, ``cross_block.stl``, ``cross_block.agcad`` (the sharp
+baseline), plus ``rounded.png``, ``cross_block_rounded.stl`` and
+``cross_block_rounded.agcad`` (the edge-treated part), and (when ImageMagick
+is installed) the stacked ``compare.png`` used in the README.
 
 Usage: .venv/bin/python examples/cross_block.py
 """
@@ -35,6 +40,10 @@ GREEN = (0.85, 1.0, 0.83, 1.0)
 # Measured off the drawing: its 9 mm scale bar gives ~12.4 px/mm, and the
 # front panel is 553 x 614 px, so the body is 45 x 45 mm in plan and 50 tall.
 SPAN, ARM, HEIGHT = 45.0, 15.0, 50.0
+
+# Edge treatment for the rounded variant. The drawing's own fillets are
+# ~1 mm; these are exaggerated a little so the render reads at a glance.
+ROUND_R, BEVEL = 4.0, 1.5
 
 REFERENCE = os.path.join("examples", "example_body.png")
 OUT_DIR = os.path.join("examples", "cross_block")
@@ -89,6 +98,8 @@ def main() -> None:
     iso_png = os.path.join(OUT_DIR, "iso.png")
     front_png = os.path.join(OUT_DIR, "front.png")
     compare_png = os.path.join(OUT_DIR, "compare.png")
+    rounded_png = os.path.join(OUT_DIR, "rounded.png")
+    rounded_stl = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.stl"))
 
     cad = Agcad.spawn()
     doc = cad.create_document("cross_block")["doc"]
@@ -161,21 +172,51 @@ def main() -> None:
 
     compose_showcase(REFERENCE, iso_png, compare_png)
 
-    # Turn a knob: the solid rebuilds from the re-solved sketch.
-    cad.set_parameter(doc, "height", 30.0)
-    mesh = next(e for e in cad.get_scene(doc)["entities"] if e["id"] == solid["entity"])["mesh"]
-    zs = [p[2] for p in mesh["positions"]]
-    print(f"height 50 -> 30: solid z extent now {max(zs) - min(zs):.1f} mm")
-    cad.set_parameter(doc, "height", 50.0)
-
-    # Persist the instance (program + knob values). The script above is the
-    # recipe; this is the same model with the knobs as they stand, and an
-    # embedded copy of the recipe as provenance.
+    # Persist the sharp baseline now, before the edge commands change the
+    # program. The script above is the recipe; the file is the same model with
+    # the knobs as they stand, and an embedded copy of the recipe as provenance.
     with open(__file__, encoding="utf-8") as f:
         source = {"language": "python", "text": f.read()}
     doc_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block.agcad"))
     saved = cad.save_document(doc, doc_path, source=source)
     print(f"saved -> {saved['path']} ({saved['bytes']} bytes, {saved['params']} params)")
+
+    # --- edge treatment ------------------------------------------------------
+    # The same program, two more commands. Both reshape the solid in place, so
+    # the entity keeps its id and the camera / STL export still refer to it.
+    # The top rim goes first; re-cutting an already rounded rim is not
+    # meaningful (it would shatter into hundreds of tiny facets).
+    cad.set_parameter(doc, "round_r", ROUND_R, "radius of the vertical edges")
+    cad.set_parameter(doc, "bevel", BEVEL, "chamfer on the top rim")
+    eid = solid["entity"]
+    chamfer = cad.chamfer(doc, eid, "bevel", edges={"normals": [[0, 0, 1]]})
+    print(f"chamfer top rim: {chamfer['edges']} edges -> {chamfer['volume']:.0f} mm³")
+    fillet = cad.fillet(doc, eid, "round_r", edges={"direction": [0, 0, 1]})
+    print(f"fillet vertical: {fillet['edges']} edges -> {fillet['volume']:.0f} mm³, "
+          f"{len(fillet['mesh']['indices']) // 3} tris")
+
+    png = cad.render_offscreen(
+        doc, width=900, height=900,
+        eye=(83.7, 48.3, 85.4), target=(0.0, 0.0, 25.0), up=(0.0, 0.0, 1.0),
+        fov_deg=40.0, ortho=True, background=(1.0, 1.0, 1.0, 1.0), path=rounded_png,
+    )
+    print(f"rendered rounded -> {png['path']}")
+
+    exp = cad.export_stl(doc, rounded_stl)
+    print(f"stl: {exp['path']} ({exp['tris']} tris, {exp['bytes']} bytes)")
+
+    rounded_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.agcad"))
+    saved = cad.save_document(doc, rounded_path, source=source)
+    print(f"saved -> {saved['path']} ({saved['bytes']} bytes, {saved['params']} params)")
+
+    # Turn a knob: replay rebuilds the sketch, the extrude AND both edge
+    # commands, so the rounding follows the new height.
+    cad.set_parameter(doc, "height", 30.0)
+    mesh = next(e for e in cad.get_scene(doc)["entities"] if e["id"] == eid)["mesh"]
+    zs = [p[2] for p in mesh["positions"]]
+    print(f"height 50 -> 30: solid z extent now {max(zs) - min(zs):.1f} mm, "
+          f"{len(mesh['indices']) // 3} tris")
+    cad.set_parameter(doc, "height", 50.0)
 
     cad.close()
 

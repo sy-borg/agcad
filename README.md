@@ -40,9 +40,16 @@ The dimensions are read off the drawing rather than guessed: its front panel
 is 553 × 614 px at the drawing's own 9 mm scale bar, so the body is
 45 × 45 mm in plan, 15 mm arms and 50 mm tall. The reproduction's camera was
 fitted by comparing silhouettes (0.99 IoU), and its front view matches the
-drawing's aspect to ~0.1% (0.898 vs 0.899). The only visible difference is
-the edge treatment: the drawing has ~1 mm fillets, and fillets are still on
-the roadmap.
+drawing's aspect to ~0.1% (0.898 vs 0.899). The baseline keeps sharp edges so
+the silhouette comparison stays unambiguous; the script then adds two edge
+commands — a 1.5 mm `chamfer` on the top rim and a 4 mm `fillet` on the twelve
+vertical edges — driven by the `bevel` and `round_r` knobs:
+
+![the cross block with a chamfered top rim and rounded vertical edges](examples/cross_block/rounded.png)
+
+Both operations reshape the solid in place, so the entity id, camera and STL
+export still apply. Turning `height` down to 30 mm replays the sketch, the
+extrude and both edge commands, so the rounding follows the new geometry.
 
 The loop this exercises, end to end:
 
@@ -51,11 +58,17 @@ The loop this exercises, end to end:
    sketch lines, `extrude` into a watertight solid.
 3. **Check** with `render_offscreen` in orthographic mode from the drawing's
    camera, and compare the silhouette.
-4. **Deliver** `cross_block.stl` for the slicer, and `cross_block.agcad`
-   (program + parameter values) so the part reopens with its knobs intact.
+4. **Finish** the edges with `chamfer`/`fillet` and a geometric edge filter —
+   `{normals:[[0,0,1]]}` for the top rim, `{direction:[0,0,1]}` for the
+   vertical corners — so the part reads as a moulded body, not a block-out.
+5. **Deliver** `cross_block_rounded.stl` for the slicer, and the matching
+   `.agcad` (program + parameter values) so the part reopens with its knobs
+   intact.
 
 The artifacts live in `examples/cross_block/`: `iso.png`, `front.png`,
-`compare.png`, `cross_block.stl`, `cross_block.agcad`.
+`compare.png`, `cross_block.stl`, `cross_block.agcad` (the sharp baseline),
+plus `rounded.png`, `cross_block_rounded.stl` and
+`cross_block_rounded.agcad` (the edge-treated part).
 `.venv/bin/python examples/cross_block.py` regenerates them.
 
 ## Layout
@@ -91,12 +104,21 @@ Line-delimited JSON-RPC 2.0, one request/response per line:
 ```
 
 Commands: `initialize`, `list_documents`, `create_document`, `close_document`,
-`add_box`, `add_sphere`, `add_cylinder`, `boolean`, `transform`, `set_color`,
-`delete`, `set_parameter`, `remove_parameter`, `get_parameters`, `undo`,
-`redo`, `get_scene`, `get_program`, `add_sketch`, `add_sketch_line`,
-`add_sketch_circle`, `constrain`, `remove_constraint`, `move_sketch_point`,
-`delete_sketch_element`, `extrude`, `revolve`, `export_stl`,
-`render_offscreen`, `save_document`, `open_document`.
+`add_box`, `add_sphere`, `add_cylinder`, `boolean`, `fillet`, `chamfer`,
+`transform`, `set_color`, `delete`, `set_parameter`, `remove_parameter`,
+`get_parameters`, `undo`, `redo`, `get_scene`, `get_program`, `add_sketch`,
+`add_sketch_line`, `add_sketch_circle`, `constrain`, `remove_constraint`,
+`move_sketch_point`, `delete_sketch_element`, `extrude`, `revolve`,
+`export_stl`, `render_offscreen`, `save_document`, `open_document`.
+
+`fillet{entity,radius,edges?}` and `chamfer{entity,distance,edges?}` reshape a
+solid **in place** (same id, name, color, transform) and replay with the
+program. `edges` is a geometric filter rather than an index — an AND of
+`direction` (+`angle_tol_deg`), `near` (+`near_radius`), `normals` (one face
+normal = all its edges, two = the edge between them) and `convex` — so "the
+vertical corners" or "the top rim" keeps its meaning when a parameter moves
+the geometry. Omit it to treat every sharp edge; `min_angle_deg` (default 30)
+separates real edges from tessellation seams.
 
 Conventions: millimeters, degrees, RGBA floats. Z is up — primitives are
 axis-aligned and `add_cylinder` extrudes along +Z. Document ids start at 1;
@@ -275,11 +297,15 @@ with Agcad.spawn() as cad:
       `export_python` renders it back into a runnable script. The `.py` is
       the recipe; the `.agcad` is the instance — recipe plus the knobs as the
       user left them
-- [ ] **Fillets and chamfers**: `fillet{edges, radius}` / `chamfer{edges,
-      distance}` over an edge-selection query (edges named by the two adjacent
-      faces or by a bounding-box filter, so an agent can target them without
-      clicking). Rounded edges are the difference between a CAD model and a
-      printable-looking part
+- [x] **Fillets and chamfers**: `fillet{entity,radius,edges?}` /
+      `chamfer{entity,distance,edges?}` reshape a solid **in place** (same id,
+      name, color, transform) and replay with the program. Edges are selected
+      geometrically — `direction` (+`angle_tol_deg`), `near` (+`near_radius`),
+      `normals` (one face normal = all its edges, two = the edge between them)
+      and `convex`, all ANDed — so an agent can target "the vertical corners"
+      or "the top rim" without clicking or relying on unstable edge indices.
+      Convex edges are cut back, concave edges filled in; corners where two
+      tools meet are mitered, and a 30° threshold keeps tessellation seams out
 - [ ] **3MF export**: multi-object builds, per-object color/material, unit and
       slicer metadata — STL loses all of it
 - [ ] **Sketches on a face / datum planes**: place a sketch on an existing
@@ -298,25 +324,29 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 7 complete: sketches → solids. 65 tests cover the solver
+Milestone 9 complete: fillets and chamfers. 87 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
-delete, STL sketch filtering), and solid construction (extrude volumes,
+delete, STL sketch filtering), solid construction (extrude volumes,
 nested holes, negative extrusion, revolve around X/Y, partial sweeps,
-profile validation, dependent rebuilds, cross-engine determinism) plus
-the orthographic camera (parallel projection, depth-independent size), and
-document persistence (save/open round-trips, byte-stable saves, doc-id
-rebinding, corrupt/newer-file hints, parameters keeping their descriptions).
+profile validation, dependent rebuilds, cross-engine determinism), the
+orthographic camera (parallel projection, depth-independent size), document
+persistence (save/open round-trips, byte-stable saves, doc-id rebinding,
+corrupt/newer-file hints, parameters keeping their descriptions), and edge
+treatment (sharp-edge extraction on welded meshes with a tessellation-angle
+threshold, geometric filters, convex vs concave handling, in-place reshapes
+that survive rotation, replay, sketch edits and save/open).
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL → render),
 `examples/revolve_bushing.py`, `examples/cross_block.py` — a picture →
 model reproduction: `examples/example_body.png` is read for its two views
 (45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
-profile and extruded, then rendered from a camera fitted to the drawing —
-and `examples/save_load.py` (save → open in a fresh engine → change a knob →
-export back to Python and run it).
+profile and extruded, rendered from a camera fitted to the drawing, then
+finished with a `chamfer` on the top rim and a `fillet` on the vertical
+edges — and `examples/save_load.py` (save → open in a fresh engine → change
+a knob → export back to Python and run it).
 
-Also in the roadmap but not started: fillets/chamfers with edge selection,
-3MF export, and sketches placed on existing faces or datum planes.
+Also in the roadmap but not started: 3MF export, and sketches placed on
+existing faces or datum planes.

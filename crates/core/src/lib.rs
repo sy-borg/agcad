@@ -16,7 +16,9 @@
 //! the user only describes intent.
 
 pub mod boolean;
+pub mod edges;
 pub mod expr;
+pub mod fillet;
 pub mod geo;
 pub mod mat4;
 pub mod render;
@@ -28,8 +30,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use agcad_protocol::{
-    Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EntityId,
-    EntitySnapshot, Mat4, Mesh, ParamInfo, Rgba, RevolveAxis, SavedParameter, Scalar,
+    Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EdgeFilter,
+    EntityId, EntitySnapshot, Mat4, Mesh, ParamInfo, Rgba, RevolveAxis, SavedParameter, Scalar,
     SketchElement, SourceDoc, SVec3, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION,
     SERVER_NAME,
 };
@@ -203,6 +205,10 @@ pub struct Document {
     /// Provenance only: the script that produced this program, if any.
     /// Saved back out with the document; never executed on open.
     source: Option<SourceDoc>,
+    /// True while `replay` is running the program. Dependent rebuilds take
+    /// the cheap path then, because the program's own later commands (e.g.
+    /// a fillet on an extrude) will redo the work in order.
+    replaying: bool,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
 }
@@ -217,6 +223,7 @@ impl Document {
             program: Vec::new(),
             params: BTreeMap::new(),
             source: None,
+            replaying: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -279,12 +286,29 @@ impl Document {
         let program = self.program.clone();
         self.entities.clear();
         self.next_entity = 1;
+        self.replaying = true;
+        let mut result = Ok(());
         for (step, cmd) in program.iter().enumerate() {
             if let Err(e) = exec(self, cmd) {
-                return Err(Error::Replay { step, source: e.to_string() });
+                result = Err(Error::Replay { step, source: e.to_string() });
+                break;
             }
         }
-        Ok(())
+        self.replaying = false;
+        result
+    }
+
+    /// Re-derive everything that a live sketch edit affects. During a
+    /// replay the later program commands do this in order, so only the
+    /// extrudes/revolves need refreshing; outside one, a full replay is the
+    /// only way to also re-apply fillets/chamfers that come after the
+    /// solid in the program.
+    fn after_sketch_change(&mut self, doc: DocId, sketch: EntityId) -> Result<()> {
+        if self.replaying {
+            rebuild_dependents(self, doc, sketch)
+        } else {
+            self.replay()
+        }
     }
 
     /// The durable state: name, parameter values and the program. Derived
@@ -324,6 +348,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Transform { doc: d, .. }
         | Command::SetColor { doc: d, .. }
         | Command::Delete { doc: d, .. }
+        | Command::Fillet { doc: d, .. }
+        | Command::Chamfer { doc: d, .. }
         | Command::Boolean { doc: d, .. }
         | Command::AddSketch { doc: d, .. }
         | Command::AddSketchLine { doc: d, .. }
@@ -432,6 +458,8 @@ impl Engine {
             | Command::Transform { .. }
             | Command::SetColor { .. }
             | Command::Delete { .. }
+            | Command::Fillet { .. }
+            | Command::Chamfer { .. }
             | Command::Boolean { .. }
             | Command::AddSketch { .. }
             | Command::AddSketchLine { .. }
@@ -785,6 +813,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }
+        | Command::Fillet { doc, .. }
+        | Command::Chamfer { doc, .. }
         | Command::Boolean { doc, .. }
         | Command::AddSketch { doc, .. }
         | Command::AddSketchLine { doc, .. }
@@ -877,7 +907,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             let is_sketch = matches!(e.shape, Shape::Sketch { .. });
             if is_sketch {
                 // Solids built from the sketch follow its placement.
-                rebuild_dependents(d, *doc, *entity)?;
+                d.after_sketch_change(*doc, *entity)?;
             }
             Ok(CommandResult::Transformed { doc: *doc, entity: *entity })
         },
@@ -928,6 +958,23 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             let mesh = entity.mesh.clone();
             d.entities.insert(id, entity);
             Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
+        },
+
+        Command::Fillet { doc, entity, radius, edges, min_angle_deg } => {
+            let radius = d.resolve(radius)?;
+            reshape(d, *doc, *entity, fillet::Kind::Fillet(radius), edges.as_ref(), *min_angle_deg)
+        },
+
+        Command::Chamfer { doc, entity, distance, edges, min_angle_deg } => {
+            let distance = d.resolve(distance)?;
+            reshape(
+                d,
+                *doc,
+                *entity,
+                fillet::Kind::Chamfer(distance),
+                edges.as_ref(),
+                *min_angle_deg,
+            )
         },
 
         // --- sketches -------------------------------------------------------
@@ -1168,6 +1215,54 @@ fn sketch_profile(
     }
 }
 
+/// Reshape one solid in place (fillet/chamfer). The entity keeps its id,
+/// name, color, transform and local frame; only the mesh changes.
+///
+/// The cut is computed in **world space**, so `radius` and the edge filter
+/// are in the coordinates the user sees even when the entity is rotated or
+/// scaled. The result is mapped back through the inverse transform, which
+/// also means a scaled entity gets a fillet that scales with it.
+fn reshape(
+    d: &mut Document,
+    doc: DocId,
+    entity: EntityId,
+    kind: fillet::Kind,
+    edges: Option<&EdgeFilter>,
+    min_angle_deg: Option<f64>,
+) -> Result<CommandResult> {
+    let (world, transform) = {
+        let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
+        if matches!(e.shape, Shape::Sketch { .. }) {
+            return Err(Error::Invalid(format!(
+                "entity {entity} is a sketch (hint: fillet/chamfer apply to printable solids; \
+                 extrude the sketch into a solid first)"
+            )));
+        }
+        let m = e.transform();
+        (transform_mesh(&e.mesh, &m), m)
+    };
+
+    let empty = EdgeFilter::default();
+    let filter = edges.unwrap_or(&empty);
+    let (world, edges) = fillet::apply(&world, kind, filter, min_angle_deg.unwrap_or(30.0))?;
+    let volume = fillet::signed_volume(&world);
+
+    let inv = mat4::inverse(&transform).ok_or_else(|| {
+        Error::Invalid(format!(
+            "entity {entity} has a singular transform (a zero scale component); cannot map the \
+             reshaped mesh back into its local frame"
+        ))
+    })?;
+    let positions: Vec<[f32; 3]> =
+        world.positions.iter().map(|&p| mat4::transform_point(&inv, p)).collect();
+    // Re-derive normals in the local frame (the world ones would be wrong
+    // after a rotation) with the same crease rule the kernel used.
+    let mesh = boolean::crease_mesh(&positions, &world.indices);
+
+    d.entity_mut(entity)?.mesh = mesh.clone();
+    Ok(CommandResult::EntityModified { doc, entity, edges, volume, mesh })
+}
+
 /// Rebuild every extrude/revolve that references `sketch`, so solids follow
 /// sketch edits immediately — not only on the next full replay. The sketch's
 /// placement is copied too, so moving/rotating a sketch carries its solids.
@@ -1252,7 +1347,7 @@ fn refresh_sketch(d: &mut Document, doc: DocId, sketch: EntityId) -> Result<sket
     *dof = report.dof;
     d.entity_mut(sketch)?.mesh = mesh;
     // Solids built from this sketch must follow it immediately.
-    rebuild_dependents(d, doc, sketch)?;
+    d.after_sketch_change(doc, sketch)?;
     Ok(report)
 }
 
@@ -2836,5 +2931,268 @@ mod tests {
         let local_z = snap.mesh.positions.iter().map(|p| p[2]).fold(f32::MIN, f32::max)
             - snap.mesh.positions.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
         assert!((local_z - 20.0).abs() < 1e-4, "local mesh must stay axis-aligned ({local_z})");
+    }
+
+    // --- fillets and chamfers ------------------------------------------------
+
+    fn add_box(e: &mut Engine, center: [f64; 3], size: [f64; 3]) -> EntityId {
+        match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "box".into(),
+                center: [num(center[0]), num(center[1]), num(center[2])],
+                size: [num(size[0]), num(size[1]), num(size[2])],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn modified(result: CommandResult) -> (EntityId, u32, f64, Mesh) {
+        match result {
+            CommandResult::EntityModified { entity, edges, volume, mesh, .. } => {
+                (entity, edges, volume, mesh)
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn volume_of(e: &mut Engine, id: EntityId) -> f64 {
+        fillet::signed_volume(&entity_snapshot(e, id).mesh)
+    }
+
+    #[test]
+    fn fillet_rounds_edges_in_place_and_keeps_the_placement() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0, 0.0, 5.0], [20.0, 20.0, 10.0]);
+        e.execute(Command::Transform {
+            doc: 1,
+            entity: id,
+            translation: None,
+            rotation_deg: Some([num(0.0), num(0.0), num(45.0)]),
+            scale: None,
+        })
+        .unwrap();
+        let before = entity_snapshot(&mut e, id);
+
+        let (entity, edges, volume, mesh) = modified(
+            e.execute(Command::Fillet {
+                doc: 1,
+                entity: id,
+                radius: num(2.0),
+                edges: None,
+                min_angle_deg: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(entity, id, "the entity is reshaped, not replaced");
+        assert_eq!(edges, 12);
+        // `volume` is world-space, `mesh` local; a rotation preserves volume
+        // (up to the f32 round trip through the inverse transform).
+        let local = fillet::signed_volume(&mesh);
+        assert!((volume - local).abs() / volume < 1e-4, "{volume} vs {local}");
+        assert!(volume < 4000.0, "filleting removes material ({volume})");
+
+        let after = entity_snapshot(&mut e, id);
+        assert_eq!(after.translation, before.translation);
+        assert_eq!(after.rotation_deg, before.rotation_deg);
+        assert_eq!(after.scale, before.scale);
+        assert_eq!(after.name, before.name);
+        // The fillet is tangent to the faces, so the rotated bounding box is
+        // unchanged: the rounding happens inside it.
+        for (a, b) in after.world_bbox.min.iter().zip(before.world_bbox.min.iter()) {
+            assert!((a - b).abs() < 1e-3, "{:?} vs {:?}", after.world_bbox, before.world_bbox);
+        }
+        for (a, b) in after.world_bbox.max.iter().zip(before.world_bbox.max.iter()) {
+            assert!((a - b).abs() < 1e-3, "{:?} vs {:?}", after.world_bbox, before.world_bbox);
+        }
+        // The local mesh is still a watertight solid.
+        assert!(fillet::signed_volume(&after.mesh) > 0.0);
+    }
+
+    #[test]
+    fn fillet_replays_with_the_parameters() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "r".into(),
+            value: num(2.0),
+            description: Some("edge radius".into()),
+        })
+        .unwrap();
+        let id = add_box(&mut e, [0.0, 0.0, 5.0], [20.0, 20.0, 10.0]);
+        let (_, edges, v2, _) = modified(
+            e.execute(Command::Fillet {
+                doc: 1,
+                entity: id,
+                radius: Scalar::Expression("r".into()),
+                edges: Some(EdgeFilter { direction: Some([0.0, 0.0, 1.0]), ..Default::default() }),
+                min_angle_deg: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(edges, 4, "only the vertical corners");
+
+        // Turning the knob re-runs the program: same id, new fillet.
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "r".into(),
+            value: num(5.0),
+            description: None,
+        })
+        .unwrap();
+        let v5 = volume_of(&mut e, id);
+        assert!(v5 < v2, "a larger radius removes more ({v5} vs {v2})");
+
+        // ... and back again is deterministic.
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "r".into(),
+            value: num(2.0),
+            description: None,
+        })
+        .unwrap();
+        assert!((volume_of(&mut e, id) - v2).abs() < 1e-6);
+        let ids: Vec<EntityId> = match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => entities.iter().map(|x| x.id).collect(),
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(ids, vec![id], "replay keeps the entity id");
+    }
+
+    #[test]
+    fn chamfer_bevels_only_the_selected_edges() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0, 0.0, 5.0], [20.0, 20.0, 10.0]);
+        let (_, edges, volume, _) = modified(
+            e.execute(Command::Chamfer {
+                doc: 1,
+                entity: id,
+                distance: num(2.0),
+                edges: Some(EdgeFilter { direction: Some([0.0, 0.0, 1.0]), ..Default::default() }),
+                min_angle_deg: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(edges, 4);
+        // Four bevels of area r²/2 × height, no corner overlaps (they are
+        // at different corners).
+        let expected = 4000.0 - 4.0 * (0.5 * 2.0 * 2.0 * 10.0);
+        assert!((volume - expected).abs() / expected < 0.01, "{volume} vs {expected}");
+
+        // The 45° bevel is itself a sharp face pair, so the solid gains
+        // edges rather than losing them — but the sharp 90° corner is gone.
+        let snap = entity_snapshot(&mut e, id);
+        let left = edges::sharp_edges(&snap.mesh, 30.0).unwrap();
+        assert!(left.len() > 12, "a bevel adds edges ({})", left.len());
+        assert!(
+            left.iter().any(|x| (x.dihedral_deg() - 135.0).abs() < 1e-3),
+            "the bevel meets each face at 135°"
+        );
+    }
+
+    #[test]
+    fn fillet_rejects_sketches_and_bad_sizes() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        let err = e
+            .execute(Command::Fillet {
+                doc: 1,
+                entity: s,
+                radius: num(1.0),
+                edges: None,
+                min_angle_deg: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("sketch"), "{err}");
+
+        let id = add_box(&mut e, [0.0, 0.0, 5.0], [10.0, 10.0, 10.0]);
+        let err = e
+            .execute(Command::Fillet {
+                doc: 1,
+                entity: id,
+                radius: num(0.0),
+                edges: None,
+                min_angle_deg: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("positive"), "{err}");
+
+        let err = e
+            .execute(Command::Fillet {
+                doc: 1,
+                entity: id,
+                radius: num(1.0),
+                edges: Some(EdgeFilter { near: Some([0.0, 0.0, 0.0]), ..Default::default() }),
+                min_angle_deg: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("near_radius"), "{err}");
+
+        // A failed fillet leaves the document untouched (rollback).
+        let snap = entity_snapshot(&mut e, id);
+        assert_eq!(snap.mesh.indices.len(), 36, "box is still a box");
+        assert!(e.execute(Command::GetProgram { doc: 1 }).is_ok());
+    }
+
+    #[test]
+    fn a_fillet_survives_a_sketch_edit() {
+        let mut e = engine();
+        let (s, lines) = rect_sketch(&mut e, 40.0, 30.0);
+        let (id, _, _) = extrude(&mut e, s, num(5.0));
+        let (_, edges, filleted, _) = modified(
+            e.execute(Command::Fillet {
+                doc: 1,
+                entity: id,
+                radius: num(1.0),
+                edges: None,
+                min_angle_deg: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(edges, 12);
+        assert!(filleted < 40.0 * 30.0 * 5.0);
+
+        // Drag a corner: the profile widens, the extrude rebuilds, and the
+        // fillet must be re-applied to the new solid (not silently dropped).
+        e.execute(Command::MoveSketchPoint {
+            doc: 1,
+            sketch: s,
+            element: lines[0],
+            point: 1,
+            to: [50.0, 0.0],
+        })
+        .unwrap();
+        let after = volume_of(&mut e, id);
+        // The sharp box would be 50×30×5 = 7500; the fillet must still be
+        // cutting the edges.
+        assert!(after < 7480.0, "fillet was lost after the sketch edit: {after}");
+    }
+
+    #[test]
+    fn a_fillet_survives_save_and_open() {
+        let (path, path_s) = temp_file("agcad_fillet.agcad");
+        let mut a = engine();
+        let id = add_box(&mut a, [0.0, 0.0, 5.0], [20.0, 20.0, 10.0]);
+        a.execute(Command::Fillet {
+            doc: 1,
+            entity: id,
+            radius: num(2.0),
+            edges: Some(EdgeFilter { direction: Some([0.0, 0.0, 1.0]), ..Default::default() }),
+            min_angle_deg: None,
+        })
+        .unwrap();
+        let saved = entity_snapshot(&mut a, id).mesh;
+        a.execute(Command::SaveDocument { doc: 1, path: path_s.clone(), source: None }).unwrap();
+
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: path_s.clone(), name: None }).unwrap();
+        let reopened = entity_snapshot(&mut b, id).mesh;
+        assert_eq!(reopened.indices, saved.indices);
+        assert_eq!(reopened.positions, saved.positions);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -174,6 +174,42 @@ pub enum Command {
         color: Option<Rgba>,
     },
 
+    /// Round the selected sharp edges of one solid. The entity keeps its
+    /// id, name, color and transform; its mesh is replaced by the filleted
+    /// result (in the same local frame). Convex edges are cut back to a
+    /// cylindrical surface of `radius`, concave edges are filled in.
+    /// Replays with the program, so a parameter change re-fillets the new
+    /// geometry.
+    Fillet {
+        doc: DocId,
+        entity: EntityId,
+        /// Fillet radius (mm). May be an expression.
+        radius: Scalar,
+        /// Which sharp edges to round. Omit for every sharp edge.
+        #[serde(default)]
+        edges: Option<EdgeFilter>,
+        /// Only edges whose adjacent faces differ by at least this much
+        /// count as sharp (degrees, default 30). Tessellation seams of
+        /// curved surfaces are below this, real edges above it.
+        #[serde(default)]
+        min_angle_deg: Option<f64>,
+    },
+
+    /// Bevel the selected sharp edges of one solid with a flat face: each
+    /// adjacent face is set back by `distance` from the edge. Convex edges
+    /// lose material, concave edges gain it. Same entity semantics as
+    /// [`Command::Fillet`].
+    Chamfer {
+        doc: DocId,
+        entity: EntityId,
+        /// Setback along each adjacent face (mm). May be an expression.
+        distance: Scalar,
+        #[serde(default)]
+        edges: Option<EdgeFilter>,
+        #[serde(default)]
+        min_angle_deg: Option<f64>,
+    },
+
     /// Boolean set operation over existing entities, evaluated in
     /// **world space** (each operand's transform is applied first). The
     /// result becomes a new entity, placed at the center of its bounding
@@ -397,6 +433,34 @@ pub enum Command {
     },
 }
 
+/// Which sharp edges a fillet/chamfer applies to, in **world space**.
+///
+/// Every condition that is set must hold (logical AND); with no conditions
+/// every sharp edge is selected. Selection is geometric on purpose: entity
+/// ids and edge indices are stable across replay, but a parameter change
+/// moves edges, and "the edges parallel to Z" keeps meaning the same thing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EdgeFilter {
+    /// Keep edges parallel to this direction (either orientation).
+    pub direction: Option<[f64; 3]>,
+    /// Angular tolerance for `direction` and `normals`, in degrees
+    /// (default 1).
+    pub angle_tol_deg: Option<f64>,
+    /// Keep edges whose midpoint is within `near_radius` of this point.
+    pub near: Option<[f64; 3]>,
+    /// Radius around `near` (mm). Required together with `near`.
+    pub near_radius: Option<f64>,
+    /// Keep edges that touch a face with one of these outward normals.
+    /// One normal selects every edge of that face — `[[0,0,1]]` is "the
+    /// whole top rim". Two select the edge between exactly those faces, in
+    /// either order — `[[0,0,1],[1,0,0]]` is "where the top meets the +X
+    /// side".
+    pub normals: Option<Vec<[f64; 3]>>,
+    /// Keep only convex (`true`) or concave (`false`) edges.
+    pub convex: Option<bool>,
+}
+
 /// Which set operation a [`Command::Boolean`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -432,6 +496,16 @@ pub enum CommandResult {
     DocumentCreated { doc: DocId },
     Closed { doc: DocId },
     EntityCreated { doc: DocId, entity: EntityId, mesh: Mesh },
+    /// A solid was reshaped in place (fillet/chamfer). `edges` is how many
+    /// sharp edges the selection matched, `volume` the new world-space
+    /// volume in mm³, and `mesh` the new local mesh.
+    EntityModified {
+        doc: DocId,
+        entity: EntityId,
+        edges: u32,
+        volume: f64,
+        mesh: Mesh,
+    },
     Transformed { doc: DocId, entity: EntityId },
     Deleted { doc: DocId, entity: EntityId },
     ParameterSet { doc: DocId, name: String, value: f64 },

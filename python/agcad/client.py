@@ -375,6 +375,58 @@ class Agcad:
             "boolean", doc=doc, op=op, entities=entities, name=name, color=color
         )
 
+    def fillet(
+        self,
+        doc: int,
+        entity: int,
+        radius: float | str,
+        edges: dict[str, Any] | None = None,
+        min_angle_deg: float | None = None,
+    ) -> dict[str, Any]:
+        """Round the sharp edges of one solid, in place.
+
+        ``radius`` may be an expression over parameters, so the rounding
+        follows a knob change. ``edges`` selects which edges to touch; omit it
+        for every sharp edge. Filters are geometric (world space) and ANDed:
+
+        * ``{"direction": [0, 0, 1]}`` — edges parallel to a vector, e.g. the
+          vertical corners of an extrusion;
+        * ``{"near": [x, y, z], "near_radius": 6}`` — edges whose midpoint is
+          close to a point;
+        * ``{"normals": [[0, 0, 1], [1, 0, 0]]}`` — the edge between two faces,
+          given by their outward normals (either order);
+        * ``{"convex": true}`` — only outside corners (``false`` for inside
+          ones, which get filled instead of cut).
+
+        ``min_angle_deg`` (default 30) is how sharp a face pair must be to
+        count as an edge; tessellation seams of curved surfaces stay below it.
+        Returns the new local mesh, the number of edges touched and the
+        world-space volume.
+        """
+        return self._request(
+            "fillet", doc=doc, entity=entity, radius=radius, edges=edges,
+            min_angle_deg=min_angle_deg,
+        )
+
+    def chamfer(
+        self,
+        doc: int,
+        entity: int,
+        distance: float | str,
+        edges: dict[str, Any] | None = None,
+        min_angle_deg: float | None = None,
+    ) -> dict[str, Any]:
+        """Bevel the sharp edges of one solid with a flat face, in place.
+
+        ``distance`` is the setback along each adjacent face (mm, may be an
+        expression). Edge selection is the same as :meth:`fillet`; convex
+        edges lose material, concave edges gain it.
+        """
+        return self._request(
+            "chamfer", doc=doc, entity=entity, distance=distance, edges=edges,
+            min_angle_deg=min_angle_deg,
+        )
+
     def transform(
         self,
         doc: int,

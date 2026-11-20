@@ -70,6 +70,97 @@ pub fn compose(t: [f64; 3], rotation_deg: [f64; 3], s: [f64; 3]) -> Mat4 {
     mul(&translation(t), &mul(&rotation_xyz_deg(rotation_deg), &scale(s)))
 }
 
+/// Inverse of an affine model matrix, or `None` when it is singular (a
+/// zero scale component). Computed in f64, returned as f32 like the rest of
+/// the matrix API.
+pub fn inverse(m: &Mat4) -> Option<Mat4> {
+    // Flatten to column-major, index = col * 4 + row, and invert in f64.
+    let mut a = [0.0f64; 16];
+    for (col, c) in m.iter().enumerate() {
+        for (row, v) in c.iter().enumerate() {
+            a[col * 4 + row] = *v as f64;
+        }
+    }
+    let mut inv = [0.0f64; 16];
+    inv[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15]
+        + a[9] * a[7] * a[14]
+        + a[13] * a[6] * a[11]
+        - a[13] * a[7] * a[10];
+    inv[4] = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15]
+        - a[8] * a[7] * a[14]
+        - a[12] * a[6] * a[11]
+        + a[12] * a[7] * a[10];
+    inv[8] = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15]
+        + a[8] * a[7] * a[13]
+        + a[12] * a[5] * a[11]
+        - a[12] * a[7] * a[9];
+    inv[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14]
+        - a[8] * a[6] * a[13]
+        - a[12] * a[5] * a[10]
+        + a[12] * a[6] * a[9];
+    inv[1] = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15]
+        - a[9] * a[3] * a[14]
+        - a[13] * a[2] * a[11]
+        + a[13] * a[3] * a[10];
+    inv[5] = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15]
+        + a[8] * a[3] * a[14]
+        + a[12] * a[2] * a[11]
+        - a[12] * a[3] * a[10];
+    inv[9] = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15]
+        - a[8] * a[3] * a[13]
+        - a[12] * a[1] * a[11]
+        + a[12] * a[3] * a[9];
+    inv[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14]
+        + a[8] * a[2] * a[13]
+        + a[12] * a[1] * a[10]
+        - a[12] * a[2] * a[9];
+    inv[2] = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15]
+        + a[5] * a[3] * a[14]
+        + a[13] * a[2] * a[7]
+        - a[13] * a[3] * a[6];
+    inv[6] = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15]
+        - a[4] * a[3] * a[14]
+        - a[12] * a[2] * a[7]
+        + a[12] * a[3] * a[6];
+    inv[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15]
+        + a[4] * a[3] * a[13]
+        + a[12] * a[1] * a[7]
+        - a[12] * a[3] * a[5];
+    inv[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14]
+        - a[4] * a[2] * a[13]
+        - a[12] * a[1] * a[6]
+        + a[12] * a[2] * a[5];
+    inv[3] = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11]
+        - a[5] * a[3] * a[10]
+        - a[9] * a[2] * a[7]
+        + a[9] * a[3] * a[6];
+    inv[7] = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11]
+        + a[4] * a[3] * a[10]
+        + a[8] * a[2] * a[7]
+        - a[8] * a[3] * a[6];
+    inv[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11]
+        - a[4] * a[3] * a[9]
+        - a[8] * a[1] * a[7]
+        + a[8] * a[3] * a[5];
+    inv[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10]
+        + a[4] * a[2] * a[9]
+        + a[8] * a[1] * a[6]
+        - a[8] * a[2] * a[5];
+
+    let det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    if !det.is_finite() || det.abs() < 1e-30 {
+        return None;
+    }
+    let d = 1.0 / det;
+    let mut out = [[0.0f32; 4]; 4];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col][row] = (inv[col * 4 + row] * d) as f32;
+        }
+    }
+    Some(out)
+}
+
 /// Transform a point by a model matrix (w = 1, no perspective).
 pub fn transform_point(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
     [
@@ -186,5 +277,19 @@ mod tests {
         let near_x = near[0] / near[3];
         let far_x = far[0] / far[3];
         assert!(near_x.abs() > far_x.abs() * 3.0, "{near_x} {far_x}");
+    }
+
+    #[test]
+    fn inverse_undoes_a_placement() {
+        let m = compose([10.0, -5.0, 2.0], [20.0, -35.0, 70.0], [2.0, 0.5, 3.0]);
+        let inv = inverse(&m).expect("invertible");
+        let p = [3.0f32, -7.0, 11.0];
+        let world = transform_point(&m, p);
+        let back = transform_point(&inv, world);
+        for i in 0..3 {
+            assert!((back[i] - p[i]).abs() < 1e-3, "{back:?} vs {p:?}");
+        }
+        // A singular matrix (zero scale) has no inverse.
+        assert!(inverse(&compose([0.0; 3], [0.0; 3], [1.0, 0.0, 1.0])).is_none());
     }
 }

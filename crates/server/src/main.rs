@@ -96,6 +96,8 @@ fn is_mutating(command: &Command) -> bool {
             | Command::Transform { .. }
             | Command::SetColor { .. }
             | Command::Delete { .. }
+            | Command::Fillet { .. }
+            | Command::Chamfer { .. }
             | Command::Boolean { .. }
             | Command::AddSketch { .. }
             | Command::AddSketchLine { .. }
@@ -124,6 +126,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }
+        | Command::Fillet { doc, .. }
+        | Command::Chamfer { doc, .. }
         | Command::Boolean { doc, .. }
         | Command::AddSketch { doc, .. }
         | Command::AddSketchLine { doc, .. }

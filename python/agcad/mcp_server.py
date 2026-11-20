@@ -40,7 +40,11 @@ dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
 verify -> agcad_render to SEE the result -> export_stl for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change ->
-extrude/revolve turns a closed profile into a printable solid. Persist a model with
+extrude/revolve turns a closed profile into a printable solid. Fillets and
+chamfers reshape a solid in place (same entity id): fillet{doc,entity,radius,edges?}
+or chamfer{doc,entity,distance,edges?}, where `edges` is a geometric filter
+({direction}, {near,near_radius}, {normals}, {convex}) instead of an index — omit
+it to take every sharp edge. Persist a model with
 save_document -> .agcad (JSON program + current parameter values, replayed on
 open_document); a Python client script is the authoring source, not the file.
 Failed commands report a hint; fix the named issue and retry."""
@@ -60,6 +64,22 @@ transform{doc,entity,translation?,rotation_deg?,scale?} (only provided parts cha
 boolean{doc,op:"union"|"difference"|"intersection",entities:[ids],name?,color?}
   (world-space set op; creates a NEW entity, sources are kept — delete them if
   you only want the fused result; boolean entities replay parametrically),
+fillet{doc,entity,radius,edges?,min_angle_deg?} (rounds the selected sharp edges
+  of a solid IN PLACE — the entity keeps its id, name, color and transform;
+  radius may be an expression, so a knob re-fillets the rebuilt geometry; returns
+  edges matched, world-space volume and the new local mesh),
+chamfer{doc,entity,distance,edges?,min_angle_deg?} (flat bevel, same in-place
+  semantics; convex edges lose material, concave edges gain it),
+  edges: a filter object, all set conditions ANDed; omit it for every sharp edge:
+    {direction:[x,y,z],angle_tol_deg?} — edges parallel to a direction,
+    {near:[x,y,z],near_radius} — edges whose midpoint is near a point,
+    {normals:[[..]]} — ONE outward face normal = every edge of that face
+      ([[0,0,1]] is the whole top rim); TWO = the edge between those faces,
+      either order ([[0,0,1],[1,0,0]]),
+    {convex:true|false} — only outside corners / only inside corners,
+  min_angle_deg (default 30) is how sharp a face pair must be to count as an edge;
+  it keeps tessellation seams of curved surfaces out. Apply rim treatments before
+  vertical-edge ones: re-cutting an already-rounded rim is not meaningful.
 set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc},
 add_sketch{doc,name} (empty 2D sketch; place it in 3D with transform),
 add_sketch_line{doc,sketch,p1:[x,y],p2:[x,y]},
