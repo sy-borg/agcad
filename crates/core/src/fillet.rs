@@ -20,6 +20,13 @@
 //! intersection of the three cylinders (a small, printable curved triangle)
 //! rather than a single spherical patch.
 //!
+//! Concave tools add material *outside* the part, so a concave edge that ends
+//! on a treated rim needs one extra cut: the rim's round is mirrored across
+//! the side wall — where the added material lives — and subtracted from the
+//! additive tool. Without it the added material stands at the original top
+//! plane as a thin fin, because the rim's cut only reaches material inside
+//! the part.
+//!
 //! Everything here is deterministic: edges come out of a `BTreeMap` in key
 //! order and the kernel is bit-reproducible, so a replay re-cuts the same
 //! bytes.
@@ -122,8 +129,71 @@ pub fn apply(
             .is_some_and(|ns| ns.iter().any(|n| edges::dot(*n, dir).abs() > 0.866))
     };
 
+    // A convex rim treatment only cuts on the material side of the face. A
+    // concave (additive) treatment that ends on that same rim adds material
+    // in the void *outside* the face, out to the original top plane, where
+    // the rim's cut cannot reach it — a thin fin is left standing in the
+    // notch (a visible block at a reflex corner). The part's round, mirrored
+    // across the side face, is exactly the surface the added material should
+    // end on, so trim each additive tool with those mirrors *before* it is
+    // unioned in. Trimming the tool (rather than the finished solid) keeps
+    // the boolean away from the part's walls.
+    //
+    // Only mixed pairs matter (convex rim edge meeting a concave edge), and
+    // the mirror is taken across the side wall — the convex edge's face that
+    // is perpendicular to the concave edge — never the face it butts against.
+    let mut void_trims: BTreeMap<usize, Mesh> = BTreeMap::new();
+    for (i, e) in selected.iter().enumerate() {
+        if e.convex {
+            continue;
+        }
+        let dir = e.direction();
+        let mut trims: Vec<Mesh> = Vec::new();
+        for p in [e.a, e.b] {
+            let Some(here) = at.get(&key(p)) else { continue };
+            for &j in here {
+                let c = selected[j];
+                if j == i || !c.convex {
+                    continue;
+                }
+                // The rim edge must cross the concave edge, not run along it.
+                if edges::dot(c.direction(), dir).abs() > 0.5 {
+                    continue;
+                }
+                // One face butts against the concave edge (the rim face,
+                // normal along the concave edge); the other is the side wall.
+                let (d1, d2) = (edges::dot(c.n1, dir).abs(), edges::dot(c.n2, dir).abs());
+                if d1.max(d2) < 0.866 || d1.min(d2) > 0.5 {
+                    continue;
+                }
+                let n = if d1 < d2 { c.n1 } else { c.n2 };
+                // Only the corner end matters, and keeping the coplanar
+                // footprint on the wall short keeps the boolean clean.
+                let far = if key(c.a) == key(p) { c.b } else { c.a };
+                let step = edges::normalize([far[0] - p[0], far[1] - p[1], far[2] - p[2]]);
+                let reach = size * 3.0;
+                let sub = SharpEdge {
+                    a: p,
+                    b: [
+                        p[0] + step[0] * reach,
+                        p[1] + step[1] * reach,
+                        p[2] + step[2] * reach,
+                    ],
+                    n1: c.n1,
+                    n2: c.n2,
+                    convex: true,
+                };
+                let rim_tool = tool(&sub, kind, 0.0, 0.0)?;
+                trims.push(reflect(&rim_tool, p, n));
+            }
+        }
+        if !trims.is_empty() {
+            void_trims.insert(i, boolean::boolean(BooleanOp::Union, &trims)?);
+        }
+    }
+
     let mut current = mesh.clone();
-    for edge in &selected {
+    for (i, edge) in selected.iter().enumerate() {
         // Where two selected edges meet, the mitering step below handles the
         // corner, so the tool must stop at the endpoint. Where an edge simply
         // *ends* — no selected edge continues it — the tool should run on a
@@ -143,11 +213,14 @@ pub fn apply(
         } else {
             (0.0, 0.0)
         };
-        let tool = tool(edge, kind, ext_a, ext_b)?;
+        let mut corner_tool = tool(edge, kind, ext_a, ext_b)?;
+        if let Some(trim) = void_trims.get(&i) {
+            corner_tool = boolean::boolean(BooleanOp::Difference, &[corner_tool, trim.clone()])?;
+        }
         // Convex: cut the corner sliver away. Concave: fill it in.
         let op = if edge.convex { BooleanOp::Difference } else { BooleanOp::Union };
         let m = edge.midpoint();
-        current = boolean::boolean(op, &[current, tool]).map_err(|e| {
+        current = boolean::boolean(op, &[current, corner_tool]).map_err(|e| {
             Error::Invalid(format!(
                 "{} failed at the edge through ({:.2}, {:.2}, {:.2}): {e} (hint: the {} size \
                  may be too large for the faces around this edge)",
@@ -229,7 +302,33 @@ pub fn apply(
         let merged = boolean::boolean(BooleanOp::Union, &concave_corners)?;
         current = boolean::boolean(BooleanOp::Union, &[current, merged])?;
     }
+
     Ok((current, selected.len() as u32))
+}
+
+/// Mirror a mesh across the plane through `p` with unit normal `n`, reversing
+/// the winding so the copy is still a valid outward-facing solid.
+fn reflect(mesh: &Mesh, p: [f64; 3], n: [f64; 3]) -> Mesh {
+    let mut m = mesh.clone();
+    for q in &mut m.positions {
+        let d = 2.0
+            * edges::dot(
+                [q[0] as f64 - p[0], q[1] as f64 - p[1], q[2] as f64 - p[2]],
+                n,
+            );
+        *q = [
+            (q[0] as f64 - d * n[0]) as f32,
+            (q[1] as f64 - d * n[1]) as f32,
+            (q[2] as f64 - d * n[2]) as f32,
+        ];
+    }
+    for tri in m.indices.chunks_exact_mut(3) {
+        tri.swap(1, 2);
+    }
+    for nn in &mut m.normals {
+        *nn = [-nn[0], -nn[1], -nn[2]];
+    }
+    m
 }
 
 /// Build the corner tool for one edge: a prism of the cross-section, from
@@ -526,6 +625,63 @@ mod tests {
         assert!(
             (removed - finite).abs() < 1.0,
             "fillet cut into the plate: removed {removed}, expected {finite}"
+        );
+    }
+
+    #[test]
+    fn an_all_edge_fillet_keeps_reflex_corners_clean() {
+        use agcad_protocol::BooleanOp;
+        // An L-shaped plan as in the miter test: one reflex vertical edge,
+        // rounded together with every other edge in a single pass. The
+        // additive tool reaches the top plane in the notch, where the rim's
+        // cut (inside the part) cannot reach it; the mirrored rim trim must
+        // take it back down instead of leaving a block at the corner.
+        let outer = geo::box_mesh([20.0, 20.0, 10.0]);
+        let mut cutter = geo::box_mesh([10.0, 10.0, 20.0]);
+        for p in &mut cutter.positions {
+            p[0] += 10.0;
+            p[1] += 10.0;
+        }
+        let l = crate::boolean::boolean(BooleanOp::Difference, &[outer, cutter]).unwrap();
+        let r = 1.5;
+        let (m, n) = apply(&l, Kind::Fillet(r), &all_edges(), 30.0).unwrap();
+        assert_eq!(n, 18, "six rim edges top and bottom, six vertical edges");
+        assert_closed(&m);
+        // The reflex corner is at (5, 5) and the top at z = 5. Without the
+        // trim the added material keeps its full-height top at z = 5; with it
+        // the highest point in the notch is the mitred ridge, below the band.
+        let top = 5.0;
+        let mut highest: f64 = f64::MIN;
+        for p in &m.positions {
+            let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+            if x > 5.0 && y > 5.0 && (x - 5.0).hypot(y - 5.0) < 2.0 * r {
+                highest = highest.max(z);
+            }
+        }
+        assert!(
+            highest < top - 0.15 * r,
+            "leftover fin at the reflex corner: z = {highest}"
+        );
+    }
+
+    #[test]
+    fn an_all_edge_fillet_with_a_through_hole_stays_sound() {
+        use agcad_protocol::BooleanOp;
+        // A plate with a square hole: convex outer and hole rims, concave
+        // hole corners. The mirrored rim trim must not gouge the plate.
+        let plate = geo::box_mesh([40.0, 40.0, 10.0]);
+        let hole = geo::box_mesh([14.0, 14.0, 20.0]);
+        let part = crate::boolean::boolean(BooleanOp::Difference, &[plate, hole]).unwrap();
+        let before = signed_volume(&part);
+        let (m, n) = apply(&part, Kind::Fillet(1.5), &all_edges(), 30.0).unwrap();
+        assert_eq!(n, 24, "four outer verticals, twelve rims, four hole corners");
+        assert_closed(&m);
+        let after = signed_volume(&m);
+        // The fillets touch only the edges: the volume moves by a few percent
+        // of the 14040 mm³ block, never by a corner-sized chunk.
+        assert!(
+            (after - before).abs() / before < 0.03,
+            "fillet changed the volume from {before} to {after}"
         );
     }
 
