@@ -41,15 +41,16 @@ is 553 × 614 px at the drawing's own 9 mm scale bar, so the body is
 45 × 45 mm in plan, 15 mm arms and 50 mm tall. The reproduction's camera was
 fitted by comparing silhouettes (0.99 IoU), and its front view matches the
 drawing's aspect to ~0.1% (0.898 vs 0.899). The baseline keeps sharp edges so
-the silhouette comparison stays unambiguous; the script then adds two edge
-commands — a 1.5 mm `chamfer` on the top rim and a 4 mm `fillet` on the twelve
-vertical edges — driven by the `bevel` and `round_r` knobs:
+the silhouette comparison stays unambiguous; the script then rounds it the
+way the drawing does — a 1 mm `fillet` on the top and bottom rims, driven by
+the `round_r` knob. The drawing's plan corners are sharp, so the twelve
+vertical edges are deliberately left alone:
 
-![the cross block with a chamfered top rim and rounded vertical edges](examples/cross_block/rounded.png)
+![the cross block with its top and bottom rims rounded and sharp plan corners](examples/cross_block/rounded.png)
 
-Both operations reshape the solid in place, so the entity id, camera and STL
-export still apply. Turning `height` down to 30 mm replays the sketch, the
-extrude and both edge commands, so the rounding follows the new geometry.
+`fillet` reshapes the solid in place, so the entity id, camera and STL export
+still apply. Turning `height` down to 30 mm replays the sketch, the extrude
+and both rim fillets, so the rounding follows the new geometry.
 
 The loop this exercises, end to end:
 
@@ -58,9 +59,10 @@ The loop this exercises, end to end:
    sketch lines, `extrude` into a watertight solid.
 3. **Check** with `render_offscreen` in orthographic mode from the drawing's
    camera, and compare the silhouette.
-4. **Finish** the edges with `chamfer`/`fillet` and a geometric edge filter —
-   `{normals:[[0,0,1]]}` for the top rim, `{direction:[0,0,1]}` for the
-   vertical corners — so the part reads as a moulded body, not a block-out.
+4. **Finish** the edges with `fillet` and a geometric edge filter —
+   `{normals:[[0,0,1]]}` for the top rim, `{normals:[[0,0,-1]]}` for the
+   bottom — so the part reads as a moulded body, not a block-out. `chamfer`
+   shares the same machinery; this drawing has rounds, not bevels.
 5. **Deliver** `cross_block_rounded.stl` for the slicer, and the matching
    `.agcad` (program + parameter values) so the part reopens with its knobs
    intact.
@@ -344,8 +346,9 @@ profile with holes → extrude → STL → render),
 model reproduction: `examples/example_body.png` is read for its two views
 (45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
 profile and extruded, rendered from a camera fitted to the drawing, then
-finished with a `chamfer` on the top rim and a `fillet` on the vertical
-edges — and `examples/save_load.py` (save → open in a fresh engine → change
+finished with a `fillet` on the top and bottom rims — the drawing's plan
+corners are sharp, so the vertical edges stay sharp too — and
+`examples/save_load.py` (save → open in a fresh engine → change
 a knob → export back to Python and run it).
 
 Also in the roadmap but not started: 3MF export, and sketches placed on

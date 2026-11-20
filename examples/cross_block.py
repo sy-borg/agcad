@@ -1,19 +1,17 @@
 """Reproduce examples/example_body.png from its two views.
 
 The reference drawing shows a plus-shaped prism: two 45 x 15 mm bars crossed
-and extruded 50 mm, with ~1 mm fillets on the edges. The left panel is a
-front view (45 mm wide, 50 mm tall); the right panel is a 3/4 view.
+and extruded 50 mm, with ~1 mm fillets on the top and bottom rims. The left
+panel is a front view (45 mm wide, 50 mm tall); the right panel is a 3/4 view.
 
 The plus profile is drawn as twelve parametric lines and extruded, so the
 shape is driven by `span`, `arm` and `height` — change one and the sketch
 re-solves and the solid rebuilds.
 
-The script keeps a sharp baseline for the silhouette comparison, then
-demonstrates agcad's edge tools on the same program: `chamfer` the top rim
-and `fillet` the twelve vertical edges, driven by the `bevel` and `round_r`
-knobs. (Rim treatments come before vertical ones: the later vertical fillet
-trims the rim band cleanly; re-cutting an already-rounded rim is slow and
-noisy.)
+The script keeps a sharp baseline for the silhouette comparison, then rounds
+the part the way the drawing does: a `fillet` on the top and bottom rims,
+driven by the `round_r` knob. The drawing rounds only the rim edges — its
+plan corners are sharp — so the vertical edges are deliberately left alone.
 
 Writes the committed showcase into ``examples/cross_block/``: ``iso.png``,
 ``front.png``, ``cross_block.stl``, ``cross_block.agcad`` (the sharp
@@ -42,9 +40,10 @@ GREEN = (0.85, 1.0, 0.83, 1.0)
 # front panel is 553 x 614 px, so the body is 45 x 45 mm in plan and 50 tall.
 SPAN, ARM, HEIGHT = 45.0, 15.0, 50.0
 
-# Edge treatment for the rounded variant. The drawing's own fillets are
-# ~1 mm; these are exaggerated a little so the render reads at a glance.
-ROUND_R, BEVEL = 4.0, 1.5
+# Edge treatment for the rounded variant. The drawing rounds only the top and
+# bottom rims (~1 mm) and leaves the plan corners sharp, so the fillets go on
+# the rim edges only.
+ROUND_R = 1.0
 
 REFERENCE = os.path.join("examples", "example_body.png")
 OUT_DIR = os.path.join("examples", "cross_block")
@@ -185,18 +184,16 @@ def main() -> None:
     # --- edge treatment ------------------------------------------------------
     # The same program, two more commands. Both reshape the solid in place, so
     # the entity keeps its id and the camera / STL export still refer to it.
-    # The top rim goes first: the vertical fillet then runs through the
-    # chamfer band and trims its corners, so the two treatments blend. The
-    # reverse order would re-cut an already rounded rim into hundreds of tiny
-    # facets (slow, and noisy).
-    cad.set_parameter(doc, "round_r", ROUND_R, "radius of the vertical edges")
-    cad.set_parameter(doc, "bevel", BEVEL, "chamfer on the top rim")
+    # The drawing rounds only the top and bottom rims; its plan corners are
+    # sharp. Filleting the two rims — and not the twelve vertical edges —
+    # reproduces that: the rounded bands stop at the sharp corners.
+    cad.set_parameter(doc, "round_r", ROUND_R, "radius of the top and bottom rims")
     eid = solid["entity"]
-    chamfer = cad.chamfer(doc, eid, "bevel", edges={"normals": [[0, 0, 1]]})
-    print(f"chamfer top rim: {chamfer['edges']} edges -> {chamfer['volume']:.0f} mm³")
-    fillet = cad.fillet(doc, eid, "round_r", edges={"direction": [0, 0, 1]})
-    print(f"fillet vertical: {fillet['edges']} edges -> {fillet['volume']:.0f} mm³, "
-          f"{len(fillet['mesh']['indices']) // 3} tris")
+    top = cad.fillet(doc, eid, "round_r", edges={"normals": [[0, 0, 1]]})
+    print(f"fillet top rim: {top['edges']} edges -> {top['volume']:.0f} mm³")
+    bottom = cad.fillet(doc, eid, "round_r", edges={"normals": [[0, 0, -1]]})
+    print(f"fillet bottom rim: {bottom['edges']} edges -> {bottom['volume']:.0f} mm³, "
+          f"{len(bottom['mesh']['indices']) // 3} tris")
 
     png = cad.render_offscreen(
         doc, width=900, height=900,
