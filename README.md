@@ -324,7 +324,7 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 9 complete: fillets and chamfers. 87 tests cover the solver
+Milestone 9 complete: fillets and chamfers. 89 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade

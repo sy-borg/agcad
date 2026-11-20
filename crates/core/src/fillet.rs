@@ -82,9 +82,68 @@ pub fn apply(
         )));
     }
 
+    // Group the selected edges by endpoint. This does double duty: it tells
+    // each edge whether another selected edge continues the treatment at an
+    // endpoint (a corner the mitering step will handle), and it makes the
+    // mitering pass linear in the number of neighbours instead of all-pairs —
+    // a rounded rim can have hundreds of short edges.
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let key = |p: [f64; 3]| {
+        [
+            (p[0] * 1000.0).round() as i64,
+            (p[1] * 1000.0).round() as i64,
+            (p[2] * 1000.0).round() as i64,
+        ]
+    };
+    let mut at: BTreeMap<[i64; 3], Vec<usize>> = BTreeMap::new();
+    for (i, e) in selected.iter().enumerate() {
+        at.entry(key(e.a)).or_default().push(i);
+        at.entry(key(e.b)).or_default().push(i);
+    }
+
+    // Face normals meeting at each vertex, from *all* sharp edges. Used to
+    // tell a band we may blend through (a 45° chamfer, a tangent fillet)
+    // from a face the edge simply butts against (a plate top under a boss).
+    // Extending into the latter would cut a groove, so those block it.
+    let mut normals_at: BTreeMap<[i64; 3], Vec<[f64; 3]>> = BTreeMap::new();
+    for e in &all {
+        for p in [e.a, e.b] {
+            let ns = normals_at.entry(key(p)).or_default();
+            ns.push(e.n1);
+            ns.push(e.n2);
+        }
+    }
+    let butt_face = |p: [f64; 3], dir: [f64; 3]| {
+        // cos 30°: a face whose normal is within 30° of the edge is
+        // effectively perpendicular to it.
+        normals_at
+            .get(&key(p))
+            .is_some_and(|ns| ns.iter().any(|n| edges::dot(*n, dir).abs() > 0.866))
+    };
+
     let mut current = mesh.clone();
     for edge in &selected {
-        let tool = tool(edge, kind, 0.0)?;
+        // Where two selected edges meet, the mitering step below handles the
+        // corner, so the tool must stop at the endpoint. Where an edge simply
+        // *ends* — no selected edge continues it — the tool should run on a
+        // little: if it lands on an earlier treatment's band (a chamfer or
+        // fillet on a neighbouring rim), that overshoot trims the band instead
+        // of leaving it overhanging as a lip. This is safe only for convex
+        // (subtractive) tools: outside the solid they cut nothing, while a
+        // concave (additive) overshoot would grow a bump outside the part.
+        let shared = |p: [f64; 3]| at.get(&key(p)).is_some_and(|v| v.len() > 1);
+        let dir = edge.direction();
+        let blend = size * 2.0;
+        let (ext_a, ext_b) = if edge.convex {
+            (
+                if shared(edge.a) || butt_face(edge.a, dir) { 0.0 } else { blend },
+                if shared(edge.b) || butt_face(edge.b, dir) { 0.0 } else { blend },
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let tool = tool(edge, kind, ext_a, ext_b)?;
         // Convex: cut the corner sliver away. Concave: fill it in.
         let op = if edge.convex { BooleanOp::Difference } else { BooleanOp::Union };
         let m = edge.midpoint();
@@ -114,25 +173,6 @@ pub fn apply(
     // meeting at an inside corner) it protrudes as a spike. Miter those
     // corners by also cutting the intersection of the two *extended* tools:
     // that intersection is exactly the material above both bevels/arcs.
-    //
-    // Only edges that share a vertex can form a corner, so group by endpoint
-    // instead of testing every pair — a rounded rim can have hundreds of
-    // short edges, and all-pairs would be quadratic.
-    use std::collections::{BTreeMap, BTreeSet};
-
-    let key = |p: [f64; 3]| {
-        [
-            (p[0] * 1000.0).round() as i64,
-            (p[1] * 1000.0).round() as i64,
-            (p[2] * 1000.0).round() as i64,
-        ]
-    };
-    let mut at: BTreeMap<[i64; 3], Vec<usize>> = BTreeMap::new();
-    for (i, e) in selected.iter().enumerate() {
-        at.entry(key(e.a)).or_default().push(i);
-        at.entry(key(e.b)).or_default().push(i);
-    }
-
     let overshoot = size * 2.0;
     let mut extended: BTreeMap<usize, Mesh> = BTreeMap::new();
     let mut convex_corners: Vec<Mesh> = Vec::new();
@@ -156,7 +196,7 @@ pub fn apply(
                 let a = match extended.get(&i) {
                     Some(m) => m.clone(),
                     None => {
-                        let m = tool(ei, kind, overshoot)?;
+                        let m = tool(ei, kind, overshoot, overshoot)?;
                         extended.insert(i, m.clone());
                         m
                     },
@@ -164,7 +204,7 @@ pub fn apply(
                 let b = match extended.get(&j) {
                     Some(m) => m.clone(),
                     None => {
-                        let m = tool(ej, kind, overshoot)?;
+                        let m = tool(ej, kind, overshoot, overshoot)?;
                         extended.insert(j, m.clone());
                         m
                     },
@@ -193,10 +233,16 @@ pub fn apply(
 }
 
 /// Build the corner tool for one edge: a prism of the cross-section, from
-/// `a - overshoot` to `b + overshoot`, oriented so `u`/`v` point into the
-/// corner being reshaped. A non-zero `overshoot` is only used to intersect
-/// neighbouring tools at a shared vertex.
-fn tool(edge: &SharpEdge, kind: Kind, overshoot: f64) -> Result<Mesh, Error> {
+/// `a - overshoot_a` to `b + overshoot_b`, oriented so `u`/`v` point into
+/// the corner being reshaped. Overshoots are used to trim an earlier
+/// treatment's band (asymmetric, one end at a time) and to intersect
+/// neighbouring tools at a shared vertex (symmetric, for mitering only).
+fn tool(
+    edge: &SharpEdge,
+    kind: Kind,
+    overshoot_a: f64,
+    overshoot_b: f64,
+) -> Result<Mesh, Error> {
     let size = kind.size();
     let length = edge.length();
     if length < 1e-9 {
@@ -217,9 +263,9 @@ fn tool(edge: &SharpEdge, kind: Kind, overshoot: f64) -> Result<Mesh, Error> {
 
     // Reuse the tested 2D→3D extrusion (it normalizes the loop with Clipper
     // and produces a watertight prism), then move it into the edge frame.
-    let (mut mesh, _) = solid::extrude(&[profile], length + 2.0 * overshoot)?;
+    let (mut mesh, _) = solid::extrude(&[profile], length + overshoot_a + overshoot_b)?;
     for p in &mut mesh.positions {
-        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64 - overshoot);
+        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64 - overshoot_a);
         *p = [
             (edge.a[0] + x * u[0] + y * v[0] + z * w[0]) as f32,
             (edge.a[1] + x * u[1] + y * v[1] + z * w[1]) as f32,
@@ -425,6 +471,62 @@ mod tests {
             assert_eq!(long.len(), 6, "six full-height vertical edges: {lens:?}");
             assert!(long.iter().all(|&len| len > 5.0), "leftover spike: {long:?}");
         }
+    }
+
+    #[test]
+    fn a_fillet_after_a_rim_chamfer_trims_the_band_instead_of_leaving_a_lip() {
+        // The showcase order: chamfer the top rim, then fillet the vertical
+        // corners. The chamfer shortens the vertical edge, and a finite
+        // vertical tool would stop at the band, leaving the band's corner
+        // overhanging the rounded face below. The overshoot must trim it.
+        let cube = geo::box_mesh([10.0, 10.0, 10.0]);
+        let rim = EdgeFilter { normals: Some(vec![[0.0, 0.0, 1.0]]), ..Default::default() };
+        let (c, n) = apply(&cube, Kind::Chamfer(1.5), &rim, 30.0).unwrap();
+        assert_eq!(n, 4);
+        let vertical = EdgeFilter { direction: Some([0.0, 0.0, 1.0]), ..Default::default() };
+        let (m, n) = apply(&c, Kind::Fillet(4.0), &vertical, 30.0).unwrap();
+        assert_eq!(n, 4);
+        assert_closed(&m);
+        // The box is centered on the origin (top at z = 5), so the chamfer
+        // band starts at z = 3.5 and its corner sat at the original sharp
+        // corner (±5, ±5). A rounded vertical face has no vertex at both
+        // faces' corner, so any such vertex above the band is a leftover lip.
+        for p in &m.positions {
+            assert!(
+                !(p[0].abs() > 4.9 && p[1].abs() > 4.9 && p[2] > 3.4),
+                "leftover lip at {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fillet_stops_at_a_perpendicular_face_instead_of_grooving_it() {
+        use agcad_protocol::BooleanOp;
+        // A boss on a plate: the boss's vertical edge ends on the plate's top
+        // face. Extending the fillet into the plate would cut a groove, so
+        // the volume removed must be just the finite fillet over the boss.
+        let plate = geo::box_mesh([60.0, 40.0, 10.0]);
+        let mut boss = geo::box_mesh([20.0, 20.0, 10.0]);
+        for p in &mut boss.positions {
+            p[2] += 10.0; // plate spans z -5..5; boss sits at z 5..15
+        }
+        let part = crate::boolean::boolean(BooleanOp::Union, &[plate, boss]).unwrap();
+        let before = signed_volume(&part);
+        let filter = EdgeFilter {
+            direction: Some([0.0, 0.0, 1.0]),
+            near: Some([10.0, 10.0, 10.0]),
+            near_radius: Some(1.0),
+            ..Default::default()
+        };
+        let (m, n) = apply(&part, Kind::Fillet(3.0), &filter, 30.0).unwrap();
+        assert_eq!(n, 1);
+        assert_closed(&m);
+        let removed = before - signed_volume(&m);
+        let finite = 3.0 * 3.0 * (1.0 - std::f64::consts::FRAC_PI_4) * 10.0;
+        assert!(
+            (removed - finite).abs() < 1.0,
+            "fillet cut into the plate: removed {removed}, expected {finite}"
+        );
     }
 
     #[test]

@@ -11,8 +11,9 @@ re-solves and the solid rebuilds.
 The script keeps a sharp baseline for the silhouette comparison, then
 demonstrates agcad's edge tools on the same program: `chamfer` the top rim
 and `fillet` the twelve vertical edges, driven by the `bevel` and `round_r`
-knobs. (Rim treatments come before vertical ones: re-cutting an already
-rounded rim is not meaningful.)
+knobs. (Rim treatments come before vertical ones: the later vertical fillet
+trims the rim band cleanly; re-cutting an already-rounded rim is slow and
+noisy.)
 
 Writes the committed showcase into ``examples/cross_block/``: ``iso.png``,
 ``front.png``, ``cross_block.stl``, ``cross_block.agcad`` (the sharp
@@ -184,8 +185,10 @@ def main() -> None:
     # --- edge treatment ------------------------------------------------------
     # The same program, two more commands. Both reshape the solid in place, so
     # the entity keeps its id and the camera / STL export still refer to it.
-    # The top rim goes first; re-cutting an already rounded rim is not
-    # meaningful (it would shatter into hundreds of tiny facets).
+    # The top rim goes first: the vertical fillet then runs through the
+    # chamfer band and trims its corners, so the two treatments blend. The
+    # reverse order would re-cut an already rounded rim into hundreds of tiny
+    # facets (slow, and noisy).
     cad.set_parameter(doc, "round_r", ROUND_R, "radius of the vertical edges")
     cad.set_parameter(doc, "bevel", BEVEL, "chamfer on the top rim")
     eid = solid["entity"]

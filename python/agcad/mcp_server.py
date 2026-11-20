@@ -79,7 +79,8 @@ chamfer{doc,entity,distance,edges?,min_angle_deg?} (flat bevel, same in-place
     {convex:true|false} — only outside corners / only inside corners,
   min_angle_deg (default 30) is how sharp a face pair must be to count as an edge;
   it keeps tessellation seams of curved surfaces out. Apply rim treatments before
-  vertical-edge ones: re-cutting an already-rounded rim is not meaningful.
+  vertical-edge ones: the later vertical fillet trims the rim band cleanly, while
+  re-cutting an already-rounded rim is slow and noisy.
 set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc},
 add_sketch{doc,name} (empty 2D sketch; place it in 3D with transform),
 add_sketch_line{doc,sketch,p1:[x,y],p2:[x,y]},
