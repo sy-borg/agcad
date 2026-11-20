@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use agcad_protocol::{
-    BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EntityId,
+    Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EntityId,
     EntitySnapshot, Mat4, Mesh, ParamInfo, Rgba, RevolveAxis, SavedParameter, Scalar,
     SketchElement, SourceDoc, SVec3, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION,
     SERVER_NAME,
@@ -55,7 +55,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownDocument(d) => write!(f, "unknown document {d} (hint: run create_document first, or list_documents)"),
+            Self::UnknownDocument(d) => write!(f, "unknown document {d} (hint: ids start at 1; run create_document first, or list_documents)"),
             Self::UnknownEntity { doc, entity } => write!(f, "document {doc} has no entity {entity} (hint: get_scene lists valid entity ids)"),
             Self::Invalid(msg) => write!(f, "invalid parameters: {msg}"),
             Self::Document(msg) => write!(f, "{msg}"),
@@ -145,13 +145,15 @@ impl Entity {
     }
 
     pub fn snapshot(&self) -> EntitySnapshot {
+        let transform = self.transform();
         EntitySnapshot {
             id: self.id,
             name: self.name.clone(),
             translation: self.translation,
             rotation_deg: self.rotation_deg,
             scale: self.scale,
-            transform: self.transform(),
+            transform,
+            world_bbox: world_bbox(&self.mesh, &transform),
             color: self.color,
             mesh: self.mesh.clone(),
             sketch: match &self.shape {
@@ -168,6 +170,25 @@ impl Entity {
             },
         }
     }
+}
+
+/// Axis-aligned bounds of a local mesh placed by `transform`, in world space.
+/// This is what a client should trust for size and placement: `mesh`
+/// positions are entity-local, so a rotation does not change them.
+fn world_bbox(mesh: &Mesh, transform: &Mat4) -> Bbox {
+    if mesh.positions.is_empty() {
+        return Bbox { min: [0.0; 3], max: [0.0; 3] };
+    }
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for p in &mesh.positions {
+        let w = mat4::transform_point(transform, *p);
+        for i in 0..3 {
+            lo[i] = lo[i].min(w[i] as f64);
+            hi[i] = hi[i].max(w[i] as f64);
+        }
+    }
+    Bbox { min: lo, max: hi }
 }
 
 #[derive(Debug)]
@@ -372,9 +393,29 @@ impl Engine {
                     .collect(),
             }),
 
-            Command::CreateDocument { name } => {
-                let doc = self.next_doc;
-                self.next_doc += 1;
+            Command::CreateDocument { name, doc: wanted } => {
+                let doc = match wanted {
+                    Some(id) => {
+                        if *id == 0 {
+                            return Err(Error::Invalid(
+                                "document ids start at 1 (hint: omit `doc` to allocate the next id)".into(),
+                            ));
+                        }
+                        if self.docs.contains_key(id) {
+                            return Err(Error::Invalid(format!(
+                                "document {id} already exists (hint: list_documents shows allocated ids, or omit `doc` to allocate the next one)"
+                            )));
+                        }
+                        // Keep automatic allocation clear of explicit ids.
+                        self.next_doc = self.next_doc.max(*id + 1);
+                        *id
+                    },
+                    None => {
+                        let id = self.next_doc;
+                        self.next_doc += 1;
+                        id
+                    },
+                };
                 self.docs.insert(doc, Document::new(doc, name.clone()));
                 Ok(CommandResult::DocumentCreated { doc })
             },
@@ -1327,7 +1368,7 @@ mod tests {
 
     fn engine() -> Engine {
         let mut e = Engine::new();
-        match e.execute(Command::CreateDocument { name: "test".into() }).unwrap() {
+        match e.execute(Command::CreateDocument { name: "test".into(), doc: None }).unwrap() {
             CommandResult::DocumentCreated { doc } => assert_eq!(doc, 1),
             r => panic!("unexpected result {r:?}"),
         }
@@ -1478,10 +1519,10 @@ mod tests {
             CommandResult::Scene { entities, .. } => {
                 let ids: Vec<u64> = entities.iter().map(|x| x.id).collect();
                 assert_eq!(ids, vec![a, b], "replay must reuse identical ids");
-                // Cylinder regenerated with the new wall: height = 20.
+                // Cylinder regenerated with the new wall: height = 20 along Z.
                 let cyl = entities.iter().find(|x| x.id == b).unwrap();
-                let max_y = cyl.mesh.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
-                assert!((max_y - 10.0).abs() < 1e-4, "expected height 20 (±10), got {max_y}");
+                let max_z = cyl.mesh.positions.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
+                assert!((max_z - 10.0).abs() < 1e-4, "expected height 20 (±10), got {max_z}");
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -2717,5 +2758,83 @@ mod tests {
             r => panic!("unexpected result {r:?}"),
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- feedback-driven fixes ------------------------------------------------
+
+    /// Explicit ids let one batch create a document and then address it —
+    /// the "create then populate costs two round trips" friction.
+    #[test]
+    fn create_document_accepts_an_explicit_id() {
+        let mut e = Engine::new();
+        match e.execute(Command::CreateDocument { name: "first".into(), doc: Some(10) }).unwrap() {
+            CommandResult::DocumentCreated { doc } => assert_eq!(doc, 10),
+            r => panic!("unexpected result {r:?}"),
+        }
+        // Automatic allocation must stay clear of explicit ids.
+        match e.execute(Command::CreateDocument { name: "next".into(), doc: None }).unwrap() {
+            CommandResult::DocumentCreated { doc } => assert_eq!(doc, 11),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let err = e
+            .execute(Command::CreateDocument { name: "dup".into(), doc: Some(10) })
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert!(err.to_string().contains("list_documents"), "{err}");
+        let err = e
+            .execute(Command::CreateDocument { name: "zero".into(), doc: Some(0) })
+            .unwrap_err();
+        assert!(err.to_string().contains("start at 1"), "{err}");
+
+        // Both documents are usable.
+        e.execute(Command::AddBox {
+            doc: 10, name: "a".into(), center: vec3(0.0), size: vec3(1.0), color: None,
+        })
+        .unwrap();
+        e.execute(Command::AddBox {
+            doc: 11, name: "b".into(), center: vec3(0.0), size: vec3(1.0), color: None,
+        })
+        .unwrap();
+    }
+
+    /// The scene reports a world-space bbox alongside the local mesh, so a
+    /// transform is visible in inspection (not only in the render).
+    #[test]
+    fn scene_reports_a_world_space_bbox() {
+        let mut e = engine();
+        let id = match e
+            .execute(Command::AddCylinder {
+                doc: 1, name: "post".into(),
+                center: [num(0.0), num(0.0), num(10.0)],
+                radius: num(5.0), height: num(20.0), segments: Some(32), color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+
+        let snap = entity_snapshot(&mut e, id);
+        let bb = snap.world_bbox;
+        // +Z cylinder, centered at z = 10, so it stands on the plane.
+        assert!((bb.min[0] + 5.0).abs() < 1e-4 && (bb.max[0] - 5.0).abs() < 1e-4, "{bb:?}");
+        assert!((bb.min[2] - 0.0).abs() < 1e-4 && (bb.max[2] - 20.0).abs() < 1e-4, "{bb:?}");
+
+        // Lay it down along Y: the world bbox follows the transform while
+        // the local mesh (and its bbox) is untouched.
+        e.execute(Command::Transform {
+            doc: 1, entity: id, translation: None,
+            rotation_deg: Some([num(90.0), num(0.0), num(0.0)]), scale: None,
+        })
+        .unwrap();
+        let snap = entity_snapshot(&mut e, id);
+        let bb = snap.world_bbox;
+        let (z, y) = (bb.max[2] - bb.min[2], bb.max[1] - bb.min[1]);
+        assert!((z - 10.0).abs() < 0.2, "world z extent {z} ({bb:?})");
+        assert!((y - 20.0).abs() < 0.2, "world y extent {y} ({bb:?})");
+
+        let local_z = snap.mesh.positions.iter().map(|p| p[2]).fold(f32::MIN, f32::max)
+            - snap.mesh.positions.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
+        assert!((local_z - 20.0).abs() < 1e-4, "local mesh must stay axis-aligned ({local_z})");
     }
 }

@@ -53,7 +53,7 @@ try:
 
     # --- batch modeling through agcad_execute ------------------------------
     batch = [
-        {"method": "create_document", "name": "mcp-bracket"},
+        {"method": "create_document", "name": "mcp-bracket", "doc": 1},
         {"method": "set_parameter", "params": {"doc": 1, "name": "wall", "value": 2.0}},
         {"method": "add_box", "params": {"doc": 1, "name": "plate",
             "center": [0, 0, "wall/2"], "size": ["wall*30", 40, "wall"], "color": [0.7, 0.7, 0.75, 1]}},
@@ -68,7 +68,7 @@ try:
     assert payload["executed"] == 4 and "stopped_early" not in payload
     plate = payload["results"][2]["result"]
     assert plate["result"] == "entity_created" and plate["entity"] == 1, plate
-    assert plate["mesh"]["bbox"][1][2] == 1.0, plate  # z max = wall/2 (plate centered)
+    assert plate["mesh"]["local_bbox"][1][2] == 1.0, plate  # local mesh z max
     assert "positions" not in json.dumps(plate), "meshes must be summarized, not shipped"
     print("agcad_execute: ok |", payload["executed"], "commands, meshes summarized")
 
@@ -78,7 +78,12 @@ try:
     scene = json.loads(recv()["result"]["content"][0]["text"])
     assert len(scene["entities"]) == 2
     assert scene["parameters"][0]["name"] == "wall" and scene["parameters"][0]["value"] == 2.0
-    print("agcad_scene: ok |", len(scene["entities"]), "entities, wall =", scene["parameters"][0]["value"])
+    plate = next(e for e in scene["entities"] if e["name"] == "plate")
+    # The mesh is entity-local; the reported world bbox includes the transform.
+    assert plate["local_bbox"][1][2] == 1.0, plate
+    assert plate["world_bbox"]["max"][2] == 2.0, plate
+    print("agcad_scene: ok |", len(scene["entities"]), "entities, wall =", scene["parameters"][0]["value"],
+          "| world z_max =", plate["world_bbox"]["max"][2])
 
     # --- parameter change through MCP --------------------------------------
     send({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
@@ -91,8 +96,8 @@ try:
     scene = json.loads(recv()["result"]["content"][0]["text"])
     plate = next(e for e in scene["entities"] if e["name"] == "plate")
     assert plate["id"] == 1, plate
-    assert plate["translation"][2] == 2.0 and plate["bbox"][1][2] == 2.0, plate  # wall/2, thickness 4.0
-    print("parametric rebuild via MCP: ok | plate id", plate["id"], "thickness", plate["bbox"][1][2])
+    assert plate["translation"][2] == 2.0 and plate["world_bbox"]["max"][2] == 4.0, plate  # wall/2, thickness 4.0
+    print("parametric rebuild via MCP: ok | plate id", plate["id"], "thickness", plate["world_bbox"]["max"][2])
 
     # --- agent-shaped error --------------------------------------------------
     send({"jsonrpc": "2.0", "id": 8, "method": "tools/call",

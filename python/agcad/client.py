@@ -276,8 +276,15 @@ class Agcad:
     def list_documents(self) -> list[dict[str, Any]]:
         return self._request("list_documents")["docs"]
 
-    def create_document(self, name: str = "untitled") -> dict[str, Any]:
-        return self._request("create_document", name=name)
+    def create_document(self, name: str = "untitled", doc: int | None = None) -> dict[str, Any]:
+        """Create a document.
+
+        Omit ``doc`` to allocate the next id (ids start at 1). Pass an
+        explicit unused id (≥ 1) when a single batch should create and then
+        address the document: ``create_document("part", doc=10)`` followed by
+        commands with ``doc=10``.
+        """
+        return self._request("create_document", name=name, doc=doc)
 
     def close_document(self, doc: int) -> dict[str, Any]:
         return self._request("close_document", doc=doc)
@@ -340,6 +347,11 @@ class Agcad:
         segments: int | None = None,
         color: tuple[float, float, float, float] | None = None,
     ) -> dict[str, Any]:
+        """A cylinder centered at ``center``, extruded along **+Z**.
+
+        It spans ``center.z ± height/2`` — no rotation needed to stand it up.
+        Use ``transform`` if you need a different axis.
+        """
         return self._request(
             "add_cylinder",
             doc=doc, name=name, center=center, radius=radius, height=height,

@@ -134,9 +134,9 @@ pub fn sphere_mesh(radius: f64, segments: u32) -> Mesh {
     m
 }
 
-/// Cylinder of `radius` and `height` centered on the origin, axis on Y,
-/// caps included. Layout: `2 * segments` side vertices, then
-/// `1 + segments` per cap.
+/// Cylinder of `radius` and `height` centered on the origin, axis on **+Z**
+/// (Z-up, like every other primitive), caps included. Layout:
+/// `2 * segments` side vertices, then `1 + segments` per cap.
 pub fn cylinder_mesh(radius: f64, height: f64, segments: u32) -> Mesh {
     let segs = segments.max(3);
     let (r, h) = (radius as f32, height as f32 * 0.5);
@@ -146,10 +146,10 @@ pub fn cylinder_mesh(radius: f64, height: f64, segments: u32) -> Mesh {
     for i in 0..segs {
         let theta = (i as f64 / segs as f64) * TAU;
         let (st, ct) = theta.sin_cos();
-        let n = [ct as f32, 0.0, st as f32];
-        m.positions.push([n[0] * r, -h, n[2] * r]);
+        let n = [ct as f32, st as f32, 0.0];
+        m.positions.push([n[0] * r, n[1] * r, -h]);
         m.normals.push(n);
-        m.positions.push([n[0] * r, h, n[2] * r]);
+        m.positions.push([n[0] * r, n[1] * r, h]);
         m.normals.push(n);
     }
     for i in 0..segs {
@@ -158,30 +158,29 @@ pub fn cylinder_mesh(radius: f64, height: f64, segments: u32) -> Mesh {
         let j = (i + 1) % segs;
         let b1 = (2 * j) as u32;
         let t1 = (2 * j + 1) as u32;
-        // CCW from outside: upper ring first, then down to the lower ring
-        // (matches the sphere's ring-quad orientation).
-        m.indices.extend_from_slice(&[t0, t1, b0, t1, b1, b0]);
+        // CCW seen from outside: bottom edge forward, then up.
+        m.indices.extend_from_slice(&[b0, b1, t1, b0, t1, t0]);
     }
 
     // Cap helper: fan around a center vertex.
-    let mut cap = |y: f32, ny: f32| {
+    let mut cap = |z: f32, nz: f32| {
         let center = m.positions.len() as u32;
-        m.positions.push([0.0, y, 0.0]);
-        m.normals.push([0.0, ny, 0.0]);
+        m.positions.push([0.0, 0.0, z]);
+        m.normals.push([0.0, 0.0, nz]);
         let first = m.positions.len() as u32;
         for i in 0..segs {
             let theta = (i as f64 / segs as f64) * TAU;
             let (st, ct) = theta.sin_cos();
-            m.positions.push([ct as f32 * r, y, st as f32 * r]);
-            m.normals.push([0.0, ny, 0.0]);
+            m.positions.push([ct as f32 * r, st as f32 * r, z]);
+            m.normals.push([0.0, 0.0, nz]);
         }
         for i in 0..segs {
             let a = first + i as u32;
             let b = first + ((i + 1) % segs) as u32;
-            if ny > 0.0 {
-                m.indices.extend_from_slice(&[center, b, a]);
+            if nz > 0.0 {
+                m.indices.extend_from_slice(&[center, a, b]);
             } else {
-                m.indices.extend_from_slice(&[a, b, center]);
+                m.indices.extend_from_slice(&[center, b, a]);
             }
         }
     };
@@ -223,5 +222,49 @@ mod tests {
         let b = sphere_mesh(1.0, 8);
         assert_eq!(a.positions, b.positions);
         assert_eq!(a.indices, b.indices);
+    }
+
+    /// Positive for CCW-outward winding — the invariant booleans, STL export
+    /// and the renderer all rely on.
+    fn signed_volume(m: &Mesh) -> f64 {
+        let mut v = 0.0;
+        for t in m.indices.chunks_exact(3) {
+            let p = |i: u32| {
+                let q = m.positions[i as usize];
+                [q[0] as f64, q[1] as f64, q[2] as f64]
+            };
+            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+            v += (a[0] * (b[1] * c[2] - b[2] * c[1])
+                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.0;
+        }
+        v
+    }
+
+    #[test]
+    fn cylinder_extrudes_along_z() {
+        let m = cylinder_mesh(2.0, 10.0, 16);
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for p in &m.positions {
+            for i in 0..3 {
+                lo[i] = lo[i].min(p[i]);
+                hi[i] = hi[i].max(p[i]);
+            }
+        }
+        // Z is the axis; X and Y are the radius.
+        assert!(
+            (lo[2] + 5.0).abs() < 1e-6 && (hi[2] - 5.0).abs() < 1e-6,
+            "axis must be Z: {lo:?}..{hi:?}"
+        );
+        assert!((lo[0] + 2.0).abs() < 1e-6 && (hi[0] - 2.0).abs() < 1e-6, "{lo:?}..{hi:?}");
+        assert!((lo[1] + 2.0).abs() < 1e-6 && (hi[1] - 2.0).abs() < 1e-6, "{lo:?}..{hi:?}");
+
+        // A 16-gon under-estimates pi by ~2.5%; the sign is what matters.
+        let v = signed_volume(&m);
+        let expected = std::f64::consts::PI * 4.0 * 10.0;
+        assert!(v > 0.0, "winding must be CCW-outward (got volume {v})");
+        assert!((v - expected).abs() / expected < 0.03, "volume {v} vs {expected}");
     }
 }

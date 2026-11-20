@@ -90,14 +90,21 @@ Line-delimited JSON-RPC 2.0, one request/response per line:
 {"jsonrpc":"2.0","id":1,"result":{"entity_created":{"doc":1,"entity":1,"mesh":{...}}}}
 ```
 
-Commands: `initialize`, `list_documents`, `create_document`,
-`close_document`, `add_box`, `add_sphere`, `add_cylinder`, `transform`,
-`set_color`, `delete`, `set_parameter`, `remove_parameter`,
-`get_parameters`, `undo`, `redo`, `get_scene`.
+Commands: `initialize`, `list_documents`, `create_document`, `close_document`,
+`add_box`, `add_sphere`, `add_cylinder`, `boolean`, `transform`, `set_color`,
+`delete`, `set_parameter`, `remove_parameter`, `get_parameters`, `undo`,
+`redo`, `get_scene`, `get_program`, `add_sketch`, `add_sketch_line`,
+`add_sketch_circle`, `constrain`, `remove_constraint`, `move_sketch_point`,
+`delete_sketch_element`, `extrude`, `revolve`, `export_stl`,
+`render_offscreen`, `save_document`, `open_document`.
 
-Conventions: millimeters, degrees, RGBA floats. Geometry is baked centered
-on the entity origin; placement comes from `T · Rz · Ry · Rx · S`
-(extrinsic XYZ rotation, applied X then Y then Z). Z is up.
+Conventions: millimeters, degrees, RGBA floats. Z is up — primitives are
+axis-aligned and `add_cylinder` extrudes along +Z. Document ids start at 1;
+`create_document` takes an optional explicit `doc`, so a create-then-populate
+batch is one round trip. Geometry is baked centered on the entity origin;
+placement comes from `T · Rz · Ry · Rx · S` (extrinsic XYZ rotation, applied
+X then Y then Z). `get_scene` reports the local mesh plus a world-space
+`world_bbox` per entity.
 
 ## The parametric layer: the program *is* the function
 

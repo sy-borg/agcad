@@ -44,7 +44,7 @@ def build(cad: Agcad) -> tuple[int, int]:
         size=("length", "width", "thickness"),
         color=PLATE,
     )["entity"]
-    # A cylinder is born along +Y; turn it upright and cut it through.
+    # The bore is a +Z cylinder, already upright: it cuts through the plate.
     bore = cad.add_cylinder(
         doc,
         "bore",
@@ -54,7 +54,6 @@ def build(cad: Agcad) -> tuple[int, int]:
         segments=64,
         color=PLATE,
     )["entity"]
-    cad.transform(doc, bore, rotation_deg=(90.0, 0.0, 0.0))
     part = cad.boolean(doc, "difference", [plate, bore], name="plate_with_hole")["entity"]
     cad.delete(doc, plate)
     cad.delete(doc, bore)

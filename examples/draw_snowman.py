@@ -42,9 +42,8 @@ COMMANDS = [
     {"method": "add_cylinder", "name": "hat_crown", "center": [0, 0, "base_r*2 + mid_r*2 + 2*head_r - 12"], "radius": "head_r - 4", "height": 12, "color": DARK},
     {"method": "transform", "entity": 10, "rotation_deg": [0, 0, 20]},
     {"method": "transform", "entity": 11, "rotation_deg": [0, 0, -20]},
-    # cylinders are Y-axis (nose convention) — stand the hat up
-    {"method": "transform", "entity": 13, "rotation_deg": [90, 0, 0]},
-    {"method": "transform", "entity": 14, "rotation_deg": [90, 0, 0]},
+    # The nose is a +Z cylinder; tilt it forward along +Y.
+    {"method": "transform", "entity": 5, "rotation_deg": [-90, 0, 0]},
 ]
 
 

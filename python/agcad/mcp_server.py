@@ -33,6 +33,8 @@ expressions over named parameters ("wall*2"). set_parameter replays the program
 deterministically (entity ids stay stable). undo/redo revert one command each and
 restore parameters + program + geometry atomically.
 Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
+Cylinders extrude along +Z. Document ids start at 1; create_document takes an
+optional explicit `doc` id, so create-then-populate fits in one batch.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
 dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
 verify -> agcad_render to SEE the result -> export_stl for slicing. Sketches are
@@ -45,12 +47,15 @@ Failed commands report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
-Commands: create_document{name}, close_document{doc},
+Commands: initialize{}, list_documents{}, create_document{name,doc?}
+  (doc is an unused id >= 1; omit it to allocate the next one — pass it to
+  create+populate in a single batch), close_document{doc},
 set_parameter{doc,name,value(number|string expression),description?},
 remove_parameter{doc,name}, get_parameters{doc},
 add_box{doc,name,center:[x,y,z],size:[w,d,h],color?},
 add_sphere{doc,name,center,radius,segments?,color?},
-add_cylinder{doc,name,center,radius,height,segments?,color?},
+add_cylinder{doc,name,center,radius,height,segments?,color?} (extruded along
+  +Z, spanning center.z ± height/2 — no rotation needed to stand it up),
 transform{doc,entity,translation?,rotation_deg?,scale?} (only provided parts change),
 boolean{doc,op:"union"|"difference"|"intersection",entities:[ids],name?,color?}
   (world-space set op; creates a NEW entity, sources are kept — delete them if
@@ -92,7 +97,9 @@ Numeric arguments accept expression strings over parameters. Commands run in ord
 execution stops at the first error (reported with a recovery hint)."""
 
 SCENE_DESCRIPTION = """Inspect an agcad document: parameters and entities with
-placement and mesh statistics (bbox, vertex/triangle counts — no raw meshes)."""
+placement, a world-space bounding box per entity (meshes are entity-local;
+world_bbox already includes translation/rotation/scale), and vertex/triangle
+counts — no raw meshes."""
 
 RENDER_DESCRIPTION = """Render the document to a PNG image, returned inline as an
 image content block — so you can SEE the scene and compare it against what the
@@ -154,17 +161,19 @@ TOOLS = [
 
 
 def mesh_stats(mesh: dict) -> dict:
+    """Stats for a mesh payload. `local_bbox` is in entity-local space — use
+    the entity's `world_bbox` for placement and size."""
     positions = mesh.get("positions") or []
     if positions:
         mins = [min(p[a] for p in positions) for a in range(3)]
         maxs = [max(p[a] for p in positions) for a in range(3)]
-        bbox = [[round(v, 3) for v in mins], [round(v, 3) for v in maxs]]
+        local_bbox = [[round(v, 3) for v in mins], [round(v, 3) for v in maxs]]
     else:
-        bbox = None
+        local_bbox = None
     return {
         "verts": len(positions),
         "tris": len(mesh.get("indices") or []) // 3,
-        "bbox": bbox,
+        "local_bbox": local_bbox,
     }
 
 
@@ -320,6 +329,11 @@ class McpServer:
                     "translation": e["translation"],
                     "rotation_deg": e["rotation_deg"],
                     "scale": e["scale"],
+                    # World space, after the entity transform — trust this
+                    # one for placement. `stats.local_bbox` is entity-local.
+                    # .get so an older attached engine (pre-world_bbox) does
+                    # not crash inspection.
+                    "world_bbox": e.get("world_bbox"),
                     "color": e["color"],
                     **stats,
                 }

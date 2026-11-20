@@ -132,7 +132,14 @@ impl RpcResponse {
 pub enum Command {
     Initialize,
     ListDocuments,
-    CreateDocument { name: String },
+    CreateDocument {
+        name: String,
+        /// Optional explicit id (≥ 1, unused). Lets a single batch create a
+        /// document and populate it: `create_document{doc:10}` followed by
+        /// commands addressing doc 10. Omit it to allocate the next id.
+        #[serde(default)]
+        doc: Option<DocId>,
+    },
     CloseDocument { doc: DocId },
 
     AddBox {
@@ -159,7 +166,7 @@ pub enum Command {
         name: String,
         center: SVec3,
         radius: Scalar,
-        /// Along local +Y.
+        /// Extruded along local +Z (Z is up, like every primitive).
         height: Scalar,
         #[serde(default)]
         segments: Option<u32>,
@@ -654,6 +661,13 @@ pub struct Mesh {
     pub indices: Vec<u32>,
 }
 
+/// Axis-aligned bounding box, in millimeters.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Bbox {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
 /// Everything a renderer needs to draw one entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntitySnapshot {
@@ -664,6 +678,9 @@ pub struct EntitySnapshot {
     pub scale: Vec3,
     /// Model matrix `T * Rz * Ry * Rx * S`, column-major.
     pub transform: Mat4,
+    /// Bounds of the mesh **after** `transform`, i.e. world space. The
+    /// `mesh.positions` inside are local; trust this for placement and size.
+    pub world_bbox: Bbox,
     pub color: Rgba,
     pub mesh: Mesh,
     /// For sketch entities: elements, constraints and solver status. The

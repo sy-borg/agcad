@@ -73,7 +73,12 @@ def compose_showcase(reference: str, iso_png: str, out_path: str) -> None:
             src, "-background", "white", "-gravity", "north", "-splice", "0x46",
             "-pointsize", "28", "-fill", "black", "-annotate", "+0+8", text, dst,
         )
-    run(ref_l, iso_l, "-background", "white", "-gravity", "center", "-append", out_path)
+    # Strip metadata / timestamps: re-running must produce identical bytes,
+    # so the committed showcase is reproducible and the tree stays clean.
+    run(
+        ref_l, iso_l, "-background", "white", "-gravity", "center", "-append",
+        "-strip", "-define", "png:exclude-chunks=date,time", out_path,
+    )
     shutil.rmtree(tmp, ignore_errors=True)
     print(f"showcase -> {out_path}")
 
