@@ -17,7 +17,8 @@ Writes the committed showcase into ``examples/cross_block/``: ``iso.png``,
 ``front.png``, ``cross_block.stl``, ``cross_block.agcad`` (the sharp
 baseline), plus ``rounded.png``, ``cross_block_rounded.stl`` and
 ``cross_block_rounded.agcad`` (the edge-treated part), and (when ImageMagick
-is installed) the stacked ``compare.png`` used in the README.
+is installed) the stacked ``compare.png`` used in the README — the drawing
+above the finished part.
 
 Usage: .venv/bin/python examples/cross_block.py
 """
@@ -49,8 +50,8 @@ REFERENCE = os.path.join("examples", "example_body.png")
 OUT_DIR = os.path.join("examples", "cross_block")
 
 
-def compose_showcase(reference: str, iso_png: str, out_path: str) -> None:
-    """Stack the drawing above the render, with labels.
+def compose_showcase(reference: str, model_png: str, out_path: str) -> None:
+    """Stack the drawing above the finished render, with labels.
 
     This is presentation only, so it is optional: without ImageMagick the
     model and the renders are still produced.
@@ -61,22 +62,22 @@ def compose_showcase(reference: str, iso_png: str, out_path: str) -> None:
         return
     tmp = tempfile.mkdtemp(prefix="agcad_showcase_")
     ref = os.path.join(tmp, "ref.png")
-    iso = os.path.join(tmp, "iso.png")
+    model = os.path.join(tmp, "model.png")
     ref_l = os.path.join(tmp, "ref_l.png")
-    iso_l = os.path.join(tmp, "iso_l.png")
+    model_l = os.path.join(tmp, "model_l.png")
 
     def run(*args: str) -> None:
         subprocess.run([magick, *args], check=True)
 
     run(reference, "-resize", "1200x", ref)
     run(
-        iso_png, "-fuzz", "3%", "-trim", "+repage", "-bordercolor", "white",
+        model_png, "-fuzz", "3%", "-trim", "+repage", "-bordercolor", "white",
         "-border", "30", "-resize", "x600", "-background", "white",
-        "-gravity", "center", "-extent", "1200x600", iso,
+        "-gravity", "center", "-extent", "1200x600", model,
     )
     for src, dst, text in [
         (ref, ref_l, "the drawing (examples/example_body.png)"),
-        (iso, iso_l, "the model agcad rebuilt from it (examples/cross_block.py)"),
+        (model, model_l, "the finished model agcad rebuilt from it (examples/cross_block.py)"),
     ]:
         run(
             src, "-background", "white", "-gravity", "north", "-splice", "0x46",
@@ -85,7 +86,7 @@ def compose_showcase(reference: str, iso_png: str, out_path: str) -> None:
     # Strip metadata / timestamps: re-running must produce identical bytes,
     # so the committed showcase is reproducible and the tree stays clean.
     run(
-        ref_l, iso_l, "-background", "white", "-gravity", "center", "-append",
+        ref_l, model_l, "-background", "white", "-gravity", "center", "-append",
         "-strip", "-define", "png:exclude-chunks=date,time", out_path,
     )
     shutil.rmtree(tmp, ignore_errors=True)
@@ -170,8 +171,6 @@ def main() -> None:
     )
     print(f"rendered front -> {png['path']}")
 
-    compose_showcase(REFERENCE, iso_png, compare_png)
-
     # Persist the sharp baseline now, before the edge commands change the
     # program. The script above is the recipe; the file is the same model with
     # the knobs as they stand, and an embedded copy of the recipe as provenance.
@@ -201,6 +200,10 @@ def main() -> None:
         fov_deg=40.0, ortho=True, background=(1.0, 1.0, 1.0, 1.0), path=rounded_png,
     )
     print(f"rendered rounded -> {png['path']}")
+
+    # The comparison shows the finished part — the one that resembles the
+    # drawing — not the sharp baseline it was fitted on.
+    compose_showcase(REFERENCE, rounded_png, compare_png)
 
     exp = cad.export_stl(doc, rounded_stl)
     print(f"stl: {exp['path']} ({exp['tris']} tris, {exp['bytes']} bytes)")

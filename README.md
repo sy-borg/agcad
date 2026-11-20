@@ -34,17 +34,18 @@ The agent is handed a picture — here `examples/example_body.png`, a front and
 a 3/4 view of a cross block — and writes `examples/cross_block.py`, which
 rebuilds the part as a parametric program:
 
-![the drawing and the model agcad rebuilt from it](examples/cross_block/compare.png)
+![the drawing and the finished model agcad rebuilt from it](examples/cross_block/compare.png)
 
 The dimensions are read off the drawing rather than guessed: its front panel
 is 553 × 614 px at the drawing's own 9 mm scale bar, so the body is
-45 × 45 mm in plan, 15 mm arms and 50 mm tall. The reproduction's camera was
-fitted by comparing silhouettes (0.99 IoU), and its front view matches the
-drawing's aspect to ~0.1% (0.898 vs 0.899). The baseline keeps sharp edges so
-the silhouette comparison stays unambiguous; the script then rounds it the
-way the drawing does — a 1 mm `fillet` on the top and bottom rims, driven by
-the `round_r` knob. The drawing's plan corners are sharp, so the twelve
-vertical edges are deliberately left alone:
+45 × 45 mm in plan, 15 mm arms and 50 mm tall. The camera was fitted on a
+sharp baseline so the silhouette comparison stays unambiguous (0.99 IoU), and
+that baseline's front view matches the drawing's aspect to ~0.1%
+(0.898 vs 0.899). The script then rounds the part the way the drawing does —
+a 1 mm `fillet` on the top and bottom rims, driven by the `round_r` knob. The
+drawing's plan corners are sharp, so the twelve vertical edges are
+deliberately left alone. The 3/4 view above is that finished part; here it is
+on its own:
 
 ![the cross block with its top and bottom rims rounded and sharp plan corners](examples/cross_block/rounded.png)
 
@@ -68,9 +69,9 @@ The loop this exercises, end to end:
    intact.
 
 The artifacts live in `examples/cross_block/`: `iso.png`, `front.png`,
-`compare.png`, `cross_block.stl`, `cross_block.agcad` (the sharp baseline),
-plus `rounded.png`, `cross_block_rounded.stl` and
-`cross_block_rounded.agcad` (the edge-treated part).
+`cross_block.stl` and `cross_block.agcad` (the sharp baseline), plus
+`rounded.png`, `cross_block_rounded.stl` and `cross_block_rounded.agcad`
+(the finished part), and `compare.png` (the drawing above that part).
 `.venv/bin/python examples/cross_block.py` regenerates them.
 
 ## Layout
