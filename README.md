@@ -257,6 +257,30 @@ Then ask the agent to draw; what it builds through MCP appears in the
 viewer immediately. Without `AGCAD_CONNECT`, the MCP server spawns a
 private engine (isolated, invisible to viewers) — attach mode is opt-in.
 
+The script side is the same contract:
+
+```python
+from agcad import Agcad
+
+with Agcad.connect("127.0.0.1", 7860) as cad:   # the shared engine
+    ...                                          # the viewer follows along
+```
+
+`Agcad.spawn()` starts a private stdio engine: perfect for CI and one-shot
+examples, but no viewer can see it. Use `Agcad.connect` whenever a human
+should watch. The viewer listens for `scene_changed` and re-fetches by itself;
+`R` is only a manual fallback.
+
+Two limits worth knowing:
+
+- the viewer shows the **first open document** (`list_documents` order, so the
+  lowest id). With several documents, close the stale ones or reuse one; a
+  document picker is future work.
+- the viewer is a renderer, not an editor: the human can orbit, zoom and watch
+  live updates, but cannot click a face to hand it back to the agent. The agent
+  addresses geometry with the geometric filters (`near`, normals) instead.
+  Picking is on the roadmap.
+
 ## Exposing it to an agent: MCP
 
 The bus is the API; the MCP server is just another adapter over it
@@ -329,6 +353,10 @@ with Agcad.spawn() as cad:
     boss = cad.add_cylinder(doc, name="boss", center=(20, 0, 12), radius=8, height=14)
     cad.undo(doc)          # everything on the bus is reversible
 ```
+
+This session is private. For the human/agent loop, start
+`agcad --tcp 7860` plus `agcad-view --port 7860`, and use
+`Agcad.connect("127.0.0.1", 7860)` so both see the same scene.
 
 ## Roadmap
 
@@ -445,8 +473,9 @@ Feature-history editing is deliberately not a goal: replay is deterministic and
       still missing from “general parametric CAD”
 - [ ] **Later / UI polish**: `patch_program` for script-less MCP documents,
       shaded-with-edges rendering (a thin outline where faces meet, so front
-      views read as CAD drawings), a Rust MCP server, PyO3 bindings, and
-      occlusion picking in the viewer
+      views read as CAD drawings), a viewer document picker (today it shows the
+      lowest-id document), occlusion picking, a Rust MCP server and PyO3
+      bindings
 
 ## Status
 

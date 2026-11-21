@@ -2,10 +2,11 @@
 //!
 //! Philosophy (Lite XL style, scaled up to CAD): this process owns **no
 //! document state**. It pulls a scene snapshot from the server over the
-//! command bus, uploads it to the GPU, draws it. `R` re-pulls. That's the
-//! whole sync model for v0 — live push notifications come later.
+//! command bus, uploads it to the GPU, draws it. A second connection listens
+//! for `scene_changed` and triggers a re-fetch, so live preview is automatic;
+//! `R` forces a manual refresh.
 //!
-//! Controls: drag = orbit, wheel = zoom, `R` = refresh scene.
+//! Controls: drag = orbit, wheel = zoom, `R` = manual refresh.
 
 mod cam;
 mod net;
@@ -617,7 +618,7 @@ impl App {
         match net::fetch_scene(&self.host, self.port) {
             Ok((doc, entities)) => {
                 eprintln!(
-                    "scene: doc {doc}, {} entities (press R to refresh)",
+                    "scene: doc {doc}, {} entities (live; R = manual refresh)",
                     entities.len()
                 );
                 state.set_scene(entities);
