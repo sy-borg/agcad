@@ -66,6 +66,17 @@ pub fn perspective_opengl(fov_y_deg: f32, aspect: f32, near: f32, far: f32) -> M
     ]
 }
 
+/// Symmetric orthographic projection, centred on the view axis.
+pub fn orthographic(half_height: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let half_width = half_height * aspect;
+    [
+        [1.0 / half_width, 0.0, 0.0, 0.0],
+        [0.0, 1.0 / half_height, 0.0, 0.0],
+        [0.0, 0.0, -2.0 / (far - near), 0.0],
+        [0.0, 0.0, -(far + near) / (far - near), 1.0],
+    ]
+}
+
 /// Remap OpenGL clip z (-1..1) to wgpu depth (0..1).
 pub fn to_wgpu_depth(m: &Mat4) -> Mat4 {
     let mut out = *m;

@@ -6,7 +6,8 @@
 //! for `scene_changed` and triggers a re-fetch, so live preview is automatic;
 //! `R` forces a manual refresh.
 //!
-//! Controls: drag = orbit, wheel = zoom, `R` = manual refresh.
+//! Controls: drag = orbit, wheel = zoom, `R` = manual refresh. A corner
+//! triad shows the world axes and follows the camera.
 
 mod cam;
 mod net;
@@ -24,6 +25,10 @@ use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+
+/// Corner axis-gizmo size and margin, in physical pixels.
+const GIZMO_SIZE: f32 = 110.0;
+const GIZMO_MARGIN: f32 = 16.0;
 
 const WGSL: &str = r#"
 struct Uniforms {
@@ -64,10 +69,12 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// One GPU draw call description. Entities are indexed triangles, the
-/// grid is a non-indexed line list; both live in the same buffers.
+/// One GPU draw call description. Entities are indexed triangles, the grid
+/// and the axis gizmo are non-indexed line lists; all live in the same
+/// buffers. Overlay draws ignore depth so they sit on top of the scene.
 struct DrawRange {
     line: bool,
+    overlay: bool,
     /// First index for triangles, first vertex for lines.
     first_index: u32,
     count: u32,
@@ -95,9 +102,13 @@ struct State {
     surface_format: wgpu::TextureFormat,
     pipeline_tri: wgpu::RenderPipeline,
     pipeline_line: wgpu::RenderPipeline,
+    /// Line pipeline with depth test disabled, for the corner axis gizmo.
+    pipeline_line_overlay: wgpu::RenderPipeline,
     bind_group_0: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
+    gizmo_uniform_buf: wgpu::Buffer,
+    gizmo_bind_group: wgpu::BindGroup,
     depth_tex: wgpu::Texture,
     depth_view: wgpu::TextureView,
     size: (u32, u32),
@@ -168,6 +179,12 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let gizmo_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gizmo_view_proj"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("uniforms"),
@@ -202,6 +219,14 @@ impl State {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniform_buf.as_entire_binding(),
+            }],
+        });
+        let gizmo_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg gizmo uniforms"),
+            layout: &bgl0,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: gizmo_uniform_buf.as_entire_binding(),
             }],
         });
         // Placeholder storage binding; replaced on every scene upload.
@@ -243,16 +268,22 @@ impl State {
             ],
         })];
 
-        let make_pipeline = |topology: wgpu::PrimitiveTopology| {
+        let make_pipeline = |topology: wgpu::PrimitiveTopology, overlay: bool| {
             let depth_stencil = wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth24Plus,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_write_enabled: Some(!overlay),
+                depth_compare: Some(if overlay {
+                    wgpu::CompareFunction::Always
+                } else {
+                    wgpu::CompareFunction::Less
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(if topology == wgpu::PrimitiveTopology::TriangleList {
+                label: Some(if overlay {
+                    "agcad overlay lines"
+                } else if topology == wgpu::PrimitiveTopology::TriangleList {
                     "agcad tri"
                 } else {
                     "agcad lines"
@@ -286,8 +317,9 @@ impl State {
             })
         };
 
-        let pipeline_tri = make_pipeline(wgpu::PrimitiveTopology::TriangleList);
-        let pipeline_line = make_pipeline(wgpu::PrimitiveTopology::LineList);
+        let pipeline_tri = make_pipeline(wgpu::PrimitiveTopology::TriangleList, false);
+        let pipeline_line = make_pipeline(wgpu::PrimitiveTopology::LineList, false);
+        let pipeline_line_overlay = make_pipeline(wgpu::PrimitiveTopology::LineList, true);
 
         let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
@@ -308,9 +340,12 @@ impl State {
             surface_format,
             pipeline_tri,
             pipeline_line,
+            pipeline_line_overlay,
             bind_group_0,
             bind_group_1,
             uniform_buf,
+            gizmo_uniform_buf,
+            gizmo_bind_group,
             depth_tex,
             depth_view,
             size: (width, height),
@@ -394,6 +429,9 @@ impl State {
     fn render(&mut self) {
         let vp = self.camera.view_proj(self.size);
         self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&vp));
+        let gizmo_vp = self.camera.gizmo_view_proj();
+        self.queue
+            .write_buffer(&self.gizmo_uniform_buf, 0, bytemuck::cast_slice(&gizmo_vp));
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -443,7 +481,7 @@ impl State {
                 pass.set_bind_group(0, &self.bind_group_0, &[]);
                 pass.set_bind_group(1, &self.bind_group_1, &[]);
                 // Draw the grid first, entities on top.
-                if let Some(grid) = scene.draws.iter().find(|d| d.line) {
+                if let Some(grid) = scene.draws.iter().find(|d| d.line && !d.overlay) {
                     pass.set_pipeline(&self.pipeline_line);
                     pass.set_vertex_buffer(0, scene.vertex_buf.slice(..));
                     let end = grid.base_instance + 1;
@@ -462,6 +500,34 @@ impl State {
                         0,
                         first..first + 1,
                     );
+                }
+
+                // Axis gizmo: a small triad in the bottom-left corner, drawn
+                // with its own projection and depth-always so the scene never
+                // hides it.
+                let (win_w, win_h) = (self.size.0 as f32, self.size.1 as f32);
+                let gizmo_size = GIZMO_SIZE.min(win_w.min(win_h) * 0.5);
+                if gizmo_size > 0.0 {
+                    let margin = GIZMO_MARGIN.min(win_w.min(win_h) * 0.05);
+                    pass.set_viewport(
+                        margin,
+                        win_h - gizmo_size - margin,
+                        gizmo_size,
+                        gizmo_size,
+                        0.0,
+                        1.0,
+                    );
+                    pass.set_bind_group(0, &self.gizmo_bind_group, &[]);
+                    pass.set_pipeline(&self.pipeline_line_overlay);
+                    pass.set_vertex_buffer(0, scene.vertex_buf.slice(..));
+                    for d in scene.draws.iter().filter(|d| d.overlay) {
+                        let end = d.base_instance + 1;
+                        pass.draw(
+                            d.first_index..d.first_index + d.count,
+                            d.base_instance..end,
+                        );
+                    }
+                    pass.set_viewport(0.0, 0.0, win_w, win_h, 0.0, 1.0);
                 }
             }
         }
@@ -493,6 +559,7 @@ fn build_scene(entities: &[EntitySnapshot]) -> SceneData {
         inst.extend_from_slice(&e.color);
         draws.push(DrawRange {
             line: false,
+            overlay: false,
             first_index: index_base,
             count: e.mesh.indices.len() as u32,
             base_instance: instance_base,
@@ -516,10 +583,39 @@ fn build_scene(entities: &[EntitySnapshot]) -> SceneData {
     inst.extend_from_slice(&[0.30, 0.31, 0.34, 1.0]);
     draws.push(DrawRange {
         line: true,
+        overlay: false,
         first_index: grid_start as u32,
         count: grid_vertex_count,
         base_instance: grid_base_instance,
     });
+
+    // Corner axis gizmo: three unit-length lines (X red, Y green, Z blue).
+    // One instance per axis so each line gets its own colour. The fragment
+    // shader still applies its two key lights, so point the line normals at
+    // the primary light to keep the overlay bright (line normals are unused
+    // otherwise).
+    let overlay_normal = cam::normalize([0.5, -0.7, 0.6]);
+    for (axis, color) in [
+        ([1.0, 0.0, 0.0], [1.00, 0.32, 0.30, 1.0]),
+        ([0.0, 1.0, 0.0], [0.35, 1.00, 0.35, 1.0]),
+        ([0.0, 0.0, 1.0], [0.40, 0.62, 1.00, 1.0]),
+    ] {
+        let axis_start = (verts.len() / 6) as u32;
+        verts.extend_from_slice(&[0.0, 0.0, 0.0]);
+        verts.extend(overlay_normal);
+        verts.extend(axis);
+        verts.extend(overlay_normal);
+        let axis_instance = (inst.len() / 20) as u32;
+        inst.extend_from_slice(&flatten_mat(&identity));
+        inst.extend_from_slice(&color);
+        draws.push(DrawRange {
+            line: true,
+            overlay: true,
+            first_index: axis_start,
+            count: 2,
+            base_instance: axis_instance,
+        });
+    }
 
     SceneData { verts, idx, inst, draws }
 }
@@ -567,6 +663,21 @@ impl OrbitCamera {
             out[col * 4..col * 4 + 4].copy_from_slice(c);
         }
         out
+    }
+
+    /// View-projection for the corner triad: the main camera's orientation,
+    /// but looking at the origin from a fixed distance with an orthographic
+    /// projection, so the axes stay a constant size on screen.
+    fn gizmo_view_proj(&self) -> [f32; 16] {
+        let dir = cam::normalize([
+            self.eye()[0] - self.target[0],
+            self.eye()[1] - self.target[1],
+            self.eye()[2] - self.target[2],
+        ]);
+        let eye = [dir[0] * 4.0, dir[1] * 4.0, dir[2] * 4.0];
+        let view = cam::look_at_zup(eye, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let proj = cam::orthographic(1.3, 1.0, 0.1, 10.0);
+        flatten_mat(&cam::mul(&cam::to_wgpu_depth(&proj), &view))
     }
 
     fn orbit(&mut self, dx: f64, dy: f64) {
@@ -797,11 +908,78 @@ mod tests {
     #[test]
     fn grid_draw_starts_after_entity_vertices() {
         let data = build_scene(&[one_triangle()]);
-        let grid = data.draws.iter().find(|d| d.line).expect("grid draw");
+        let grid = data
+            .draws
+            .iter()
+            .find(|d| d.line && !d.overlay)
+            .expect("grid draw");
 
         // Entity vertices come first, so the grid must not start at vertex 0.
         assert_eq!(grid.first_index, 3);
         assert_eq!(grid.count, 84); // 21 lines in each direction, two vertices each.
-        assert_eq!(grid.first_index + grid.count, (data.verts.len() / 6) as u32);
+    }
+
+    #[test]
+    fn gizmo_axes_are_overlay_lines_after_the_grid() {
+        let data = build_scene(&[one_triangle()]);
+        let grid = data
+            .draws
+            .iter()
+            .find(|d| d.line && !d.overlay)
+            .expect("grid draw");
+        let gizmo: Vec<_> = data.draws.iter().filter(|d| d.overlay).collect();
+
+        // Three axes, one line each, one instance each (distinct colours).
+        assert_eq!(gizmo.len(), 3);
+        assert!(gizmo.iter().all(|d| d.line && d.count == 2));
+        let first = gizmo[0];
+        assert_eq!(first.first_index, grid.first_index + grid.count);
+        let total: u32 = gizmo.iter().map(|d| d.count).sum();
+        assert_eq!(first.first_index + total, (data.verts.len() / 6) as u32);
+
+        // Every draw in this scene uses exactly one instance (20 matrix
+        // floats + 4 colour floats).
+        assert_eq!(data.inst.len() / 20, data.draws.len());
+    }
+
+    #[test]
+    fn gizmo_axes_fit_inside_the_ortho_view() {
+        // Flattened column-major: m[col * 4 + row].
+        let project = |m: &[f32; 16], p: [f32; 3]| {
+            let at = |col: usize, row: usize| m[col * 4 + row];
+            let x = at(0, 0) * p[0] + at(1, 0) * p[1] + at(2, 0) * p[2] + at(3, 0);
+            let y = at(0, 1) * p[0] + at(1, 1) * p[1] + at(2, 1) * p[2] + at(3, 1);
+            let w = at(0, 3) * p[0] + at(1, 3) * p[1] + at(2, 3) * p[2] + at(3, 3);
+            (x / w, y / w, w)
+        };
+
+        let mut cams = vec![OrbitCamera::new()];
+        for (yaw, pitch) in [(-0.7, 1.5), (-0.7, -1.5), (2.0, 0.9), (-2.4, -0.4)] {
+            cams.push(OrbitCamera {
+                yaw,
+                pitch,
+                dist: 250.0,
+                target: [0.0, 0.0, 20.0],
+            });
+        }
+        for cam in &cams {
+            let m = cam.gizmo_view_proj();
+            for p in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+                let (x, y, w) = project(&m, p);
+                assert!(w > 0.0, "point behind the gizmo camera: {p:?}");
+                assert!(x.abs() <= 1.0, "x outside clip: {p:?}");
+                assert!(y.abs() <= 1.0, "y outside clip: {p:?}");
+            }
+        }
+
+        // At the default view the camera sits at +X/-Y/+Z, so +X points
+        // down-right, +Y up-right and +Z straight up.
+        let m = OrbitCamera::new().gizmo_view_proj();
+        let (x, y, _) = project(&m, [1.0, 0.0, 0.0]);
+        assert!(x > 0.2 && y < 0.0, "X should point down-right, got {x},{y}");
+        let (x, y, _) = project(&m, [0.0, 1.0, 0.0]);
+        assert!(x > 0.2 && y > 0.0, "Y should point up-right, got {x},{y}");
+        let (x, y, _) = project(&m, [0.0, 0.0, 1.0]);
+        assert!(x.abs() < 1e-6 && y > 0.2, "Z should point up, got {x},{y}");
     }
 }

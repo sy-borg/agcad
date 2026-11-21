@@ -276,11 +276,11 @@ Two limits worth knowing:
 - the viewer shows the **first open document** (`list_documents` order, so the
   lowest id). With several documents, close the stale ones or reuse one; a
   document picker is future work.
-- the viewer is a renderer, not an editor: the human can orbit, zoom and watch
-  live updates, but cannot yet click a face to hand it back to the agent. The
-  agent addresses geometry with the geometric filters (`near`, normals)
-  instead; M13 adds labels and click-to-select that emits exactly those
-  selectors.
+- the viewer is a renderer, not an editor: the human can orbit, zoom, watch
+  live updates and read the corner axis triad, but cannot yet click a face to
+  hand it back to the agent. The agent addresses geometry with the geometric
+  filters (`near`, normals) instead; M13 adds labels and click-to-select that
+  emits exactly those selectors.
 
 ## Exposing it to an agent: MCP
 
@@ -339,7 +339,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ./python
 
 # Human seat: viewer (needs a server with an open document)
 ./target/debug/agcad --tcp 7860 &
-./target/debug/agcad-view --port 7860     # drag = orbit, wheel = zoom, R = refresh
+./target/debug/agcad-view --port 7860     # drag = orbit, wheel = zoom, R = refresh; corner triad = world axes
 ```
 
 Minimal agent session:
