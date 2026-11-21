@@ -17,6 +17,7 @@ negative extrude = into the body (combine with ``boolean difference``).
 import base64
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, "python")  # noqa: E402
 
@@ -141,6 +142,19 @@ def main() -> None:
     assert abs(bb["max"][2] - 30.0) < 1e-4, "block grows in Z"
     exp = cad.export_stl(doc, stl)
     print(f"stl re-exported: {exp['tris']} tris, {exp['bytes']} bytes")
+
+    # The script is the source of truth; the .agcad is a replayable instance
+    # carrying the current knob values and a copy of this script.
+    source_text = Path(__file__).read_text(encoding="utf-8")
+    agcad = os.path.abspath("exports/face_sketch.agcad")
+    saved = cad.save_document(
+        doc, agcad, source={"language": "python", "text": source_text}
+    )
+    assert cad.get_script(doc) == source_text, "the embedded source must round-trip"
+    print(
+        f"agcad: {saved['path']} ({saved['bytes']} bytes, "
+        f"{saved['commands']} commands, source embedded)"
+    )
 
     cad.close()
 

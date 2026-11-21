@@ -1,14 +1,18 @@
 """Save a model to a file, open it again, and export it back to Python.
 
-Two layers, one document:
+Two layers, one document, one source of truth:
 
+- ``.py`` is the *source of truth*: the script an agent edits and re-runs.
+  A copy is embedded in the ``.agcad`` as provenance (never executed), and
+  ``get_program`` / ``get_script`` hand it back on a later open.
 - ``.agcad`` is the *instance*: the program plus the current parameter
   values, as JSON. Geometry is not stored; opening replays the program
   deterministically, so the file stays small and diffable, and a user's
   knob turns survive.
-- ``.py`` is the *recipe*: what authored the model. An optional copy rides
-  along in the file as provenance (never executed), and ``export_python``
-  renders the stored program back into a runnable client script.
+
+``export_python`` reconstructs a runnable script from the program when no
+embedded source exists, and bakes the current knob values back into a script
+when the instance needs to become the new source.
 
 Usage: .venv/bin/python examples/save_load.py
 """
@@ -117,6 +121,12 @@ def main() -> None:
     )
     assert scene_signature(cad_b, opened["doc"]) == signature, "replay drifted"
     print("        geometry matches the original exactly")
+
+    # The script rides along as the canonical recipe and comes back out.
+    recovered = cad_b.get_script(opened["doc"])
+    assert recovered == source["text"], "the embedded source must round-trip"
+    assert cad_b.get_program(opened["doc"])["source"]["text"] == source["text"]
+    print("        embedded source recovered (the script is the source of truth)")
 
     # --- the knobs still work after a round trip ---------------------------
     cad_b.set_parameter(opened["doc"], "thickness", 12.0)

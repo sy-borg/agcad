@@ -663,8 +663,13 @@ impl Engine {
             },
 
             Command::SaveDocument { doc, path, source } => {
-                let d = self.doc(*doc)?;
-                let snapshot = d.snapshot(source.clone());
+                let d = self.doc_mut(*doc)?;
+                // Remember the recipe so `get_program` reflects what a
+                // reopen would recover. This is metadata, not model state.
+                if let Some(source) = source {
+                    d.source = Some(source.clone());
+                }
+                let snapshot = d.snapshot(None);
                 // Pretty + sorted keys + trailing newline: stable bytes, so
                 // two saves of the same model produce identical files.
                 let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {
@@ -775,6 +780,7 @@ impl Engine {
                         })
                         .collect(),
                     program: d.program.clone(),
+                    source: d.source.clone(),
                 })
             },
 
@@ -3292,7 +3298,7 @@ mod tests {
         .unwrap();
 
         // Open in a fresh engine, then save again without passing a source:
-        // the provenance stored on the document must come back out.
+        // the recipe stored on the document must come back out.
         let mut b = Engine::new();
         b.execute(Command::OpenDocument { path: p1s.clone(), name: None }).unwrap();
         b.execute(Command::SaveDocument { doc: 1, path: p2s.clone(), source: None }).unwrap();
@@ -3304,7 +3310,7 @@ mod tests {
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"format\": \"agcad-document\""));
         assert!(text.contains("\"version\": 2"));
-        assert!(text.contains("print('hi')"), "source is preserved as provenance");
+        assert!(text.contains("print('hi')"), "the embedded source is preserved");
         // The file is the program, not the geometry.
         assert!(!text.contains("\"mesh\""));
         assert!(!text.contains("positions"));
@@ -3433,6 +3439,59 @@ mod tests {
             },
             r => panic!("unexpected result {r:?}"),
         }
+    }
+
+    /// The script is the source of truth: a saved `.agcad` carries the
+    /// recipe, and `get_program` hands it back after a reopen so a handoff
+    /// can recover the source without executing it.
+    #[test]
+    fn get_program_recovers_the_embedded_script() {
+        let (path, path_s) = temp_file("agcad_program_source.agcad");
+        let (path2, path2_s) = temp_file("agcad_program_source_2.agcad");
+        let source = SourceDoc {
+            language: "python".into(),
+            text: "print('the recipe')\n".into(),
+        };
+
+        let mut a = engine();
+        rect_sketch(&mut a, 10.0, 10.0);
+        match a.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { source: None, .. } => {},
+            r => panic!("a fresh document has no embedded source: {r:?}"),
+        }
+        a.execute(Command::SaveDocument {
+            doc: 1,
+            path: path_s.clone(),
+            source: Some(source.clone()),
+        })
+        .unwrap();
+        // The live document remembers what it just wrote.
+        match a.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { source: Some(s), .. } => assert_eq!(s.text, source.text),
+            r => panic!("save_document must remember the provided source: {r:?}"),
+        }
+
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: path_s.clone(), name: None }).unwrap();
+        match b.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { source: Some(s), .. } => {
+                assert_eq!(s.language, "python");
+                assert_eq!(s.text, source.text);
+            },
+            r => panic!("opened document must expose the embedded source: {r:?}"),
+        }
+
+        // A save without a source argument keeps the stored recipe.
+        b.execute(Command::SaveDocument { doc: 1, path: path2_s.clone(), source: None }).unwrap();
+        let mut c = Engine::new();
+        c.execute(Command::OpenDocument { path: path2_s.clone(), name: None }).unwrap();
+        match c.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { source: Some(s), .. } => assert_eq!(s.text, source.text),
+            r => panic!("save -> open -> save must keep the source: {r:?}"),
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]

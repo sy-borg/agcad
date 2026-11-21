@@ -678,9 +678,10 @@ class Agcad:
 
         The file is JSON holding the program and the current parameter
         values — not the geometry, which is rebuilt deterministically by
-        replay on open. ``source`` may carry the original script as
-        provenance (``{"language": "python", "text": ...}``); it is never
-        executed. Saves are byte-stable: save → open → save is a no-op diff.
+        replay on open. ``source`` carries the original script as the
+        canonical recipe (``{"language": "python", "text": ...}``); it is
+        remembered on the document and never executed. Saves are byte-stable:
+        save → open → save is a no-op diff.
         """
         return self._request("save_document", doc=doc, path=path, source=source)
 
@@ -688,18 +689,45 @@ class Agcad:
         """Open a ``.agcad`` file as a new document and replay its program.
 
         Returns ``doc`` (the new id), ``name``, and command/parameter/entity
-        counts. The stored name is used unless ``name`` overrides it.
+        counts. The stored name is used unless ``name`` overrides it. Any
+        embedded recipe is available through :meth:`get_program` or
+        :meth:`get_script`.
         """
         return self._request("open_document", path=path, name=name)
 
     def get_program(self, doc: int) -> dict[str, Any]:
-        """Read-only view of the program and parameters.
+        """Read-only view of the program, parameters and embedded source.
 
-        Returns ``name``, ``params`` and ``program`` (the modeling commands
-        with expression arguments intact). This is exactly what
-        :meth:`save_document` writes, available to any client.
+        Returns ``name``, ``params``, ``program`` (the modeling commands with
+        expression arguments intact) and, when the document was saved with
+        one, ``source`` — the authoring script that rode along in the
+        ``.agcad`` snapshot. This is exactly what :meth:`save_document`
+        writes, available to any client.
+
+        The script on disk is the source of truth. ``source`` is how a
+        handoff recovers it without executing anything; use :meth:`get_script`
+        if you just want the text.
         """
         return self._request("get_program", doc=doc)
+
+    def get_script(self, doc: int, path: str | None = None) -> str:
+        """Return the canonical Python script for a document.
+
+        If the document was saved with an embedded source, that text is
+        returned unchanged — the script is the source of truth. Otherwise the
+        program is rendered back into a runnable client script with
+        :meth:`export_python`. Writes ``path`` when given.
+        """
+        snap = self.get_program(doc)
+        source = snap.get("source")
+        if source and source.get("language") == "python":
+            text = source.get("text", "")
+        else:
+            text = self.export_python(doc)
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        return text
 
     def export_python(self, doc: int, path: str | None = None) -> str:
         """Render the document's program as a runnable Python script.
@@ -709,8 +737,11 @@ class Agcad:
         Re-running the script rebuilds the same model, so it also works as a
         readable, diffable save format. Writes ``path`` when given.
 
-        (Generation lives here, not in the engine: the Python method names
-        belong to this client, not to the core.)
+        This is the reconstruction path when no embedded source exists. If
+        the document carries the authoring script, :meth:`get_script` returns
+        that original text instead. (Generation lives here, not in the
+        engine: the Python method names belong to this client, not to the
+        core.)
         """
         snap = self.get_program(doc)
         name = snap["name"]

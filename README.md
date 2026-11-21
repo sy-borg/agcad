@@ -114,7 +114,9 @@ Commands: `initialize`, `list_documents`, `create_document`, `close_document`,
 `add_sketch_line`, `add_sketch_circle`, `constrain`, `remove_constraint`,
 `move_sketch_point`, `delete_sketch_element`, `extrude`, `revolve`,
 `export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
-`open_document`.
+`open_document`. `get_program` returns the program, the parameters and any
+embedded authoring source — the complete handoff for the script-as-source
+workflow.
 
 `fillet{entity,radius,edges?}` and `chamfer{entity,distance,edges?}` reshape a
 solid **in place** (same id, name, color, transform) and replay with the
@@ -158,6 +160,38 @@ cad.set_parameter(doc, "wall", 4.0)   # rebuilds everything, ids unchanged
 This is the substrate for the target workflow: a vision model looks at a
 picture, the agent writes the parametric program, renders it headless,
 compares, and iterates — the user never touches a function.
+
+## The script is the source of truth
+
+agcad is a compiler target for an agent-authored script, not a GUI document
+that gets edited in place. The durable artifact is the script; the `.agcad`
+file is a replayable snapshot of an instance — the program, the current
+parameter values, and a copy of the script.
+
+```
+part.py ──run──► agcad bus ──save_document──► part.agcad
+   ▲                                             │
+   └──── get_script / export_python ◄────────────┘
+```
+
+- **Authoring**: the agent writes or edits `part.py`, runs it, renders and
+  validates the result.
+- **User knobs**: `set_parameter` is the fast path — it replays the program
+  with stable ids. `export_python` bakes the current values back into a script
+  when an instance should become the new source.
+- **Handoff**: `save_document(source={language, text})` embeds the script and
+  remembers it on the document; `get_program` returns it immediately and after
+  a later `open_document` (never executed); `get_script` returns the original
+  text, or reconstructs a runnable script with `export_python` when the file
+  has no embedded source.
+- **MCP-only documents** with no script are scratch state. For durable work,
+  write a script and save it with the instance.
+
+This is why agcad intentionally has no GUI-style feature tree: the agent does
+not edit features in place, it edits the script and replays. The program is the
+intermediate representation; the script is the editing surface. `set_parameter`
+covers the common “turn a knob” change without re-authoring, and regeneration
+covers the rest.
 
 ## Sketch planes: datum planes and solid faces
 
@@ -298,6 +332,14 @@ with Agcad.spawn() as cad:
 
 ## Roadmap
 
+Direction: **the script is the source of truth**. The next milestones make the
+agent-authored script loop trustworthy and expressive — validation, shape and
+sketch coverage, interoperability — rather than building a GUI feature tree.
+Feature-history editing is deliberately not a goal: replay is deterministic and
+`set_parameter` covers knob turns, while the script remains the editing surface.
+
+### Shipped
+
 - [x] Command bus + headless engine + Python client + wgpu viewer (M1)
 - [x] Parametric layer: parameters, expressions, program replay (M2)
 - [x] MCP server + shared-engine live preview: `scene_changed` broadcast,
@@ -330,11 +372,12 @@ with Agcad.spawn() as cad:
       program plus the current parameter values, no geometry — and
       `open_document` replays it into a new document with bit-identical ids
       and meshes. Saves are byte-stable (save → open → save is a no-op diff),
-      and the original script can ride along as provenance (never executed).
-      `get_program` exposes the same data to any client; the Python client's
-      `export_python` renders it back into a runnable script. The `.py` is
-      the recipe; the `.agcad` is the instance — recipe plus the knobs as the
-      user left them
+      and the original script rides along as the canonical recipe (never
+      executed). `get_program` exposes the program, parameters and embedded
+      source to any client; the Python client's `get_script` returns the
+      original text and `export_python` reconstructs a runnable script when
+      there is none. The `.py` is the source of truth; the `.agcad` is the
+      instance — recipe plus the knobs as the user left them
 - [x] **Fillets and chamfers**: `fillet{entity,radius,edges?}` /
       `chamfer{entity,distance,edges?}` reshape a solid **in place** (same id,
       name, color, transform) and replay with the program. Edges are selected
@@ -367,19 +410,47 @@ with Agcad.spawn() as cad:
       `sketch.plane` (origin, normal, in-plane X), so an agent can verify the
       frame before drawing; `examples/face_sketch.py` cuts a pocket and grows
       a boss on a parametric block
-- [ ] **Shaded-with-edges rendering**: a thin dark outline where adjacent
-      faces meet (and where a face silhouette crosses). Flat shading alone
-      hides coplanar-depth steps — a solid's front view reads as a blank
-      rectangle, and construction sketches peek out at the base. CAD drawings
-      draw edges for exactly this reason
-- [ ] Rust MCP server (single self-contained binary; the Python one is
-      already adapter-clean)
-- [ ] PyO3 bindings (native-speed path for hot loops, same API)
-- [ ] Occlusion picking in the viewer
+- [x] **Script-as-source workflow** (M12): the Python script is the durable
+      artifact; `.agcad` is a replayable instance carrying the program, current
+      knob values and an embedded copy of the script. `get_program` now returns
+      that `source`, and the Python client's `get_script` returns the original
+      text (or reconstructs a runnable script with `export_python`). The MCP
+      instructions teach the contract, `examples/save_load.py` asserts the
+      round trip, and the roadmap is ordered around it. MCP-only documents
+      without a script are explicitly scratch state
+
+### Next
+
+- [ ] **M13 — Trust: `validate` + scene diff**: check watertightness,
+      self-intersection, volume/bbox and (cheap) minimum wall per solid, and
+      compare two revisions by entity signature. Regeneration is only a
+      substitute for feature editing if the agent can prove the rebuild is
+      correct and identify what changed
+- [ ] **M14 — Speed: incremental rebuild**: `set_parameter` currently replays
+      the whole program. Track dependencies so a knob change rebuilds only the
+      features downstream of it; keep the full replay as the correctness
+      oracle
+- [ ] **M15 — Shape leverage**: linear and circular patterns, mirror, shell,
+      sweep/loft, and a real hole feature (counterbore/countersink). These
+      remove the most manual profile work for printable parts
+- [ ] **M16 — Sketch completeness**: arcs and splines; tangent, equal,
+      concentric, symmetric, angle and point-on-line constraints; construction
+      geometry; trim/extend/offset; conflict diagnostics that name the
+      over-constrained equations
+- [ ] **M17 — Interoperability**: mesh import (STL/OBJ/3MF), DXF/SVG for 2D
+      output, and a STEP path (with an explicit B-rep vs tessellation
+      decision). An agent handed a real CAD file should be able to participate
+- [ ] **M18 — Assemblies and drawings**: parts/instances, mates, interference
+      and BOM; drawing views with dimensions and annotations. The two pillars
+      still missing from “general parametric CAD”
+- [ ] **Later / UI polish**: `patch_program` for script-less MCP documents,
+      shaded-with-edges rendering (a thin outline where faces meet, so front
+      views read as CAD drawings), a Rust MCP server, PyO3 bindings, and
+      occlusion picking in the viewer
 
 ## Status
 
-Milestone 11 complete: sketches on faces and datum planes. 112 tests cover the solver
+Milestone 12 complete: the script is the source of truth. 113 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
@@ -399,7 +470,14 @@ bytes), and plane placement (datum frames in all three orientations,
 expression offsets, custom planes with a projected X axis, planar-face
 grouping and normal/`near` selection, outward-normal extrude direction,
 face references that follow parameters, rotated entities, save/open replay,
-and actionable errors).
+and actionable errors), and the script-as-source contract (embedded source
+returned by `get_program`, `get_script` recovering the original text, and
+save/open preserving it).
+
+The next milestones are deliberately agent-first: prove the rebuild with
+`validate` and a scene diff, make replay incremental, then widen the shape and
+sketch vocabulary. A GUI feature tree is not on the list — the agent edits the
+script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
@@ -411,8 +489,5 @@ model reproduction: `examples/example_body.png` is read for its two views
 profile and extruded, rendered from a camera fitted to the drawing, then
 finished with a `fillet` on the top and bottom rims — the drawing's plan
 corners are sharp, so the vertical edges stay sharp too — and
-`examples/save_load.py` (save → open in a fresh engine → change
-a knob → export back to Python and run it).
-
-Also in the roadmap but not started: shaded-with-edges rendering, a Rust
-MCP server, PyO3 bindings and occlusion picking in the viewer.
+`examples/save_load.py` (save → open in a fresh engine → recover the embedded
+source, change a knob → export back to Python and run it).

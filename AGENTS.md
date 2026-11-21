@@ -39,9 +39,9 @@ it first; this file only records what is easy to get wrong.
   cylinders extrude along +Z. Document ids start at 1; `create_document`
   accepts an explicit unused id so create + populate can share one batch.
 - `.agcad` stores the program plus current parameter values, never geometry
-  (`open_document` replays it). An embedded Python source is provenance only
-  and is never executed. Saves must be byte-stable (save → open → save is a
-  no-op).
+  (`open_document` replays it). An embedded Python source rides along as the
+  canonical recipe but is never executed. Saves must be byte-stable
+  (save → open → save is a no-op).
 - `examples/cross_block.py` embeds its own source into the committed
   `examples/cross_block/*.agcad`. Editing the script therefore changes those
   files' recipe text; regenerate with the example — program and parameters
@@ -51,6 +51,21 @@ it first; this file only records what is easy to get wrong.
   `-strip -define png:exclude-chunks=date,time` (the script already does it).
 - Rendering is a deterministic software rasterizer in core (no GPU); PNG bytes
   are part of the reproducibility promise.
+
+## Source of truth
+
+The client script is the durable, editable artifact; `.agcad` is a replayable
+snapshot (program + current parameter values + embedded script). Agents edit the
+script, run it, and save the instance with `source=...`. `get_program` returns
+the embedded source and the Python client's `get_script` hands it back, so a
+handoff can recover the recipe without executing it. MCP-only documents with no
+script are scratch state.
+
+Do not build a GUI-style feature tree or in-place feature editing: `set_parameter`
+handles knob turns and the agent regenerates structure from the script. The
+program is the intermediate representation, not the editing surface. If
+script-less MCP documents become a first-class mode, add a small program-patch
+API instead of a history UI.
 
 ## Determinism is a hard requirement
 

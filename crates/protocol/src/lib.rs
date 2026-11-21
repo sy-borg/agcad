@@ -295,14 +295,17 @@ pub enum Command {
 
     /// Write the document to a `.agcad` file: its program plus the current
     /// parameter values (see [`DocumentSnapshot`]). Geometry is not stored;
-    /// opening replays the program. A session command — saving changes no
-    /// state. The file is pretty-printed and byte-stable, so save → open →
-    /// save is a no-op diff.
+    /// opening replays the program. The file is pretty-printed and
+    /// byte-stable, so save → open → save is a no-op diff.
+    ///
+    /// Saving changes no model state. A provided `source` is remembered on
+    /// the document, so `get_program` can hand the recipe back without a
+    /// reopen; it is never executed.
     SaveDocument {
         doc: DocId,
         path: String,
-        /// Optional authoring source to embed as provenance. Opening a
-        /// document never executes it; it is documentation.
+        /// Optional authoring source to embed. It rides along as the
+        /// canonical recipe; opening a document never executes it.
         #[serde(default)]
         source: Option<SourceDoc>,
     },
@@ -576,6 +579,12 @@ pub enum CommandResult {
         name: String,
         params: Vec<ParamInfo>,
         program: Vec<Command>,
+        /// The authoring source embedded in the document, when it was saved
+        /// with one. The script on disk is the source of truth; this is the
+        /// copy that rode along in the `.agcad` snapshot, so a handoff can
+        /// recover the recipe without executing anything.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<SourceDoc>,
     },
     Rendered {
         doc: DocId,
@@ -647,8 +656,8 @@ pub struct DocumentSnapshot {
     /// Modeling commands in execution order.
     #[serde(default)]
     pub program: Vec<Command>,
-    /// Original authoring source, for provenance only. Opening a document
-    /// replays `program`; it never executes `source`.
+    /// Authoring source: the canonical recipe that produced this instance.
+    /// Opening a document replays `program`; it never executes `source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceDoc>,
 }
@@ -661,7 +670,9 @@ pub struct SavedParameter {
     pub description: Option<String>,
 }
 
-/// Provenance for a document: the script an agent wrote to build it.
+/// The authoring script for a document: the durable source of truth. It rides
+/// along in the saved `.agcad` so a handoff can recover the recipe; opening a
+/// document never executes it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceDoc {
     pub language: String,

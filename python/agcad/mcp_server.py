@@ -48,10 +48,13 @@ removes it). Fillets and
 chamfers reshape a solid in place (same entity id): fillet{doc,entity,radius,edges?}
 or chamfer{doc,entity,distance,edges?}, where `edges` is a geometric filter
 ({direction}, {near,near_radius}, {normals}, {convex}) instead of an index — omit
-it to take every sharp edge. Persist a model with
-save_document -> .agcad (JSON program + current parameter values, replayed on
-open_document); a Python client script is the authoring source, not the file.
-Failed commands report a hint; fix the named issue and retry."""
+it to take every sharp edge. The Python script is the source of truth;
+save_document -> .agcad is a replayable snapshot (program + current parameter
+values + the embedded script). get_program exposes all three, so a handoff can
+recover the recipe without executing it. For durable work keep the script and
+pass it as save_document{source:{language:"python",text:...}}; an MCP-only
+document with no script is scratch state. Failed commands report a hint; fix
+the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
@@ -122,11 +125,15 @@ revolve{doc,sketch,angle_deg?,axis?:"x"|"y",segments?,name?,color?} (profile →
   one side of the axis),
 save_document{doc,path,source?} (writes a .agcad JSON file: the program plus
   the current parameter values; geometry is rebuilt by replay, so the file stays
-  small and diffable; source={language,text} is provenance only, never executed;
-  save -> open -> save is a no-op diff; session command, changes no state),
+  small and diffable. source={language,text} embeds the authoring script as the
+  canonical recipe copy; it is never executed. save -> open -> save is a no-op
+  diff; session command, changes no model state. A provided source is
+  remembered on the document, so get_program returns it immediately too),
 open_document{path,name?} (loads a .agcad file as a NEW document and replays it;
   returns doc, name, counts; the stored name is used unless name overrides),
-get_program{doc} (read-only program + parameters — what a save would write),
+get_program{doc} (read-only program + parameters + embedded source — the
+  complete handoff: the source is the canonical script; the program is the
+  replayable IR),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),
