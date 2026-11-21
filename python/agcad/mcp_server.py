@@ -37,7 +37,7 @@ Cylinders extrude along +Z. Document ids start at 1; create_document takes an
 optional explicit `doc` id, so create-then-populate fits in one batch.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
 dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
-verify -> agcad_render to SEE the result -> export_stl for slicing. Sketches are
+verify -> agcad_render to SEE the result -> export_stl/export_3mf for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change ->
 extrude/revolve turns a closed profile into a printable solid. Fillets and
@@ -114,6 +114,9 @@ get_program{doc} (read-only program + parameters — what a save would write),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),
+export_3mf{doc,path,entities?} (3MF package, world space, absolute path — one
+  named object per solid with its display color, millimeter unit; prefer it
+  over STL when the build has several parts or colors; session command),
 render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,ortho?,background?,path?}
   (headless PNG; prefer the agcad_render tool, which returns the image inline.
   ortho:true gives a parallel projection for front/top/side views).

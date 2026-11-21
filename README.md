@@ -49,9 +49,9 @@ on its own:
 
 ![the cross block with its top and bottom rims rounded and sharp plan corners](examples/cross_block/rounded.png)
 
-`fillet` reshapes the solid in place, so the entity id, camera and STL export
-still apply. Turning `height` down to 30 mm replays the sketch, the extrude
-and both rim fillets, so the rounding follows the new geometry.
+`fillet` reshapes the solid in place, so the entity id, camera and STL/3MF
+export still apply. Turning `height` down to 30 mm replays the sketch, the
+extrude and both rim fillets, so the rounding follows the new geometry.
 
 The loop this exercises, end to end:
 
@@ -64,14 +64,15 @@ The loop this exercises, end to end:
    `{normals:[[0,0,1]]}` for the top rim, `{normals:[[0,0,-1]]}` for the
    bottom — so the part reads as a moulded body, not a block-out. `chamfer`
    shares the same machinery; this drawing has rounds, not bevels.
-5. **Deliver** `cross_block_rounded.stl` for the slicer, and the matching
-   `.agcad` (program + parameter values) so the part reopens with its knobs
-   intact.
+5. **Deliver** `cross_block_rounded.stl` / `cross_block_rounded.3mf` for the
+   slicer, and the matching `.agcad` (program + parameter values) so the part
+   reopens with its knobs intact.
 
 The artifacts live in `examples/cross_block/`: `iso.png`, `front.png`,
-`cross_block.stl` and `cross_block.agcad` (the sharp baseline), plus
-`rounded.png`, `cross_block_rounded.stl` and `cross_block_rounded.agcad`
-(the finished part), and `compare.png` (the drawing above that part).
+`cross_block.stl`, `cross_block.3mf` and `cross_block.agcad` (the sharp
+baseline), plus `rounded.png`, `cross_block_rounded.stl`,
+`cross_block_rounded.3mf` and `cross_block_rounded.agcad` (the finished part),
+and `compare.png` (the drawing above that part).
 `.venv/bin/python examples/cross_block.py` regenerates them.
 
 ## Layout
@@ -112,7 +113,8 @@ Commands: `initialize`, `list_documents`, `create_document`, `close_document`,
 `get_parameters`, `undo`, `redo`, `get_scene`, `get_program`, `add_sketch`,
 `add_sketch_line`, `add_sketch_circle`, `constrain`, `remove_constraint`,
 `move_sketch_point`, `delete_sketch_element`, `extrude`, `revolve`,
-`export_stl`, `render_offscreen`, `save_document`, `open_document`.
+`export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
+`open_document`.
 
 `fillet{entity,radius,edges?}` and `chamfer{entity,distance,edges?}` reshape a
 solid **in place** (same id, name, color, transform) and replay with the
@@ -315,8 +317,11 @@ with Agcad.spawn() as cad:
       cylinder's edge circle) is treated as one continuous band, with one
       boolean per convexity, so filleting a whole cylinder or a boss stays
       fast and watertight
-- [ ] **3MF export**: multi-object builds, per-object color/material, unit and
-      slicer metadata — STL loses all of it
+- [x] **3MF export**: one named object per solid with its own color in a
+      single build, millimeter units and application metadata. The OPC
+      package is written store-only with a fixed timestamp, so the same scene
+      exports to byte-identical files; geometry is baked into world space
+      (matching STL) and sketches are skipped. STL stays the single-body path
 - [ ] **Sketches on a face / datum planes**: place a sketch on an existing
       planar face (or an explicit plane) instead of always on XY, with the
       normal derived from the face so `extrude` cuts or adds material in the
@@ -333,7 +338,7 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 9 complete: fillets and chamfers. 92 tests cover the solver
+Milestone 10 complete: 3MF export. 98 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
@@ -342,15 +347,17 @@ nested holes, negative extrusion, revolve around X/Y, partial sweeps,
 profile validation, dependent rebuilds, cross-engine determinism), the
 orthographic camera (parallel projection, depth-independent size), document
 persistence (save/open round-trips, byte-stable saves, doc-id rebinding,
-corrupt/newer-file hints, parameters keeping their descriptions), and edge
+corrupt/newer-file hints, parameters keeping their descriptions), edge
 treatment (sharp-edge extraction on welded meshes with a tessellation-angle
 threshold, geometric filters, convex vs concave handling, single-pass
 all-edge rounding with clean reflex corners, tessellated rims as one band,
 in-place reshapes that survive rotation, replay, sketch edits and
-save/open).
+save/open), and package export (valid OPC/ZIP entries, multi-object names
+and per-object colors, world-space vertices, sketch filtering, deterministic
+bytes).
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
-profile with holes → extrude → STL → render),
+profile with holes → extrude → STL/3MF → render),
 `examples/revolve_bushing.py`, `examples/cross_block.py` — a picture →
 model reproduction: `examples/example_body.png` is read for its two views
 (45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
@@ -360,5 +367,5 @@ corners are sharp, so the vertical edges stay sharp too — and
 `examples/save_load.py` (save → open in a fresh engine → change
 a knob → export back to Python and run it).
 
-Also in the roadmap but not started: 3MF export, and sketches placed on
-existing faces or datum planes.
+Also in the roadmap but not started: sketches placed on existing faces or
+datum planes.

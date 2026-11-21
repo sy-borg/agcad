@@ -1,4 +1,4 @@
-"""A printable bracket: constrained sketch profile → extruded solid → STL.
+"""A printable bracket: constrained sketch profile → extruded solid → STL + 3MF.
 
 Usage: .venv/bin/python examples/printable_bracket.py [out.png]
 
@@ -28,6 +28,7 @@ def z_extent(mesh: dict) -> float:
 def main() -> None:
     out = sys.argv[1] if len(sys.argv) > 1 else "exports/bracket.png"
     stl = os.path.abspath("exports/bracket.stl")
+    mf = os.path.abspath("exports/bracket.3mf")
     os.makedirs(os.path.dirname(stl), exist_ok=True)
 
     cad = Agcad.spawn()
@@ -84,6 +85,9 @@ def main() -> None:
     exp = cad.export_stl(doc, stl)
     print(f"stl: {exp['path']} ({exp['tris']} tris, {exp['bytes']} bytes)")
 
+    exp = cad.export_3mf(doc, mf)
+    print(f"3mf: {exp['path']} ({exp['objects']} objects, {exp['tris']} tris, {exp['bytes']} bytes)")
+
     r = cad.render_offscreen(doc, width=900, height=650, path=out)
     png = base64.b64decode(r["png_base64"])
     assert png[:8] == bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
@@ -98,6 +102,8 @@ def main() -> None:
     print(f"thickness 6 -> 10: solid z extent now {z_extent(bracket['mesh']):.2f} mm")
     exp = cad.export_stl(doc, stl)
     print(f"stl re-exported: {exp['tris']} tris, {exp['bytes']} bytes")
+    exp = cad.export_3mf(doc, mf)
+    print(f"3mf re-exported: {exp['objects']} objects, {exp['tris']} tris, {exp['bytes']} bytes")
 
     cad.close()
 

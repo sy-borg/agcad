@@ -145,6 +145,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::GetScene { doc }
         | Command::GetParameters { doc }
         | Command::ExportStl { doc, .. }
+        | Command::Export3mf { doc, .. }
         | Command::SaveDocument { doc, .. }
         | Command::GetProgram { doc }
         | Command::RenderOffscreen { doc, .. }

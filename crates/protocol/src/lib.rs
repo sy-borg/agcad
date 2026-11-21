@@ -125,7 +125,8 @@ impl RpcResponse {
 ///
 /// Modeling commands (Add*, Transform, SetColor, Delete, Boolean) are
 /// appended to the document program and replayed when parameters change.
-/// Session commands (initialize, undo/redo, get_scene, export_stl, ...)
+/// Session commands (initialize, undo/redo, get_scene, export_stl,
+/// export_3mf, ...)
 /// are not part of the program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
@@ -266,6 +267,21 @@ pub enum Command {
     /// geometry (default: every entity in the document). A session
     /// command, not part of the program — exporting changes no state.
     ExportStl {
+        doc: DocId,
+        /// Filesystem path the *server* writes to; absolute paths avoid
+        /// surprises about the server's working directory.
+        path: String,
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+    },
+
+    /// Write a 3MF package of the selected entities' **world-space**
+    /// geometry (default: every entity in the document). Unlike STL, the
+    /// build is multi-object and keeps per-object names and colors, with
+    /// the model's unit set to millimeters. A session command, not part of
+    /// the program — exporting changes no state.
+    #[serde(rename = "export_3mf")]
+    Export3mf {
         doc: DocId,
         /// Filesystem path the *server* writes to; absolute paths avoid
         /// surprises about the server's working directory.
@@ -515,6 +531,16 @@ pub enum CommandResult {
     Redone { doc: DocId },
     Scene { doc: DocId, entities: Vec<EntitySnapshot> },
     StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
+    /// A 3MF package was written. `objects` is how many build items it
+    /// contains, `tris` the total triangle count.
+    #[serde(rename = "3mf_exported")]
+    ThreeMfExported {
+        doc: DocId,
+        path: String,
+        objects: usize,
+        tris: usize,
+        bytes: usize,
+    },
     DocumentSaved {
         doc: DocId,
         path: String,

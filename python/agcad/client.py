@@ -680,6 +680,11 @@ class Agcad:
         """Write a binary STL (world space) — a session command."""
         return self._request("export_stl", doc=doc, path=path, entities=entities)
 
+    def export_3mf(self, doc: int, path: str, entities: list[int] | None = None) -> dict[str, Any]:
+        """Write a 3MF package (world space, multi-object with names and
+        per-object colors) — a session command."""
+        return self._request("export_3mf", doc=doc, path=path, entities=entities)
+
     def render_offscreen(
         self,
         doc: int,

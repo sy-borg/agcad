@@ -25,6 +25,7 @@ pub mod render;
 pub mod sketch;
 pub mod solid;
 pub mod stl;
+pub mod threemf;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -368,6 +369,7 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::GetScene { doc: d }
         | Command::GetProgram { doc: d }
         | Command::ExportStl { doc: d, .. }
+        | Command::Export3mf { doc: d, .. }
         | Command::SaveDocument { doc: d, .. }
         | Command::RenderOffscreen { doc: d, .. }
         | Command::CloseDocument { doc: d } => *d = doc,
@@ -619,6 +621,45 @@ impl Engine {
                 })
             },
 
+            Command::Export3mf { doc, path, entities } => {
+                let d = self.doc(*doc)?;
+                let ids: Vec<EntityId> = match entities {
+                    Some(ids) => ids.clone(),
+                    None => d.entities.keys().copied().collect(),
+                };
+                let mut parts = Vec::new();
+                for id in ids {
+                    let e = d
+                        .entities
+                        .get(&id)
+                        .ok_or(Error::UnknownEntity { doc: *doc, entity: id })?;
+                    // Sketches are display-only, and empty solids would become
+                    // invalid 3MF objects — neither belongs in the build.
+                    if matches!(e.shape, Shape::Sketch { .. }) || e.mesh.indices.is_empty() {
+                        continue;
+                    }
+                    parts.push(threemf::Part {
+                        name: &e.name,
+                        mesh: &e.mesh,
+                        transform: e.transform(),
+                        color: e.color,
+                    });
+                }
+                if parts.is_empty() {
+                    return Err(Error::Invalid(
+                        "nothing to export: no solid entities (hint: sketches are not meshes — extrude them into solids first)".into(),
+                    ));
+                }
+                let (resolved, objects, tris, bytes) = threemf::write_3mf(path, &parts, &d.name)?;
+                Ok(CommandResult::ThreeMfExported {
+                    doc: *doc,
+                    path: resolved,
+                    objects,
+                    tris,
+                    bytes,
+                })
+            },
+
             Command::SaveDocument { doc, path, source } => {
                 let d = self.doc(*doc)?;
                 let snapshot = d.snapshot(source.clone());
@@ -832,6 +873,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Redo { doc }
         | Command::GetScene { doc }
         | Command::ExportStl { doc, .. }
+        | Command::Export3mf { doc, .. }
         | Command::RenderOffscreen { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         _ => None,
@@ -2052,6 +2094,104 @@ mod tests {
         // normal → x at byte 96. Must be in world space (x ≈ 95..105).
         let x = f32::from_le_bytes([data[96], data[97], data[98], data[99]]);
         assert!((95.0..=105.0).contains(&x), "expected world-space x near 100, got {x}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 3MF is the multi-object format: names, colors and millimeters survive.
+    #[test]
+    fn threemf_export_writes_a_multi_object_package() {
+        let mut e = engine();
+        let base = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "red base".into(),
+                center: vec3(0.0),
+                size: vec3(10.0),
+                color: Some([1.0, 0.0, 0.0, 1.0]),
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::Transform {
+            doc: 1,
+            entity: base,
+            translation: Some([num(100.0), num(0.0), num(0.0)]),
+            rotation_deg: None,
+            scale: None,
+        })
+        .unwrap();
+        e.execute(Command::AddBox {
+            doc: 1,
+            name: "grey boss".into(),
+            center: vec3(0.0),
+            size: vec3(10.0),
+            color: None,
+        })
+        .unwrap();
+
+        let path = std::env::temp_dir().join("agcad_test_export.3mf");
+        let path_str = path.to_string_lossy().into_owned();
+        match e
+            .execute(Command::Export3mf { doc: 1, path: path_str.clone(), entities: None })
+            .unwrap()
+        {
+            CommandResult::ThreeMfExported { objects, tris, bytes, path: resolved, .. } => {
+                assert_eq!(objects, 2);
+                assert_eq!(tris, 24);
+                assert!(resolved.ends_with("agcad_test_export.3mf"));
+                let data = std::fs::read(&path).unwrap();
+                assert_eq!(bytes, data.len());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let data = std::fs::read(&path).unwrap();
+        assert!(data.starts_with(b"PK\x03\x04"), "3MF is a ZIP package");
+        // Stored entries make the model XML visible in the raw package.
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("3D/3dmodel.model"));
+        assert!(text.contains("unit=\"millimeter\""));
+        assert!(text.contains("<metadata name=\"Application\">agcad</metadata>"));
+        assert_eq!(text.matches("<object ").count(), 2);
+        assert_eq!(text.matches("<item ").count(), 2);
+        assert!(text.contains("name=\"red base\""));
+        assert!(text.contains("name=\"grey boss\""));
+        assert!(text.contains("displaycolor=\"#FF0000FF\""));
+        // World-space geometry, like STL: the translated base is at x≈100.
+        assert!(text.contains("x=\"95\"") && text.contains("x=\"105\""));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Sketches are skipped by 3MF too; sketch-only documents are an error,
+    /// not an empty package.
+    #[test]
+    fn threemf_skips_sketches() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "profile");
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        let path = std::env::temp_dir().join("agcad_sketch_only.3mf");
+        let path_str = path.to_string_lossy().to_string();
+        let err = e.execute(Command::Export3mf { doc: 1, path: path_str, entities: None });
+        assert!(err.is_err(), "sketch-only export must fail with a hint");
+
+        e.execute(Command::AddBox {
+            doc: 1,
+            name: "plate".into(),
+            center: vec3(0.0),
+            size: vec3(10.0),
+            color: None,
+        })
+        .unwrap();
+        let path = std::env::temp_dir().join("agcad_sketch_and_box.3mf");
+        let path_str = path.to_string_lossy().to_string();
+        match e.execute(Command::Export3mf { doc: 1, path: path_str, entities: None }).unwrap() {
+            CommandResult::ThreeMfExported { objects, tris, .. } => {
+                assert_eq!(objects, 1);
+                assert_eq!(tris, 12, "only the box's 12 triangles");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
         let _ = std::fs::remove_file(&path);
     }
 

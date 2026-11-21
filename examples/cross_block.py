@@ -14,8 +14,9 @@ driven by the `round_r` knob. The drawing rounds only the rim edges — its
 plan corners are sharp — so the vertical edges are deliberately left alone.
 
 Writes the committed showcase into ``examples/cross_block/``: ``iso.png``,
-``front.png``, ``cross_block.stl``, ``cross_block.agcad`` (the sharp
-baseline), plus ``rounded.png``, ``cross_block_rounded.stl`` and
+``front.png``, ``cross_block.stl``, ``cross_block.3mf``,
+``cross_block.agcad`` (the sharp baseline), plus ``rounded.png``,
+``cross_block_rounded.stl``, ``cross_block_rounded.3mf`` and
 ``cross_block_rounded.agcad`` (the edge-treated part), and (when ImageMagick
 is installed) the stacked ``compare.png`` used in the README — the drawing
 above the finished part.
@@ -96,11 +97,13 @@ def compose_showcase(reference: str, model_png: str, out_path: str) -> None:
 def main() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     stl = os.path.abspath(os.path.join(OUT_DIR, "cross_block.stl"))
+    mf = os.path.abspath(os.path.join(OUT_DIR, "cross_block.3mf"))
     iso_png = os.path.join(OUT_DIR, "iso.png")
     front_png = os.path.join(OUT_DIR, "front.png")
     compare_png = os.path.join(OUT_DIR, "compare.png")
     rounded_png = os.path.join(OUT_DIR, "rounded.png")
     rounded_stl = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.stl"))
+    rounded_mf = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.3mf"))
 
     cad = Agcad.spawn()
     doc = cad.create_document("cross_block")["doc"]
@@ -149,6 +152,9 @@ def main() -> None:
     exp = cad.export_stl(doc, stl)
     print(f"stl: {exp['path']} ({exp['tris']} tris, {exp['bytes']} bytes)")
 
+    exp = cad.export_3mf(doc, mf)
+    print(f"3mf: {exp['path']} ({exp['objects']} objects, {exp['tris']} tris, {exp['bytes']} bytes)")
+
     # 3/4 view. Camera fitted to the reference drawing's silhouette: the
     # projection of the model is compared with the drawing and the camera
     # searched for the best overlap (azimuth 30°, elevation 32° → 0.99 IoU).
@@ -182,7 +188,7 @@ def main() -> None:
 
     # --- edge treatment ------------------------------------------------------
     # The same program, two more commands. Both reshape the solid in place, so
-    # the entity keeps its id and the camera / STL export still refer to it.
+    # the entity keeps its id and the camera / STL/3MF export still refer to it.
     # The drawing rounds only the top and bottom rims; its plan corners are
     # sharp. Filleting the two rims — and not the twelve vertical edges —
     # reproduces that: the rounded bands stop at the sharp corners.
@@ -207,6 +213,9 @@ def main() -> None:
 
     exp = cad.export_stl(doc, rounded_stl)
     print(f"stl: {exp['path']} ({exp['tris']} tris, {exp['bytes']} bytes)")
+
+    exp = cad.export_3mf(doc, rounded_mf)
+    print(f"3mf: {exp['path']} ({exp['objects']} objects, {exp['tris']} tris, {exp['bytes']} bytes)")
 
     rounded_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.agcad"))
     saved = cad.save_document(doc, rounded_path, source=source)
