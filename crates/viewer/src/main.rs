@@ -68,10 +68,18 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 /// grid is a non-indexed line list; both live in the same buffers.
 struct DrawRange {
     line: bool,
-    /// Only used when `indexed`.
+    /// First index for triangles, first vertex for lines.
     first_index: u32,
     count: u32,
     base_instance: u32,
+}
+
+/// CPU-side scene buffers, ready for upload.
+struct SceneData {
+    verts: Vec<f32>,
+    idx: Vec<u32>,
+    inst: Vec<f32>,
+    draws: Vec<DrawRange>,
 }
 
 struct SceneGpu {
@@ -344,50 +352,7 @@ impl State {
 
     /// Upload a fresh snapshot: entities first, then the reference grid.
     fn set_scene(&mut self, entities: Vec<EntitySnapshot>) {
-        let mut verts: Vec<f32> = Vec::new();
-        let mut idx: Vec<u32> = Vec::new();
-        let mut inst: Vec<f32> = Vec::new();
-        let mut draws: Vec<DrawRange> = Vec::new();
-
-        for e in &entities {
-            let vert_base = (verts.len() / 6) as u32;
-            let index_base = idx.len() as u32;
-            let instance_base = (inst.len() / 20) as u32;
-            for (p, n) in e.mesh.positions.iter().zip(&e.mesh.normals) {
-                verts.extend_from_slice(&[p[0], p[1], p[2], n[0], n[1], n[2]]);
-            }
-            for &i in &e.mesh.indices {
-                idx.push(vert_base + i);
-            }
-            inst.extend_from_slice(&flatten_mat(&e.transform));
-            inst.extend_from_slice(&e.color);
-            draws.push(DrawRange {
-                line: false,
-                first_index: index_base,
-                count: e.mesh.indices.len() as u32,
-                base_instance: instance_base,
-            });
-        }
-
-        // Reference grid: XZ plane at z=0, 10 mm cells, 2 m span.
-        let grid_base_instance = (inst.len() / 20) as u32;
-        let grid_start = verts.len() / 6;
-        for k in -10..=10 {
-            let p = (k * 10) as f32;
-            for line in [[p, -100.0, 0.0], [p, 100.0, 0.0], [-100.0, p, 0.0], [100.0, p, 0.0]] {
-                verts.extend_from_slice(&[line[0], line[1], line[2], 0.0, 0.0, 1.0]);
-            }
-        }
-        let grid_vertex_count = (verts.len() / 6 - grid_start) as u32;
-        let identity = cam::identity();
-        inst.extend_from_slice(&flatten_mat(&identity));
-        inst.extend_from_slice(&[0.30, 0.31, 0.34, 1.0]);
-        draws.push(DrawRange {
-            line: true,
-            first_index: 0,
-            count: grid_vertex_count,
-            base_instance: grid_base_instance,
-        });
+        let SceneData { verts, idx, inst, draws } = build_scene(&entities);
 
         let vertex_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vertices"),
@@ -481,8 +446,11 @@ impl State {
                 if let Some(grid) = scene.draws.iter().find(|d| d.line) {
                     pass.set_pipeline(&self.pipeline_line);
                     pass.set_vertex_buffer(0, scene.vertex_buf.slice(..));
-                    let end = grid.base_instance as u32 + 1;
-                    pass.draw(0..grid.count, grid.base_instance..end);
+                    let end = grid.base_instance + 1;
+                    pass.draw(
+                        grid.first_index..grid.first_index + grid.count,
+                        grid.base_instance..end,
+                    );
                 }
                 pass.set_vertex_buffer(0, scene.vertex_buf.slice(..));
                 pass.set_index_buffer(scene.index_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -501,6 +469,59 @@ impl State {
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
     }
+}
+
+/// Assemble the GPU buffers and draw ranges for a scene snapshot. Pure so the
+/// buffer layout can be unit-tested without a GPU.
+fn build_scene(entities: &[EntitySnapshot]) -> SceneData {
+    let mut verts: Vec<f32> = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
+    let mut inst: Vec<f32> = Vec::new();
+    let mut draws: Vec<DrawRange> = Vec::new();
+
+    for e in entities {
+        let vert_base = (verts.len() / 6) as u32;
+        let index_base = idx.len() as u32;
+        let instance_base = (inst.len() / 20) as u32;
+        for (p, n) in e.mesh.positions.iter().zip(&e.mesh.normals) {
+            verts.extend_from_slice(&[p[0], p[1], p[2], n[0], n[1], n[2]]);
+        }
+        for &i in &e.mesh.indices {
+            idx.push(vert_base + i);
+        }
+        inst.extend_from_slice(&flatten_mat(&e.transform));
+        inst.extend_from_slice(&e.color);
+        draws.push(DrawRange {
+            line: false,
+            first_index: index_base,
+            count: e.mesh.indices.len() as u32,
+            base_instance: instance_base,
+        });
+    }
+
+    // Reference grid: XY plane at z=0 (Z-up ground), 10 mm cells, 2 m span.
+    // Appended after the entity vertices, so the draw range must start at
+    // `grid_start` rather than zero.
+    let grid_base_instance = (inst.len() / 20) as u32;
+    let grid_start = verts.len() / 6;
+    for k in -10..=10 {
+        let p = (k * 10) as f32;
+        for line in [[p, -100.0, 0.0], [p, 100.0, 0.0], [-100.0, p, 0.0], [100.0, p, 0.0]] {
+            verts.extend_from_slice(&[line[0], line[1], line[2], 0.0, 0.0, 1.0]);
+        }
+    }
+    let grid_vertex_count = (verts.len() / 6 - grid_start) as u32;
+    let identity = cam::identity();
+    inst.extend_from_slice(&flatten_mat(&identity));
+    inst.extend_from_slice(&[0.30, 0.31, 0.34, 1.0]);
+    draws.push(DrawRange {
+        line: true,
+        first_index: grid_start as u32,
+        count: grid_vertex_count,
+        base_instance: grid_base_instance,
+    });
+
+    SceneData { verts, idx, inst, draws }
 }
 
 fn flatten_mat(m: &Mat4) -> [f32; 16] {
@@ -747,4 +768,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(host, port);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agcad_protocol::{Bbox, Mesh};
+
+    fn one_triangle() -> EntitySnapshot {
+        EntitySnapshot {
+            id: 1,
+            name: "triangle".to_string(),
+            translation: [0.0; 3],
+            rotation_deg: [0.0; 3],
+            scale: [1.0; 3],
+            transform: cam::identity(),
+            world_bbox: Bbox { min: [0.0; 3], max: [1.0; 3] },
+            color: [1.0, 0.0, 0.0, 1.0],
+            mesh: Mesh {
+                positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                indices: vec![0, 1, 2],
+            },
+            sketch: None,
+        }
+    }
+
+    #[test]
+    fn grid_draw_starts_after_entity_vertices() {
+        let data = build_scene(&[one_triangle()]);
+        let grid = data.draws.iter().find(|d| d.line).expect("grid draw");
+
+        // Entity vertices come first, so the grid must not start at vertex 0.
+        assert_eq!(grid.first_index, 3);
+        assert_eq!(grid.count, 84); // 21 lines in each direction, two vertices each.
+        assert_eq!(grid.first_index + grid.count, (data.verts.len() / 6) as u32);
+    }
 }
