@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agcad – a CAD whose primary user is an AI agent</title>
+<meta name="description" content="agcad is a headless, scriptable parametric CAD. An AI agent drives it over a JSON-RPC command bus or MCP; the viewer is just another client.">
+<meta property="og:title" content="agcad">
+<meta property="og:description" content="A CAD whose primary user is an AI agent.">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#eef0ec;
+  --sheet:#f8f9f6;
+  --ink:#1b2733;
+  --muted:#5b6773;
+  --rule:#c3cbd2;
+  --dim:#1f5fbf;
+  --dim-soft:#dbe6f7;
+  --code-bg:#17212b;
+  --code-ink:#d7e0ea;
+  --display:"Bricolage Grotesque","Instrument Sans",system-ui,sans-serif;
+  --body:"Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--body);font-size:17px;line-height:1.6}
+a{color:var(--dim);text-underline-offset:3px}
+a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(--dim);outline-offset:3px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+code,pre{font-family:var(--mono)}
+code{font-size:.88em;background:var(--dim-soft);padding:.1em .35em;border-radius:3px}
+h1,h2,h3{font-family:var(--display);line-height:1.1;margin:0}
+h2{font-size:clamp(1.7rem,3.4vw,2.3rem);font-weight:700;letter-spacing:-.01em;margin-bottom:.5em}
+h3{font-size:1.15rem;font-weight:700;margin-bottom:.3em}
+p{margin:0 0 1em;max-width:66ch}
+
+/* nav */
+nav{border-bottom:1px solid var(--rule);background:var(--sheet)}
+nav .wrap{display:flex;align-items:center;gap:28px;height:60px}
+nav .brand{display:flex;align-items:center;gap:10px;font-family:var(--display);font-weight:700;font-size:1.2rem;color:var(--ink);text-decoration:none}
+nav .brand img{width:30px;height:30px}
+nav .links{display:flex;gap:22px;margin-left:auto;font-size:.95rem;flex-wrap:wrap}
+nav .links a{color:var(--ink);text-decoration:none}
+nav .links a:hover{color:var(--dim);text-decoration:underline}
+
+/* hero */
+.hero{padding:72px 0 56px}
+.hero .wrap{display:grid;grid-template-columns:1.1fr .9fr;gap:48px;align-items:center}
+.hero h1{font-size:clamp(2.6rem,6.2vw,4.6rem);font-weight:700;letter-spacing:-.02em}
+.hero .lede{font-size:1.25rem;margin:22px 0 28px;color:var(--ink)}
+.hero .lede strong{font-weight:600}
+.btns{display:flex;gap:12px;flex-wrap:wrap}
+.btn{display:inline-block;padding:12px 20px;border:2px solid var(--ink);border-radius:2px;font-weight:600;text-decoration:none;color:var(--ink);background:transparent}
+.btn.primary{background:var(--ink);color:var(--paper)}
+.btn:hover{background:var(--dim);border-color:var(--dim);color:#fff}
+.hero figure{margin:0;background:var(--sheet);border:1px solid var(--rule);padding:12px}
+.hero figure img{display:block;width:100%;height:auto}
+.hero figcaption{font-size:.85rem;color:var(--muted);padding:10px 4px 2px}
+.tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px;font-family:var(--mono);font-size:.8rem}
+.tags span{border:1px solid var(--rule);padding:2px 9px;background:var(--sheet)}
+
+section{padding:64px 0;border-top:1px solid var(--rule)}
+section.alt{background:var(--sheet)}
+.intro{color:var(--muted);font-size:1.05rem}
+
+/* knob demo */
+.demo{display:grid;grid-template-columns:260px 1fr;gap:0;background:var(--sheet);border:1px solid var(--ink);margin-top:28px}
+.alt .demo{background:var(--paper)}
+.controls{padding:22px;border-right:1px solid var(--ink)}
+.controls label{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.85rem;margin-top:16px}
+.controls label:first-child{margin-top:0}
+.controls input[type=range]{width:100%;accent-color:var(--dim);margin:6px 0 0}
+.readout{margin-top:22px;padding-top:14px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:.8rem;color:var(--muted);line-height:1.7}
+.readout b{color:var(--ink);font-weight:500}
+.drawing{padding:10px}
+.drawing svg{width:100%;height:auto;display:block}
+.drawing .part{fill:var(--dim-soft);stroke:var(--ink);stroke-width:1.6;stroke-linejoin:round}
+.drawing .dim{stroke:var(--dim);stroke-width:1;fill:none}
+.drawing text{font-family:var(--mono);font-size:12px;fill:var(--dim)}
+.drawing .view{fill:var(--muted)}
+
+/* architecture */
+.arch{display:grid;grid-template-columns:1fr 70px 1.2fr;gap:0;align-items:stretch;margin-top:28px}
+.box{border:1px solid var(--ink);background:var(--sheet);padding:18px 20px}
+.box h3{font-size:1rem}
+.box ul{margin:8px 0 0;padding-left:1.1em;font-size:.93rem;color:var(--muted)}
+.stack{display:flex;flex-direction:column;gap:14px}
+.bus{display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.72rem;color:var(--dim);text-align:center;line-height:1.3;writing-mode:vertical-rl;transform:rotate(180deg);border-left:2px solid var(--dim);border-right:2px solid var(--dim);margin:0 18px;letter-spacing:.04em}
+.rules{display:grid;grid-template-columns:repeat(2,1fr);gap:26px 40px;margin-top:40px}
+.rules p{margin:0;font-size:.97rem;color:var(--muted)}
+
+/* loop */
+ol.loop{list-style:none;padding:0;margin:28px 0 0;counter-reset:s;display:grid;grid-template-columns:repeat(5,1fr);border:1px solid var(--ink)}
+ol.loop li{counter-increment:s;padding:18px 16px;border-right:1px solid var(--ink);font-size:.92rem;background:var(--sheet)}
+ol.loop li:last-child{border-right:0}
+ol.loop li::before{content:counter(s);display:block;font-family:var(--display);font-weight:700;font-size:1.8rem;color:var(--dim);line-height:1;margin-bottom:8px}
+ol.loop strong{display:block;font-family:var(--display);font-size:1.05rem;margin-bottom:4px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:32px}
+.pair figure{margin:0;background:var(--sheet);border:1px solid var(--rule);padding:10px}
+.pair img{display:block;width:100%;height:auto}
+.pair figcaption{font-size:.85rem;color:var(--muted);padding:8px 2px 0}
+
+/* code */
+pre{background:var(--code-bg);color:var(--code-ink);padding:18px 20px;overflow-x:auto;font-size:.82rem;line-height:1.65;margin:0;border-radius:2px}
+pre .c{color:#7e91a5}
+pre .k{color:#8fb8ff}
+pre .s{color:#a7d6a0}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:28px}
+.cols h3{margin-bottom:10px}
+.cols p{font-size:.95rem;color:var(--muted);margin-top:12px}
+
+/* roadmap */
+.road{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:28px}
+.road ul{list-style:none;margin:0;padding:0}
+.road li{padding:10px 0 10px 30px;border-bottom:1px solid var(--rule);position:relative;font-size:.95rem}
+.road li::before{content:"";position:absolute;left:2px;top:15px;width:14px;height:14px;border:2px solid var(--ink)}
+.road .done li::before{background:var(--dim);border-color:var(--dim)}
+.road li b{font-weight:600}
+.road li span{color:var(--muted)}
+
+/* title block footer */
+footer{padding:0 0 48px}
+.titleblock{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;border:2px solid var(--ink);background:var(--sheet);margin-top:8px}
+.titleblock div{padding:12px 16px;border-right:1px solid var(--ink);font-size:.85rem}
+.titleblock div:last-child{border-right:0}
+.titleblock small{display:block;color:var(--muted);font-size:.72rem;margin-bottom:2px}
+.titleblock .big{font-family:var(--display);font-weight:700;font-size:1.35rem}
+
+@media (max-width:860px){
+  .hero .wrap,.demo,.cols,.road,.rules,.pair{grid-template-columns:1fr}
+  .controls{border-right:0;border-bottom:1px solid var(--ink)}
+  .arch{grid-template-columns:1fr}
+  .bus{writing-mode:horizontal-tb;transform:none;border:0;border-top:2px solid var(--dim);border-bottom:2px solid var(--dim);margin:14px 0;padding:6px}
+  ol.loop{grid-template-columns:1fr}
+  ol.loop li{border-right:0;border-bottom:1px solid var(--ink)}
+  ol.loop li:last-child{border-bottom:0}
+  .titleblock{grid-template-columns:1fr 1fr}
+  .titleblock div{border-bottom:1px solid var(--ink)}
+  nav .links{display:none}
+}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="logo.svg" alt="">agcad</a>
+    <div class="links">
+      <a href="#knobs">Parametric</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#showcase">Showcase</a>
+      <a href="#protocol">Protocol</a>
+      <a href="#mcp">MCP</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="https://github.com/sy-borg/agcad">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div>
+      <h1>A CAD whose primary user is an AI agent.</h1>
+      <p class="lede">agcad is a headless parametric CAD. The agent writes a short script, the engine builds watertight solids, and you get STL and 3MF files ready for the slicer. <strong>The viewer is just another client.</strong></p>
+      <div class="btns">
+        <a class="btn primary" href="#quickstart">Get started</a>
+        <a class="btn" href="https://github.com/sy-borg/agcad">View on GitHub</a>
+      </div>
+      <div class="tags"><span>Rust</span><span>Python client</span><span>MCP server</span><span>MIT</span></div>
+    </div>
+    <figure>
+      <img src="examples/cross_block/compare.png" alt="A drawing of a cross block next to the 3D model agcad rebuilt from it">
+      <figcaption>A drawing in, a parametric part out. The agent read the dimensions off the picture and rebuilt the part with a script.</figcaption>
+    </figure>
+  </div>
+</header>
+
+<section id="knobs" class="alt">
+  <div class="wrap">
+    <h2>The program is the function</h2>
+    <p class="intro">The agent doesn't edit a feature tree. It authors a parametric program with named parameters and expressions, then turns knobs. Every change replays the whole program, and entity ids stay the same. Try it on the cross block from the showcase.</p>
+
+    <div class="demo">
+      <div class="controls">
+        <label for="span"><span>span</span><span id="v-span">45 mm</span></label>
+        <input id="span" type="range" min="30" max="70" value="45">
+        <label for="arm"><span>arm</span><span id="v-arm">15 mm</span></label>
+        <input id="arm" type="range" min="8" max="30" value="15">
+        <label for="height"><span>height</span><span id="v-height">50 mm</span></label>
+        <input id="height" type="range" min="20" max="80" value="50">
+        <div class="readout">
+          set_parameter("arm", <b id="r-arm">15</b>)<br>
+          entity <b>#1</b> · ids unchanged<br>
+          volume <b id="r-vol">0</b> cm³
+        </div>
+      </div>
+      <div class="drawing">
+        <svg id="drw" viewBox="0 0 760 340" role="img" aria-label="Plan and front view of the cross block, updating with the sliders"></svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <h2>The bus is the product</h2>
+    <p class="intro">agcad inverts the usual GUI-first design. A headless core and its command bus do the work. The agent's client and the human's viewer both talk to that bus and nothing else.</p>
+
+    <div class="arch">
+      <div class="stack">
+        <div class="box"><h3>Agents and scripts</h3><ul><li>Python client, no dependencies</li><li>MCP server for any agent host</li><li>Any language that speaks JSON-RPC</li></ul></div>
+        <div class="box"><h3>agcad-view</h3><ul><li>wgpu viewer for the human</li><li>Pulls snapshots with <code>get_scene</code></li><li>Owns no document state</li></ul></div>
+      </div>
+      <div class="bus">JSON-RPC · stdio / TCP</div>
+      <div class="box">
+        <h3>agcad server and core</h3>
+        <ul>
+          <li>Documents, entities, parameters and the program</li>
+          <li>Booleans, sketches with constraints, extrude, revolve</li>
+          <li>Fillet and chamfer with geometric edge filters</li>
+          <li>Undo and redo for everything on the bus</li>
+          <li>Deterministic tessellation and a software renderer</li>
+          <li>STL, 3MF and <code>.agcad</code> export</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="rules">
+      <div><h3>One API</h3><p>No side channel exists between the viewer and the engine. Every client gets the same scriptable surface.</p></div>
+      <div><h3>Deterministic</h3><p>Integer ids, stable tessellation and replayable command sequences. Tests and agents can rely on exact repetition.</p></div>
+      <div><h3>Built for agents</h3><p>Errors carry recovery hints. A new entity arrives with its full mesh, so there is no second round trip.</p></div>
+      <div><h3>A dumb renderer</h3><p>The viewer draws buffers and owns no logic. Anything it can show, a script can reproduce.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="showcase" class="alt">
+  <div class="wrap">
+    <h2>From a picture to a printable part</h2>
+    <p class="intro">The agent is handed a drawing with a front and a 3/4 view. It writes <code>examples/cross_block.py</code>, renders its own model headlessly, and compares the silhouette to the drawing (0.99 IoU).</p>
+
+    <ol class="loop">
+      <li><strong>Read</strong>Derive 45 × 45 mm in plan, 15 mm arms, 50 mm tall from the 9 mm scale bar.</li>
+      <li><strong>Author</strong>Write a parametric program: <code>span</code>, <code>arm</code>, <code>height</code>, twelve sketch lines, <code>extrude</code>.</li>
+      <li><strong>Check</strong>Call <code>render_offscreen</code> from the drawing's camera and compare silhouettes.</li>
+      <li><strong>Finish</strong>Round the top and bottom rims with <code>fillet</code> and a normals filter. Leave the sharp plan corners alone.</li>
+      <li><strong>Deliver</strong>Export STL and 3MF for the slicer, plus a <code>.agcad</code> that reopens with its knobs.</li>
+    </ol>
+
+    <div class="pair">
+      <figure>
+        <img src="examples/cross_block/rounded.png" alt="The finished cross block with rounded top and bottom rims">
+        <figcaption>The finished part: 1 mm rounds on the rims, driven by the <code>round_r</code> knob.</figcaption>
+      </figure>
+      <figure>
+        <img src="logo.svg" alt="The agcad logo: a snowman assembled from spheres, a cylinder and boxes">
+        <figcaption>The logo is the hello world of agcad: three spheres, a cylinder and a couple of boxes. See <code>examples/draw_snowman_family.py</code>.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="protocol">
+  <div class="wrap">
+    <h2>A protocol an agent can learn in a minute</h2>
+    <p class="intro">Line-delimited JSON-RPC 2.0, one request and one response per line. Dimensions are expressions over named parameters, in millimeters and degrees, with Z up.</p>
+
+    <div class="cols">
+      <div>
+        <h3>On the wire</h3>
+<pre><span class="c">// request</span>
+{"jsonrpc":"2.0","id":1,"method":"add_box",
+ "params":{"doc":1,"name":"base",
+  "center":[0,0,<span class="s">"wall/2"</span>],
+  "size":[80,40,<span class="s">"wall*2"</span>]}}
+
+<span class="c">// response: the mesh comes back with the entity</span>
+{"jsonrpc":"2.0","id":1,
+ "result":{"entity_created":
+  {"doc":1,"entity":1,"mesh":{...}}}}</pre>
+        <p>Commands cover documents, primitives, booleans, sketches and constraints, extrude, revolve, fillet, chamfer, export, undo and redo, and rendering.</p>
+      </div>
+      <div>
+        <h3>From Python</h3>
+<pre><span class="k">from</span> agcad <span class="k">import</span> Agcad
+
+<span class="k">with</span> Agcad.spawn() <span class="k">as</span> cad:
+    cad.initialize()
+    doc = cad.create_document(<span class="s">"bracket"</span>)[<span class="s">"doc"</span>]
+
+    cad.set_parameter(doc, <span class="s">"wall"</span>, 2.0,
+        description=<span class="s">"plate thickness [mm]"</span>)
+    base = cad.add_box(doc, <span class="s">"base"</span>,
+        center=(0, 0, <span class="s">"wall/2"</span>),
+        size=(<span class="s">"plate"</span>, 40, <span class="s">"wall*2"</span>))
+
+    cad.set_parameter(doc, <span class="s">"wall"</span>, 4.0)
+    <span class="c"># rebuilds everything, ids unchanged</span>
+    cad.undo(doc)</pre>
+        <p>The expression grammar is tiny and safe: <code>+ - * /</code>, parentheses, identifiers. A typo lists the valid parameter names.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="mcp" class="alt">
+  <div class="wrap">
+    <h2>Plug it into your agent</h2>
+    <p class="intro">The MCP server is another adapter over the bus. It has no dependencies, and it exposes two tools, one per intent, to keep round trips cheap. The handshake returns instructions that teach the agent the command language, so no README is needed.</p>
+
+    <div class="cols">
+      <div>
+        <h3>Claude Desktop and other hosts</h3>
+<pre>{
+  "mcpServers": {
+    "agcad": {
+      "command": "/path/to/agcad/.venv/bin/agcad-mcp"
+    }
+  }
+}</pre>
+        <p><code>agcad_execute</code> runs a batch of bus commands and stops at the first error with a recovery hint. <code>agcad_scene</code> returns a compact state without raw meshes.</p>
+      </div>
+      <div>
+        <h3>Watch the agent draw</h3>
+<pre><span class="c"># 1. shared backend</span>
+./target/debug/agcad --tcp 7860
+
+<span class="c"># 2. point the MCP server at it</span>
+AGCAD_CONNECT=127.0.0.1:7860 agcad-mcp
+
+<span class="c"># 3. the viewer refreshes on every change</span>
+./target/debug/agcad-view --port 7860</pre>
+        <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation. Without <code>AGCAD_CONNECT</code>, the MCP server runs a private engine.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <h2>Quickstart</h2>
+    <div class="cols">
+      <div>
+        <h3>Build and run the agent seat</h3>
+<pre>cargo build
+
+python3 -m venv .venv
+.venv/bin/pip install -e ./python
+.venv/bin/python examples/hello_agcad.py</pre>
+      </div>
+      <div>
+        <h3>Add the human seat</h3>
+<pre>./target/debug/agcad --tcp 7860 &amp;
+./target/debug/agcad-view --port 7860
+
+<span class="c"># drag = orbit, wheel = zoom, R = refresh</span></pre>
+      </div>
+    </div>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/agcad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches and a save and load round trip.</p>
+  </div>
+</section>
+
+<section id="roadmap" class="alt">
+  <div class="wrap">
+    <h2>Roadmap</h2>
+    <p class="intro">The script is the source of truth. The next milestones make the agent-authored script loop trustworthy and expressive. A GUI feature tree is deliberately not on the list.</p>
+
+    <div class="road">
+      <div class="done">
+        <h3>Shipped</h3>
+        <ul>
+          <li><b>Bus, engine, clients</b> <span>Python client and wgpu viewer</span></li>
+          <li><b>Parametric layer</b> <span>parameters, expressions, replay</span></li>
+          <li><b>MCP and live preview</b> <span>shared engine, auto-refresh</span></li>
+          <li><b>Mesh booleans</b> <span>Manifold, bit-deterministic</span></li>
+          <li><b>Headless rendering</b> <span>software rasterizer, ortho cameras</span></li>
+          <li><b>Sketches and constraints</b> <span>deterministic solver</span></li>
+          <li><b>Extrude and revolve</b> <span>watertight, printable solids</span></li>
+          <li><b>Persistence</b> <span>byte-stable <code>.agcad</code> files</span></li>
+          <li><b>Fillet and chamfer</b> <span>geometric edge filters</span></li>
+          <li><b>3MF export</b> <span>named, colored objects</span></li>
+          <li><b>Face and datum sketch planes</b></li>
+          <li><b>Script as source</b> <span>embedded scripts, <code>get_script</code></span></li>
+        </ul>
+      </div>
+      <div>
+        <h3>Next</h3>
+        <ul>
+          <li><b>M13 Labels and pick</b> <span>click a face, hand the agent a selector</span></li>
+          <li><b>M14 Validate and scene diff</b> <span>prove the rebuild is correct</span></li>
+          <li><b>M15 Incremental rebuild</b> <span>replay only what a knob affects</span></li>
+          <li><b>M16 Shape leverage</b> <span>patterns, mirror, shell, sweep, loft, holes</span></li>
+          <li><b>M17 Sketch completeness</b> <span>arcs, splines, more constraints</span></li>
+          <li><b>M18 Interoperability</b> <span>mesh import, DXF/SVG, STEP</span></li>
+          <li><b>M19 Assemblies and drawings</b></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="titleblock">
+      <div><small>Project</small><span class="big">agcad</span></div>
+      <div><small>Licence</small><a href="https://github.com/sy-borg/agcad/blob/master/LICENSE">MIT</a></div>
+      <div><small>Source</small><a href="https://github.com/sy-borg/agcad">sy-borg/agcad</a></div>
+      <div><small>Status</small>Milestone 12</div>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var $ = function(id){return document.getElementById(id)};
+  var span=$("span"), arm=$("arm"), height=$("height"), svg=$("drw");
+  var K=3.1; // px per mm
+  function dimH(x1,x2,y,label){
+    return '<path class="dim" d="M'+x1+' '+(y-6)+'V'+(y+6)+'M'+x2+' '+(y-6)+'V'+(y+6)+'M'+x1+' '+y+'H'+x2+'"/>'+
+           '<text x="'+((x1+x2)/2)+'" y="'+(y+18)+'" text-anchor="middle">'+label+'</text>';
+  }
+  function dimV(y1,y2,x,label){
+    return '<path class="dim" d="M'+(x-6)+' '+y1+'H'+(x+6)+'M'+(x-6)+' '+y2+'H'+(x+6)+'M'+x+' '+y1+'V'+y2+'"/>'+
+           '<text x="'+(x+10)+'" y="'+((y1+y2)/2+4)+'">'+label+'</text>';
+  }
+  function draw(){
+    var S=+span.value, a=+arm.value, H=+height.value;
+    if(a>S-6){a=S-6; arm.value=a;}
+    var s=S/2*K, h=a/2*K, cx=190, cy=172;
+    var pts=[[-h,-s],[h,-s],[h,-h],[s,-h],[s,h],[h,h],[h,s],[-h,s],[-h,h],[-s,h],[-s,-h],[-h,-h]]
+      .map(function(p){return (cx+p[0]).toFixed(1)+','+(cy+p[1]).toFixed(1)}).join(' ');
+    var w=S*K, hh=H*K, ex=560-w/2, base=300;
+    var out='';
+    out+='<polygon class="part" points="'+pts+'"/>';
+    out+=dimH(cx-s,cx+s,cy+s+22,S+' mm');
+    out+='<path class="dim" d="M'+(cx-h)+' '+(cy-s-14)+'V'+(cy-s-26)+'M'+(cx+h)+' '+(cy-s-14)+'V'+(cy-s-26)+'M'+(cx-h)+' '+(cy-s-20)+'H'+(cx+h)+'"/>'+
+         '<text x="'+(cx+h+8)+'" y="'+(cy-s-16)+'">'+a+' mm</text>';
+    out+='<text class="view" x="'+cx+'" y="26" text-anchor="middle">plan</text>';
+    out+='<rect class="part" x="'+ex.toFixed(1)+'" y="'+(base-hh).toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+hh.toFixed(1)+'"/>';
+    out+=dimV(base-hh,base,ex+w+26,H+' mm');
+    out+=dimH(ex,ex+w,base+22,S+' mm');
+    out+='<text class="view" x="560" y="26" text-anchor="middle">front</text>';
+    svg.innerHTML=out;
+    var vol=(2*S*a-a*a)*H/1000;
+    $("v-span").textContent=S+" mm"; $("v-arm").textContent=a+" mm"; $("v-height").textContent=H+" mm";
+    $("r-arm").textContent=a; $("r-vol").textContent=vol.toFixed(1);
+  }
+  [span,arm,height].forEach(function(el){el.addEventListener("input",draw)});
+  draw();
+})();
+</script>
+</body>
+</html>
