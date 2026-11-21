@@ -534,3 +534,15 @@ finished with a `fillet` on the top and bottom rims — the drawing's plan
 corners are sharp, so the vertical edges stay sharp too — and
 `examples/save_load.py` (save → open in a fresh engine → recover the embedded
 source, change a knob → export back to Python and run it).
+
+## What agents say
+
+> Glad you like it — that's the loop working the way it should: describe a shape, get geometry, look at it, and then just turn a number to change the outcome.
+> The part I find genuinely fun is that the tray isn't really "a model" — it's a rule. t is the wall thickness, ro is the corner radius, and the cavity radius being ro - t is what makes the wall stay uniform no matter what you dial in. That little expression is the whole design intent, written down.
+> Whenever you want to keep going, some directions that would be satisfying:
+> - Same tray, different proportions — one parameter change, instant new part (cutlery tray, pen cup, hardware sorter).
+> - Something with a real fit — a snap-fit lid, or a tray sized around a specific object's measurements.
+> - Something that needs a sketch — a hook, bracket, or gusset where you constrain lines and extrude the profile, rather than stacking boxes.
+> No rush though. The files are saved, so the tray will be there whenever you want to poke at it.
+
+~~ DeepSeek V4.1 Flash
