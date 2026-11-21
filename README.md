@@ -277,9 +277,10 @@ Two limits worth knowing:
   lowest id). With several documents, close the stale ones or reuse one; a
   document picker is future work.
 - the viewer is a renderer, not an editor: the human can orbit, zoom and watch
-  live updates, but cannot click a face to hand it back to the agent. The agent
-  addresses geometry with the geometric filters (`near`, normals) instead.
-  Picking is on the roadmap.
+  live updates, but cannot yet click a face to hand it back to the agent. The
+  agent addresses geometry with the geometric filters (`near`, normals)
+  instead; M13 adds labels and click-to-select that emits exactly those
+  selectors.
 
 ## Exposing it to an agent: MCP
 
@@ -362,9 +363,10 @@ This session is private. For the human/agent loop, start
 
 Direction: **the script is the source of truth**. The next milestones make the
 agent-authored script loop trustworthy and expressive — validation, shape and
-sketch coverage, interoperability — rather than building a GUI feature tree.
-Feature-history editing is deliberately not a goal: replay is deterministic and
-`set_parameter` covers knob turns, while the script remains the editing surface.
+sketch coverage, interoperability — and give the human a concrete way to point
+at geometry, rather than building a GUI feature tree. Feature-history editing is
+deliberately not a goal: replay is deterministic and `set_parameter` covers knob
+turns, while the script remains the editing surface.
 
 ### Shipped
 
@@ -449,33 +451,43 @@ Feature-history editing is deliberately not a goal: replay is deterministic and
 
 ### Next
 
-- [ ] **M13 — Trust: `validate` + scene diff**: check watertightness,
+- [ ] **M13 — Human reference: labels + `pick`**: the viewer labels entities
+      as `name #id` (toggleable, projected from the world bbox, with leader
+      dots) so a human can say “make `boss #3` taller”. A click sends a
+      world-space ray to a new `pick{doc, ray}` bus command, which answers with
+      the entity, hit point, face normal and a ready-made geometric selector —
+      `{entity, normal, near}` for a face, `{direction, near, near_radius}` for
+      an edge. The human hands that selector to the agent, who passes it
+      straight to `fillet`/`chamfer`/`add_sketch`. Picking lives in the engine
+      (reusing the planar-face grouping and `sharp_edges`), so the viewer stays
+      dumb and no parallel face-ID namespace appears. Sequence: labels, then
+      `pick`, then a selector HUD/copy
+- [ ] **M14 — Trust: `validate` + scene diff**: check watertightness,
       self-intersection, volume/bbox and (cheap) minimum wall per solid, and
       compare two revisions by entity signature. Regeneration is only a
       substitute for feature editing if the agent can prove the rebuild is
       correct and identify what changed
-- [ ] **M14 — Speed: incremental rebuild**: `set_parameter` currently replays
+- [ ] **M15 — Speed: incremental rebuild**: `set_parameter` currently replays
       the whole program. Track dependencies so a knob change rebuilds only the
       features downstream of it; keep the full replay as the correctness
       oracle
-- [ ] **M15 — Shape leverage**: linear and circular patterns, mirror, shell,
+- [ ] **M16 — Shape leverage**: linear and circular patterns, mirror, shell,
       sweep/loft, and a real hole feature (counterbore/countersink). These
       remove the most manual profile work for printable parts
-- [ ] **M16 — Sketch completeness**: arcs and splines; tangent, equal,
+- [ ] **M17 — Sketch completeness**: arcs and splines; tangent, equal,
       concentric, symmetric, angle and point-on-line constraints; construction
       geometry; trim/extend/offset; conflict diagnostics that name the
       over-constrained equations
-- [ ] **M17 — Interoperability**: mesh import (STL/OBJ/3MF), DXF/SVG for 2D
+- [ ] **M18 — Interoperability**: mesh import (STL/OBJ/3MF), DXF/SVG for 2D
       output, and a STEP path (with an explicit B-rep vs tessellation
       decision). An agent handed a real CAD file should be able to participate
-- [ ] **M18 — Assemblies and drawings**: parts/instances, mates, interference
+- [ ] **M19 — Assemblies and drawings**: parts/instances, mates, interference
       and BOM; drawing views with dimensions and annotations. The two pillars
       still missing from “general parametric CAD”
 - [ ] **Later / UI polish**: `patch_program` for script-less MCP documents,
       shaded-with-edges rendering (a thin outline where faces meet, so front
       views read as CAD drawings), a viewer document picker (today it shows the
-      lowest-id document), occlusion picking, a Rust MCP server and PyO3
-      bindings
+      lowest-id document), a Rust MCP server and PyO3 bindings
 
 ## Status
 
@@ -503,7 +515,9 @@ and actionable errors), and the script-as-source contract (embedded source
 returned by `get_program`, `get_script` recovering the original text, and
 save/open preserving it).
 
-The next milestones are deliberately agent-first: prove the rebuild with
+The next milestone is the human side of the loop: M13 labels entities
+(`name #id`) and turns a click into a `pick` result carrying the geometric
+selector the agent already understands. After that, prove the rebuild with
 `validate` and a scene diff, make replay incremental, then widen the shape and
 sketch vocabulary. A GUI feature tree is not on the list — the agent edits the
 script and replays.
