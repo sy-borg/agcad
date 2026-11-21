@@ -186,7 +186,7 @@ pub fn sharp_edges(mesh: &Mesh, min_angle_deg: f64) -> Result<Vec<SharpEdge>, Er
 /// Weld vertices by exact f32 bits. Primitives emit face-local duplicates;
 /// booleans emit already-welded meshes. Exact bits are enough because the
 /// generators are deterministic.
-fn weld(mesh: &Mesh) -> Result<(Vec<[f64; 3]>, Vec<u32>), Error> {
+pub(crate) fn weld(mesh: &Mesh) -> Result<(Vec<[f64; 3]>, Vec<u32>), Error> {
     let mut ids: BTreeMap<[u32; 3], u32> = BTreeMap::new();
     let mut positions: Vec<[f64; 3]> = Vec::new();
     let mut remap: Vec<u32> = Vec::with_capacity(mesh.positions.len());

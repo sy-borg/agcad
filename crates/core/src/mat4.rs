@@ -170,6 +170,17 @@ pub fn transform_point(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Transform a direction (w = 0): a model matrix's rotation and scale apply,
+/// its translation does not.
+pub fn transform_direction(m: &Mat4, v: [f64; 3]) -> [f64; 3] {
+    let (x, y, z) = (v[0] as f32, v[1] as f32, v[2] as f32);
+    [
+        (m[0][0] * x + m[1][0] * y + m[2][0] * z) as f64,
+        (m[0][1] * x + m[1][1] * y + m[2][1] * z) as f64,
+        (m[0][2] * x + m[1][2] * y + m[2][2] * z) as f64,
+    ]
+}
+
 /// Transform a homogeneous point (w = 1) by a matrix, returning the 4-vector.
 pub fn transform_h(m: &Mat4, p: [f64; 3]) -> [f64; 4] {
     let (x, y, z) = (p[0] as f32, p[1] as f32, p[2] as f32);

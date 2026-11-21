@@ -1,6 +1,6 @@
 {
   "format": "agcad-document",
-  "version": 1,
+  "version": 2,
   "protocol": 1,
   "name": "cross_block",
   "parameters": {

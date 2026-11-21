@@ -34,6 +34,62 @@ class AgcadError(RuntimeError):
     usually contains a hint on how to recover."""
 
 
+_DATUM_PLANES = ("xy", "xz", "yz")
+
+
+def _sketch_plane_payload(plane: Any, offset: float | str | None) -> dict | None:
+    """Normalize the client's `plane` sugar into the wire `SketchPlane`.
+
+    Accepted forms:
+      * ``None`` → the XY datum plane at the origin
+      * ``"xy" | "xz" | "yz"`` → a datum plane (``offset`` shifts it along
+        its normal)
+      * ``{"plane": "xy", "offset": 5}`` → a datum plane
+      * ``{"entity": 1, "normal": [0, 0, 1], "near": [...]}`` → a face
+      * ``{"face": {...}}`` → a face (wire form, passed through)
+      * ``{"origin": [...], "normal": [...], "x_axis": [...]}`` → a custom
+        plane
+      * ``{"datum": {...}}`` / ``{"custom": {...}}`` → wire form, passed
+        through
+    """
+    if plane is None:
+        if offset is None:
+            return None
+        plane = "xy"
+    if isinstance(plane, str):
+        if plane not in _DATUM_PLANES:
+            raise ValueError(f"plane must be one of {_DATUM_PLANES}, a face/custom dict, or None (got {plane!r})")
+        spec: dict[str, Any] = {"plane": plane}
+        if offset is not None:
+            spec["offset"] = offset
+        return {"datum": spec}
+    if not isinstance(plane, dict):
+        raise TypeError("plane must be a string, a dict, or None")
+
+    if offset is not None and "datum" not in plane and "plane" not in plane:
+        raise ValueError("offset only applies to a datum plane (plane='xy'/'xz'/'yz' or {'plane': ...})")
+
+    payload = dict(plane)
+    if "datum" in payload:
+        if offset is not None:
+            payload["datum"] = {**payload["datum"], "offset": offset}
+        return payload
+    if "custom" in payload or "face" in payload:
+        return payload
+    if "plane" in payload:
+        if offset is not None:
+            payload["offset"] = offset
+        return {"datum": payload}
+    if "origin" in payload:
+        return {"custom": payload}
+    if "entity" in payload:
+        return {"face": payload}
+    raise ValueError(
+        "plane dict must contain 'plane' (datum), 'origin' + 'normal' (custom), "
+        "or 'entity' / 'face' (an existing solid's face)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # transports: send(str) + recv(id) — one in-flight request per client, which
 # is exactly what an agent loop wants. JSON-RPC allows pipelining later.
@@ -452,9 +508,42 @@ class Agcad:
     # transform. Coordinates and constraint values may be expression
     # strings, so sketches re-solve when parameters change.
 
-    def add_sketch(self, doc: int, name: str = "sketch") -> dict[str, Any]:
-        """Create an empty sketch (default placement: XY plane at origin)."""
-        return self._request("add_sketch", doc=doc, name=name)
+    def add_sketch(
+        self,
+        doc: int,
+        name: str = "sketch",
+        plane: str | dict[str, Any] | None = None,
+        offset: float | str | None = None,
+    ) -> dict[str, Any]:
+        """Create an empty sketch, optionally on a datum plane or a solid face.
+
+        ``plane`` accepts:
+
+        * ``None`` — the XY datum plane at the origin (the default);
+        * ``"xy"``, ``"xz"``, ``"yz"`` — a standard datum plane. ``offset``
+          shifts it along its normal, and may be an expression;
+        * ``{"entity": id, "normal": [0, 0, 1]}`` — a planar face of an
+          existing solid. The sketch normal is the face's outward normal, so
+          ``extrude`` with a positive distance adds material in front of the
+          face and a negative distance cuts into the body. Add
+          ``"near": [x, y, z]`` to choose between parallel faces with the
+          same normal; the sketch origin is ``near`` projected onto the
+          chosen face, or the face center when omitted;
+        * ``{"origin": [x, y, z], "normal": [x, y, z], "x_axis": [...]}`` —
+          an explicit plane (``x_axis`` is optional and projected in-plane).
+
+        The datum frames are right-handed: ``xy`` has X=+X, Y=+Y, normal=+Z;
+        ``xz`` has X=+X, Y=+Z, normal=-Y; ``yz`` has X=+Y, Y=+Z, normal=+X.
+        A face or custom plane takes world +X projected onto the plane as its
+        local X (world +Y when the plane is nearly perpendicular to X). The
+        resolved frame is reported as ``sketch.plane`` in ``get_scene``.
+        """
+        return self._request(
+            "add_sketch",
+            doc=doc,
+            name=name,
+            plane=_sketch_plane_payload(plane, offset),
+        )
 
     def add_sketch_line(
         self,
@@ -535,8 +624,12 @@ class Agcad:
         """Extrude a closed sketch profile along the sketch normal.
 
         Holes are handled (nested loops alternate solid/hole). A negative
-        distance extrudes the other way. The solid follows later sketch
-        edits and replays parametrically. Returns ``volume`` and ``tris``.
+        distance extrudes the other way — on a sketch placed on a face, the
+        normal is the face's outward normal, so positive adds material in
+        front of the face and negative cuts into the body (combine with
+        ``boolean("difference", ...)`` to remove it). The solid follows
+        later sketch edits and replays parametrically. Returns ``volume``
+        and ``tris``.
         """
         return self._request(
             "extrude", doc=doc, sketch=sketch, distance=distance, name=name, color=color

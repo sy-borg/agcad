@@ -21,6 +21,7 @@ pub mod expr;
 pub mod fillet;
 pub mod geo;
 pub mod mat4;
+pub mod plane;
 pub mod render;
 pub mod sketch;
 pub mod solid;
@@ -33,8 +34,8 @@ use std::fmt;
 use agcad_protocol::{
     Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EdgeFilter,
     EntityId, EntitySnapshot, Mat4, Mesh, ParamInfo, Rgba, RevolveAxis, SavedParameter, Scalar,
-    SketchElement, SourceDoc, SVec3, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION,
-    SERVER_NAME,
+    SketchElement, SketchPlane, SourceDoc, SVec3, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION,
+    PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -167,6 +168,7 @@ impl Entity {
                         solved: *solved,
                         residual: *residual,
                         dof: *dof,
+                        plane: Some(plane::frame_from_transform(&transform)),
                     })
                 },
                 _ => None,
@@ -1021,7 +1023,11 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
 
         // --- sketches -------------------------------------------------------
 
-        Command::AddSketch { doc, name } => {
+        Command::AddSketch { doc, name, plane } => {
+            let (translation, rotation_deg) = match plane {
+                Some(plane) => resolve_sketch_plane(d, *doc, plane)?,
+                None => ([0.0; 3], [0.0; 3]),
+            };
             let id = d.next_entity();
             let shape = Shape::Sketch {
                 elements: Vec::new(),
@@ -1037,8 +1043,8 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 name: name.clone(),
                 shape,
                 mesh: sketch::display_mesh(&[]),
-                translation: [0.0; 3],
-                rotation_deg: [0.0; 3],
+                translation,
+                rotation_deg,
                 scale: [1.0; 3],
                 color: [0.15, 0.55, 0.85, 1.0],
             };
@@ -1236,6 +1242,51 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
 
         _ => Err(Error::Invalid("not a modeling command".into())),
     }
+}
+
+/// Resolve a requested sketch plane into the entity placement that puts the
+/// sketch's local XY on it. Face selection is world-space; `near` and the
+/// datum offset may be expressions, so replay follows a parameter change.
+fn resolve_sketch_plane(
+    d: &Document,
+    doc: DocId,
+    plane: &SketchPlane,
+) -> Result<(Vec3, Vec3)> {
+    let frame = match plane {
+        SketchPlane::Datum { plane, offset } => {
+            let offset = match offset {
+                Some(v) => d.resolve(v)?,
+                None => 0.0,
+            };
+            plane::datum_frame(*plane, offset)?
+        },
+        SketchPlane::Custom { origin, normal, x_axis } => {
+            let origin = d.resolve3(origin)?;
+            plane::custom_frame(origin, *normal, *x_axis)?
+        },
+        SketchPlane::Face { entity, near, normal, angle_tol_deg } => {
+            let near = near.as_ref().map(|v| d.resolve3(v)).transpose()?;
+            let e = d
+                .entities
+                .get(entity)
+                .ok_or(Error::UnknownEntity { doc, entity: *entity })?;
+            if matches!(e.shape, Shape::Sketch { .. }) {
+                return Err(Error::Invalid(format!(
+                    "entity {entity} is a sketch, not a solid (hint: a face plane needs an \
+                     existing solid; reference a box, extrude or boolean result, or use a datum \
+                     plane)"
+                )));
+            }
+            if e.mesh.indices.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "entity {entity} has no geometry to select a face from"
+                )));
+            }
+            let world = transform_mesh(&e.mesh, &e.transform());
+            plane::face_frame(&world, near, *normal, *angle_tol_deg, *entity)?
+        },
+    };
+    Ok(plane::placement(&frame))
 }
 
 /// Closed profile loops of a sketch plus its placement, for extrude/revolve.
@@ -2254,10 +2305,38 @@ mod tests {
     }
 
     fn add_sketch(e: &mut Engine, name: &str) -> EntityId {
-        match e.execute(Command::AddSketch { doc: 1, name: name.into() }).unwrap() {
+        match e.execute(Command::AddSketch { doc: 1, name: name.into(), plane: None }).unwrap() {
             CommandResult::EntityCreated { entity, .. } => entity,
             r => panic!("unexpected result {r:?}"),
         }
+    }
+
+    fn add_sketch_on(e: &mut Engine, name: &str, plane: SketchPlane) -> EntityId {
+        match e
+            .execute(Command::AddSketch {
+                doc: 1,
+                name: name.into(),
+                plane: Some(plane),
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn face_plane(entity: EntityId, normal: [f64; 3]) -> SketchPlane {
+        SketchPlane::Face { entity, near: None, normal: Some(normal), angle_tol_deg: None }
+    }
+
+    fn sketch_frame(e: &mut Engine, sketch: EntityId) -> agcad_protocol::SketchPlaneFrame {
+        sketch_snapshot(e, sketch)
+            .plane
+            .expect("sketch snapshots carry the resolved plane")
+    }
+
+    fn close_to(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() <= tol)
     }
 
     /// Rectangle profile built purely through the bus: the solver must
@@ -2431,10 +2510,10 @@ mod tests {
 
     // --- sketch → solid -----------------------------------------------------
 
-    /// A properly constrained rectangle profile (closed loop, axis-aligned),
-    /// so later constraints edit it without tearing the loop apart.
-    fn rect_sketch(e: &mut Engine, w: f64, h: f64) -> (EntityId, [u64; 4]) {
-        let s = add_sketch(e, "profile");
+    /// Add the four lines and constraints of an axis-aligned rectangle to an
+    /// existing sketch. The loop starts at the sketch origin and runs into
+    /// +X/+Y, so its placement is predictable on a face.
+    fn rect_in_sketch(e: &mut Engine, s: EntityId, w: f64, h: f64) -> [u64; 4] {
         let a = add_line(e, s, [0.0, 0.0], [w, 0.0]);
         let b = add_line(e, s, [w, 0.0], [w, h]);
         let c = add_line(e, s, [w, h], [0.0, h]);
@@ -2446,7 +2525,14 @@ mod tests {
         constrain(e, s, K::Horizontal, vec![wref(c)], None);
         constrain(e, s, K::Vertical, vec![wref(b)], None);
         constrain(e, s, K::Vertical, vec![wref(d)], None);
-        (s, [a, b, c, d])
+        [a, b, c, d]
+    }
+
+    /// A properly constrained rectangle profile (closed loop, axis-aligned),
+    /// so later constraints edit it without tearing the loop apart.
+    fn rect_sketch(e: &mut Engine, w: f64, h: f64) -> (EntityId, [u64; 4]) {
+        let s = add_sketch(e, "profile");
+        (s, rect_in_sketch(e, s, w, h))
     }
 
     fn extrude(e: &mut Engine, sketch: EntityId, distance: Scalar) -> (EntityId, f64, usize) {
@@ -2704,6 +2790,377 @@ mod tests {
         assert_eq!(snap.translation, [0.0, 0.0, 10.0], "solid must follow the sketch placement");
     }
 
+    // --- sketches on faces and datum planes ----------------------------------
+
+    #[test]
+    fn datum_planes_place_the_sketch_frame() {
+        use agcad_protocol::DatumPlane;
+
+        let mut e = engine();
+        // Default: XY at the origin.
+        let xy = add_sketch(&mut e, "xy");
+        let f = sketch_frame(&mut e, xy);
+        assert!(close_to(f.origin, [0.0; 3], 1e-9));
+        assert!(close_to(f.normal, [0.0, 0.0, 1.0], 1e-9));
+        assert!(close_to(f.x_axis, [1.0, 0.0, 0.0], 1e-9));
+
+        // Offset along the normal, right-handed local axes.
+        let xz = add_sketch_on(
+            &mut e,
+            "front",
+            SketchPlane::Datum { plane: DatumPlane::Xz, offset: Some(num(7.0)) },
+        );
+        let f = sketch_frame(&mut e, xz);
+        assert!(close_to(f.origin, [0.0, -7.0, 0.0], 1e-9), "{:?}", f.origin);
+        assert!(close_to(f.normal, [0.0, -1.0, 0.0], 1e-9));
+        assert!(close_to(f.x_axis, [1.0, 0.0, 0.0], 1e-9));
+
+        let yz = add_sketch_on(
+            &mut e,
+            "right",
+            SketchPlane::Datum { plane: DatumPlane::Yz, offset: Some(num(3.0)) },
+        );
+        let f = sketch_frame(&mut e, yz);
+        assert!(close_to(f.origin, [3.0, 0.0, 0.0], 1e-9), "{:?}", f.origin);
+        assert!(close_to(f.normal, [1.0, 0.0, 0.0], 1e-9));
+        assert!(close_to(f.x_axis, [0.0, 1.0, 0.0], 1e-9));
+
+        // The plane offset may be an expression and follows a knob.
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "plate".into(),
+            value: num(2.0),
+            description: None,
+        })
+        .unwrap();
+        let param = add_sketch_on(
+            &mut e,
+            "param",
+            SketchPlane::Datum {
+                plane: DatumPlane::Xy,
+                offset: Some(Scalar::Expression("plate*3".into())),
+            },
+        );
+        assert!((sketch_frame(&mut e, param).origin[2] - 6.0).abs() < 1e-9);
+        e.execute(Command::SetParameter { doc: 1, name: "plate".into(), value: num(4.0), description: None })
+            .unwrap();
+        assert!((sketch_frame(&mut e, param).origin[2] - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_plane_projects_an_in_plane_x_axis() {
+        let mut e = engine();
+        let s = add_sketch_on(
+            &mut e,
+            "tilted",
+            SketchPlane::Custom {
+                origin: [num(1.0), num(2.0), num(3.0)],
+                normal: [1.0, 0.0, 1.0],
+                x_axis: Some([2.0, 0.0, -2.0]),
+            },
+        );
+        let f = sketch_frame(&mut e, s);
+        assert!(close_to(f.origin, [1.0, 2.0, 3.0], 1e-9));
+        let inv = 1.0 / 2.0f64.sqrt();
+        assert!(close_to(f.normal, [inv, 0.0, inv], 1e-9), "{:?}", f.normal);
+        assert!(close_to(f.x_axis, [inv, 0.0, -inv], 1e-9), "{:?}", f.x_axis);
+    }
+
+    #[test]
+    fn sketch_on_the_top_face_extrudes_outward_or_into_the_body() {
+        let mut e = engine();
+        // Base spans z = 0..10; its top face is z = 10.
+        let base = add_box(&mut e, [0.0, 0.0, 5.0], [40.0, 30.0, 10.0]);
+        let top = add_sketch_on(&mut e, "top", face_plane(base, [0.0, 0.0, 1.0]));
+        let f = sketch_frame(&mut e, top);
+        assert!(close_to(f.origin, [0.0, 0.0, 10.0], 1e-6), "{:?}", f.origin);
+        assert!(close_to(f.normal, [0.0, 0.0, 1.0], 1e-9));
+        assert!(close_to(f.x_axis, [1.0, 0.0, 0.0], 1e-9));
+        rect_in_sketch(&mut e, top, 10.0, 8.0);
+
+        // Positive: material in front of the face.
+        let (boss, volume, _) = extrude(&mut e, top, num(4.0));
+        assert!((volume - 320.0).abs() < 1e-6, "volume {volume}");
+        let bb = entity_snapshot(&mut e, boss).world_bbox;
+        assert!((bb.min[2] - 10.0).abs() < 1e-5 && (bb.max[2] - 14.0).abs() < 1e-5, "{bb:?}");
+
+        // Negative: the same profile goes into the body instead.
+        let mut into = engine();
+        let base = add_box(&mut into, [0.0, 0.0, 5.0], [40.0, 30.0, 10.0]);
+        let top = add_sketch_on(&mut into, "top", face_plane(base, [0.0, 0.0, 1.0]));
+        rect_in_sketch(&mut into, top, 10.0, 8.0);
+        let (cutter, _, _) = extrude(&mut into, top, num(-3.0));
+        let bb = entity_snapshot(&mut into, cutter).world_bbox;
+        assert!((bb.min[2] - 7.0).abs() < 1e-5 && (bb.max[2] - 10.0).abs() < 1e-5, "{bb:?}");
+    }
+
+    #[test]
+    fn a_planar_cap_is_one_face_even_when_tessellated() {
+        let mut e = engine();
+        // A 32-facet cylinder's top cap: the fan's triangles are coplanar,
+        // so they must group into one face, not 32 slivers.
+        let post = match e
+            .execute(Command::AddCylinder {
+                doc: 1,
+                name: "post".into(),
+                center: [num(0.0), num(0.0), num(10.0)],
+                radius: num(10.0),
+                height: num(20.0),
+                segments: Some(32),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let top = add_sketch_on(&mut e, "cap", face_plane(post, [0.0, 0.0, 1.0]));
+        let f = sketch_frame(&mut e, top);
+        assert!(close_to(f.origin, [0.0, 0.0, 20.0], 1e-5), "{:?}", f.origin);
+        assert!(close_to(f.normal, [0.0, 0.0, 1.0], 1e-9));
+        assert!(close_to(f.x_axis, [1.0, 0.0, 0.0], 1e-9));
+    }
+
+    #[test]
+    fn a_face_sketch_pocket_cuts_the_body() {
+        let mut e = engine();
+        let base = add_box(&mut e, [0.0, 0.0, 5.0], [40.0, 30.0, 10.0]);
+        let top = add_sketch_on(&mut e, "pocket", face_plane(base, [0.0, 0.0, 1.0]));
+
+        // A 10 x 8 rectangle around the face origin.
+        let pts = [[-5.0, -4.0], [5.0, -4.0], [5.0, 4.0], [-5.0, 4.0]];
+        for i in 0..4 {
+            add_line(&mut e, top, pts[i], pts[(i + 1) % 4]);
+        }
+        let (cutter, cutter_volume, _) = extrude(&mut e, top, num(-3.0));
+        assert!((cutter_volume - 240.0).abs() < 1e-6);
+
+        let result = match e
+            .execute(Command::Boolean {
+                doc: 1,
+                op: BooleanOp::Difference,
+                entities: vec![base, cutter],
+                name: Some("pocketed".into()),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let snap = entity_snapshot(&mut e, result);
+        let volume = crate::fillet::signed_volume(&snap.mesh);
+        assert!((volume - (12000.0 - 240.0)).abs() < 1e-3, "volume {volume}");
+        // The pocket is open at the top, so the world bbox is unchanged.
+        assert!((snap.world_bbox.max[2] - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_face_sketch_follows_a_parameter_change() {
+        let mut e = engine();
+        e.execute(Command::SetParameter { doc: 1, name: "h".into(), value: num(10.0), description: None })
+            .unwrap();
+        let base = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "base".into(),
+                center: [num(0.0), num(0.0), Scalar::Expression("h/2".into())],
+                size: [num(40.0), num(30.0), Scalar::Expression("h".into())],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        // No `near`: the +Z normal alone is unambiguous, so the sketch
+        // follows the top face as the body grows.
+        let top = add_sketch_on(&mut e, "top", face_plane(base, [0.0, 0.0, 1.0]));
+        rect_in_sketch(&mut e, top, 10.0, 8.0);
+        let (boss, _, _) = extrude(&mut e, top, num(2.0));
+
+        let bb = entity_snapshot(&mut e, boss).world_bbox;
+        assert!((bb.min[2] - 10.0).abs() < 1e-5 && (bb.max[2] - 12.0).abs() < 1e-5, "{bb:?}");
+
+        e.execute(Command::SetParameter { doc: 1, name: "h".into(), value: num(25.0), description: None })
+            .unwrap();
+        assert!((sketch_frame(&mut e, top).origin[2] - 25.0).abs() < 1e-5);
+        let bb = entity_snapshot(&mut e, boss).world_bbox;
+        assert!((bb.min[2] - 25.0).abs() < 1e-5 && (bb.max[2] - 27.0).abs() < 1e-5, "{bb:?}");
+    }
+
+    #[test]
+    fn near_selects_between_parallel_faces() {
+        let mut e = engine();
+        let base = add_box(&mut e, [0.0, 0.0, 5.0], [40.0, 40.0, 10.0]);
+        let boss = add_box(&mut e, [0.0, 0.0, 10.0], [10.0, 10.0, 20.0]);
+        let fused = match e
+            .execute(Command::Boolean {
+                doc: 1,
+                op: BooleanOp::Union,
+                entities: vec![base, boss],
+                name: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+
+        // Largest +Z face (the base shoulder at z = 10) when no point is given.
+        let shoulder = add_sketch_on(&mut e, "shoulder", face_plane(fused, [0.0, 0.0, 1.0]));
+        assert!((sketch_frame(&mut e, shoulder).origin[2] - 10.0).abs() < 1e-5);
+
+        let boss_top = add_sketch_on(
+            &mut e,
+            "boss_top",
+            SketchPlane::Face {
+                entity: fused,
+                near: Some([num(0.0), num(0.0), num(20.0)]),
+                normal: Some([0.0, 0.0, 1.0]),
+                angle_tol_deg: None,
+            },
+        );
+        let f = sketch_frame(&mut e, boss_top);
+        assert!((f.origin[2] - 20.0).abs() < 1e-5, "{:?}", f.origin);
+    }
+
+    #[test]
+    fn a_face_sketch_uses_the_world_aligned_frame_of_a_rotated_entity() {
+        let mut e = engine();
+        let base = add_box(&mut e, [0.0, 0.0, 0.0], [40.0, 20.0, 10.0]);
+        // Tip the box onto its side: the original top face now points -Y, so
+        // its plane is world XZ. The sketch X stays world +X (a plane has no
+        // intrinsic X) and the extrude normal follows the face.
+        e.execute(Command::Transform {
+            doc: 1,
+            entity: base,
+            translation: None,
+            rotation_deg: Some([num(90.0), num(0.0), num(0.0)]),
+            scale: None,
+        })
+        .unwrap();
+        let side = add_sketch_on(&mut e, "side", face_plane(base, [0.0, -1.0, 0.0]));
+        let f = sketch_frame(&mut e, side);
+        assert!(close_to(f.normal, [0.0, -1.0, 0.0], 1e-6), "{:?}", f.normal);
+        assert!(close_to(f.x_axis, [1.0, 0.0, 0.0], 1e-5), "{:?}", f.x_axis);
+        assert!(close_to(f.origin, [0.0, -5.0, 0.0], 1e-5), "{:?}", f.origin);
+    }
+
+    #[test]
+    fn bad_sketch_planes_are_rejected_with_hints() {
+        let mut e = engine();
+        let box_id = add_box(&mut e, [0.0; 3], [10.0; 3]);
+        let sketch = add_sketch(&mut e, "s");
+
+        let err = e
+            .execute(Command::AddSketch {
+                doc: 1,
+                name: "bad".into(),
+                plane: Some(face_plane(sketch, [0.0, 0.0, 1.0])),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("is a sketch"), "{err}");
+        assert!(err.to_string().contains("datum plane"), "{err}");
+
+        let err = e
+            .execute(Command::AddSketch {
+                doc: 1,
+                name: "bad".into(),
+                plane: Some(face_plane(box_id, [1.0, 1.0, 0.0])),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("no face with outward normal"), "{err}");
+        assert!(err.to_string().contains("available face normals"), "{err}");
+
+        let err = e
+            .execute(Command::AddSketch {
+                doc: 1,
+                name: "bad".into(),
+                plane: Some(SketchPlane::Custom {
+                    origin: [num(0.0), num(0.0), num(0.0)],
+                    normal: [0.0; 3],
+                    x_axis: None,
+                }),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("normal must be a non-zero vector"), "{err}");
+
+        let err = e
+            .execute(Command::AddSketch {
+                doc: 1,
+                name: "bad".into(),
+                plane: Some(SketchPlane::Face {
+                    entity: box_id,
+                    near: None,
+                    normal: Some([0.0, 0.0, 1.0]),
+                    angle_tol_deg: Some(0.0),
+                }),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("angle_tol_deg"), "{err}");
+
+        // None of the failures left a program entry behind.
+        let program_len = match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { program, .. } => program.len(),
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(program_len, 2, "box + the good sketch only");
+    }
+
+    #[test]
+    fn face_sketch_round_trips_through_save_open() {
+        let (path, path_s) = temp_file("agcad_face_sketch.agcad");
+        let mut a = engine();
+        a.execute(Command::SetParameter { doc: 1, name: "h".into(), value: num(10.0), description: None })
+            .unwrap();
+        let base = match a
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "base".into(),
+                center: [num(0.0), num(0.0), Scalar::Expression("h/2".into())],
+                size: [num(40.0), num(30.0), Scalar::Expression("h".into())],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let top = add_sketch_on(&mut a, "top", face_plane(base, [0.0, 0.0, 1.0]));
+        rect_in_sketch(&mut a, top, 10.0, 8.0);
+        extrude(&mut a, top, num(3.0));
+        let before = entities_json(&mut a, 1);
+
+        a.execute(Command::SaveDocument { doc: 1, path: path_s.clone(), source: None }).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"face\""), "the plane reference is part of the program");
+        assert!(text.contains("\"normal\""), "{text}");
+
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: path_s.clone(), name: None }).unwrap();
+        assert_eq!(before, entities_json(&mut b, 1), "replay must reproduce the face placement");
+
+        // A plane reference must round-trip byte-for-byte too.
+        let (path2, path2_s) = temp_file("agcad_face_sketch_2.agcad");
+        b.execute(Command::SaveDocument { doc: 1, path: path2_s, source: None }).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            std::fs::read(&path2).unwrap(),
+            "save -> open -> save must be a no-op diff with a plane reference"
+        );
+
+        // And the opened document still follows its knob.
+        b.execute(Command::SetParameter { doc: 1, name: "h".into(), value: num(20.0), description: None })
+            .unwrap();
+        let bb = entity_snapshot(&mut b, 3).world_bbox;
+        assert!((bb.min[2] - 20.0).abs() < 1e-5 && (bb.max[2] - 23.0).abs() < 1e-5, "{bb:?}");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
+    }
+
     /// Turning a knob (no description passed) must keep the label the
     /// author wrote — the whole point of "the user only turns parameters".
     #[test]
@@ -2846,7 +3303,7 @@ mod tests {
 
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"format\": \"agcad-document\""));
-        assert!(text.contains("\"version\": 1"));
+        assert!(text.contains("\"version\": 2"));
         assert!(text.contains("print('hi')"), "source is preserved as provenance");
         // The file is the program, not the geometry.
         assert!(!text.contains("\"mesh\""));

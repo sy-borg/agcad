@@ -42,7 +42,10 @@ pub const SERVER_NAME: &str = "agcad";
 pub const DOCUMENT_FORMAT: &str = "agcad-document";
 /// File format version written by this build. Bump when the on-disk shape
 /// changes incompatibly; readers reject versions they do not know.
-pub const DOCUMENT_VERSION: u32 = 1;
+///
+/// 2: `add_sketch` may carry a `plane` (a reader that ignores it would
+/// silently place the sketch on XY, so the change is not downgrade-safe).
+pub const DOCUMENT_VERSION: u32 = 2;
 
 pub type DocId = u64;
 pub type EntityId = u64;
@@ -350,11 +353,19 @@ pub enum Command {
     },
 
     /// Create an empty sketch: a 2D constraint-solved drawing placed in 3D
-    /// by the entity transform (default: the XY plane at the origin).
-    /// Sketches are recorded in the program like any other modeling
-    /// command, so they replay parametrically — coordinates and constraint
-    /// values may be expressions over parameters.
-    AddSketch { doc: DocId, name: String },
+    /// by the entity transform. `plane` chooses where it sits — a standard
+    /// datum plane (the default is XY at the origin), an explicit
+    /// origin/normal, or a planar face of an existing solid. Sketches are
+    /// recorded in the program like any other modeling command, so they
+    /// replay parametrically — coordinates and constraint values may be
+    /// expressions over parameters.
+    AddSketch {
+        doc: DocId,
+        name: String,
+        /// Placement frame. Omit for the XY datum plane at the origin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plane: Option<SketchPlane>,
+    },
 
     /// Append a line segment to a sketch. 2D coordinates in sketch-local
     /// units (mm), may be expressions.
@@ -414,6 +425,11 @@ pub enum Command {
     /// form loops, and/or circles); holes are handled (a circle inside a
     /// loop becomes a through-hole). The result is a watertight solid
     /// placed by the sketch's transform, and it follows later sketch edits.
+    ///
+    /// On a sketch placed on a solid face, the sketch normal is the face's
+    /// outward normal: a positive distance adds material in front of the
+    /// face and a negative one cuts into the body (use `boolean{difference}`
+    /// to remove the cutter).
     Extrude {
         doc: DocId,
         sketch: EntityId,
@@ -711,6 +727,93 @@ impl RevolveAxis {
     }
 }
 
+/// A standard datum plane. Each is right-handed with the listed local axes,
+/// so the sketch's local +Z is the extrusion direction:
+///
+/// * `xy` — X = world +X, Y = +Y, normal = +Z
+/// * `xz` — X = world +X, Y = +Z, normal = -Y (the front view looks along +Y)
+/// * `yz` — X = world +Y, Y = +Z, normal = +X
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatumPlane {
+    Xy,
+    Xz,
+    Yz,
+}
+
+impl DatumPlane {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Xy => "xy",
+            Self::Xz => "xz",
+            Self::Yz => "yz",
+        }
+    }
+}
+
+/// Where a new sketch plane sits, in world space.
+///
+/// Wire forms (externally tagged):
+///
+/// ```json
+/// {"datum": {"plane": "xy", "offset": 5}}
+/// {"custom": {"origin": [0,0,10], "normal": [0,0,1], "x_axis": [1,0,0]}}
+/// {"face": {"entity": 1, "normal": [0,0,1], "near": [0,0,10]}}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SketchPlane {
+    /// A standard datum plane, optionally offset along its normal.
+    Datum {
+        plane: DatumPlane,
+        /// Offset along the plane normal (mm). May be an expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<Scalar>,
+    },
+    /// Any plane given by a world-space origin and normal. The sketch's
+    /// local +X is derived (world +X projected onto the plane, or world +Y
+    /// when the plane is nearly perpendicular to X) unless `x_axis` is
+    /// given; it is projected onto the plane either way.
+    Custom {
+        origin: SVec3,
+        /// Non-zero plane normal (does not need to be unit length).
+        normal: [f64; 3],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x_axis: Option<[f64; 3]>,
+    },
+    /// A planar face of an existing solid. The sketch normal is the face's
+    /// outward normal, so a positive extrude adds material in front of the
+    /// face and a negative one cuts into the body. The in-plane X follows
+    /// the same world-axis rule as [`SketchPlane::Custom`] — a plane has no
+    /// intrinsic X, so a rotated body still gets a stable, predictable one.
+    Face {
+        entity: EntityId,
+        /// World-space point used to pick between parallel faces with the
+        /// same normal. The sketch origin is this point projected onto the
+        /// chosen face plane; omit it to use the face's center. May be an
+        /// expression, so the origin can follow a parameter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        near: Option<SVec3>,
+        /// Required outward normal of the face (world space). Omit to pick
+        /// the largest matching face.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        normal: Option<[f64; 3]>,
+        /// Angular tolerance for `normal`, in degrees (default 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle_tol_deg: Option<f64>,
+    },
+}
+
+/// The resolved placement of a sketch, reported in snapshots. Sketch-local
+/// coordinates map to world as `origin + x_axis*x + (normal × x_axis)*y`;
+/// `normal` is the extrude direction.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SketchPlaneFrame {
+    pub origin: Vec3,
+    pub normal: Vec3,
+    pub x_axis: Vec3,
+}
+
 /// A 2D element of a sketch. Coordinates are sketch-local (mm); the
 /// sketch entity's transform places them in 3D.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -741,6 +844,10 @@ pub struct SketchSnapshot {
     pub residual: f64,
     /// Approximate degrees of freedom left (variables − equations).
     pub dof: i64,
+    /// Resolved world-space plane: origin, outward normal (the extrude
+    /// direction) and in-plane X. Derived from the entity transform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<SketchPlaneFrame>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

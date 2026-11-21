@@ -159,6 +159,39 @@ This is the substrate for the target workflow: a vision model looks at a
 picture, the agent writes the parametric program, renders it headless,
 compares, and iterates — the user never touches a function.
 
+## Sketch planes: datum planes and solid faces
+
+`add_sketch` defaults to XY at the origin, but `plane` can place it anywhere.
+The wire forms are:
+
+```json
+{"method":"add_sketch","params":{"doc":1,"name":"top",
+  "plane":{"datum":{"plane":"xy","offset":"wall*2"}}}}
+{"method":"add_sketch","params":{"doc":1,"name":"tilted",
+  "plane":{"custom":{"origin":[0,0,10],"normal":[0,1,1],"x_axis":[1,0,0]}}}}
+{"method":"add_sketch","params":{"doc":1,"name":"pocket",
+  "plane":{"face":{"entity":1,"normal":[0,0,1],"near":[0,0,20]}}}}
+```
+
+Each datum frame is right-handed, and the sketch's local +Z is its outward
+normal: `xy` has X=+X, Y=+Y, normal=+Z; `xz` has X=+X, Y=+Z, normal=-Y;
+`yz` has X=+Y, Y=+Z, normal=+X. A `face` plane is selected geometrically: the
+outward `normal` picks a planar patch, and `near` chooses between parallel
+faces with the same normal (omit `normal` to take the largest face). The
+normal comes from the face, so a positive `extrude` grows a boss in front of
+it and a negative one cuts into the body; a `boolean{difference}` removes the
+cutter. Faces are re-found on replay, so a face sketch follows the body when
+a parameter moves it.
+
+`get_scene` reports the resolved `sketch.plane` (`origin`, `normal`,
+`x_axis`). The Python client accepts the sugar forms too:
+
+```python
+top = cad.add_sketch(doc, "pocket", plane={"entity": base, "normal": [0, 0, 1]})
+side = cad.add_sketch(doc, "boss", plane={"entity": base, "normal": [1, 0, 0]})
+cad.add_sketch(doc, "plate_top", plane="xy", offset="wall*2")
+```
+
 ## Live preview: MCP agent + viewer, one shared scene
 
 The TCP server runs **one shared document space** for all connections, and
@@ -322,10 +355,18 @@ with Agcad.spawn() as cad:
       package is written store-only with a fixed timestamp, so the same scene
       exports to byte-identical files; geometry is baked into world space
       (matching STL) and sketches are skipped. STL stays the single-body path
-- [ ] **Sketches on a face / datum planes**: place a sketch on an existing
-      planar face (or an explicit plane) instead of always on XY, with the
-      normal derived from the face so `extrude` cuts or adds material in the
-      right direction
+- [x] **Sketches on a face / datum planes**: `add_sketch{plane}` places a
+      sketch on the `xy`/`xz`/`yz` datum planes (with an optional expression
+      offset), on an explicit origin + normal, or on an existing solid's
+      planar face. Faces are selected geometrically — an outward normal plus
+      an optional `near` point to choose between parallel faces — so the
+      reference survives a parameter change. The sketch's local +Z is the
+      face's outward normal: a positive `extrude` adds material in front of
+      the face, a negative one cuts into the body (with `boolean{difference}`
+      to remove the cutter). Snapshots report the resolved
+      `sketch.plane` (origin, normal, in-plane X), so an agent can verify the
+      frame before drawing; `examples/face_sketch.py` cuts a pocket and grows
+      a boss on a parametric block
 - [ ] **Shaded-with-edges rendering**: a thin dark outline where adjacent
       faces meet (and where a face silhouette crosses). Flat shading alone
       hides coplanar-depth steps — a solid's front view reads as a blank
@@ -338,7 +379,7 @@ with Agcad.spawn() as cad:
 
 ## Status
 
-Milestone 10 complete: 3MF export. 98 tests cover the solver
+Milestone 11 complete: sketches on faces and datum planes. 112 tests cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
@@ -352,13 +393,19 @@ treatment (sharp-edge extraction on welded meshes with a tessellation-angle
 threshold, geometric filters, convex vs concave handling, single-pass
 all-edge rounding with clean reflex corners, tessellated rims as one band,
 in-place reshapes that survive rotation, replay, sketch edits and
-save/open), and package export (valid OPC/ZIP entries, multi-object names
+save/open), package export (valid OPC/ZIP entries, multi-object names
 and per-object colors, world-space vertices, sketch filtering, deterministic
-bytes).
+bytes), and plane placement (datum frames in all three orientations,
+expression offsets, custom planes with a projected X axis, planar-face
+grouping and normal/`near` selection, outward-normal extrude direction,
+face references that follow parameters, rotated entities, save/open replay,
+and actionable errors).
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
-`examples/revolve_bushing.py`, `examples/cross_block.py` — a picture →
+`examples/revolve_bushing.py`, `examples/face_sketch.py` (a top-face pocket
+cut with a negative extrude and a +X-face boss grown with a positive one,
+both following the parametric block), `examples/cross_block.py` — a picture →
 model reproduction: `examples/example_body.png` is read for its two views
 (45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
 profile and extruded, rendered from a camera fitted to the drawing, then
@@ -367,5 +414,5 @@ corners are sharp, so the vertical edges stay sharp too — and
 `examples/save_load.py` (save → open in a fresh engine → change
 a knob → export back to Python and run it).
 
-Also in the roadmap but not started: sketches placed on existing faces or
-datum planes.
+Also in the roadmap but not started: shaded-with-edges rendering, a Rust
+MCP server, PyO3 bindings and occlusion picking in the viewer.

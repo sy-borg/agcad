@@ -40,7 +40,11 @@ dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
 verify -> agcad_render to SEE the result -> export_stl/export_3mf for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change ->
-extrude/revolve turns a closed profile into a printable solid. Fillets and
+extrude/revolve turns a closed profile into a printable solid. Sketch planes can
+be the XY/XZ/YZ datum planes, an explicit origin/normal, or a planar face of an
+existing solid; a face sketch's normal is the outward face normal, so a positive
+extrude adds a boss and a negative extrude cuts into the body (boolean difference
+removes it). Fillets and
 chamfers reshape a solid in place (same entity id): fillet{doc,entity,radius,edges?}
 or chamfer{doc,entity,distance,edges?}, where `edges` is a geometric filter
 ({direction}, {near,near_radius}, {normals}, {convex}) instead of an index — omit
@@ -85,7 +89,19 @@ chamfer{doc,entity,distance,edges?,min_angle_deg?} (flat bevel, same in-place
   vertical fillet trims the rim band cleanly, while re-cutting an already
   rounded rim is slow and noisy.
 set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc},
-add_sketch{doc,name} (empty 2D sketch; place it in 3D with transform),
+add_sketch{doc,name,plane?} (empty 2D sketch; plane may be omitted for the XY
+  datum plane at the origin. Other forms:
+    {datum:{plane:"xy"|"xz"|"yz",offset?}} — a standard datum plane
+      (xy: X=+X,Y=+Y,normal=+Z; xz: X=+X,Y=+Z,normal=-Y;
+       yz: X=+Y,Y=+Z,normal=+X; offset shifts along the normal),
+    {custom:{origin:[x,y,z],normal:[x,y,z],x_axis?:[x,y,z]}} — any plane,
+    {face:{entity:id,normal?:[x,y,z],near?:[x,y,z],angle_tol_deg?}} — a planar
+      face of an existing solid; normal is the OUTWARD face normal, near picks
+      between parallel faces and becomes the sketch origin (projected onto the
+      face; face center when omitted), omit normal to take the largest face. Positive
+      extrude adds material in front of the face, negative cuts into the body
+      (then boolean{difference} to remove it). The resolved frame is reported
+      as sketch.plane in get_scene.),
 add_sketch_line{doc,sketch,p1:[x,y],p2:[x,y]},
 add_sketch_circle{doc,sketch,center:[x,y],radius},
 constrain{doc,sketch,kind,refs,value?} (re-solves; kind is coincident,
@@ -125,8 +141,9 @@ execution stops at the first error (reported with a recovery hint)."""
 
 SCENE_DESCRIPTION = """Inspect an agcad document: parameters and entities with
 placement, a world-space bounding box per entity (meshes are entity-local;
-world_bbox already includes translation/rotation/scale), and vertex/triangle
-counts — no raw meshes."""
+world_bbox already includes translation/rotation/scale), vertex/triangle
+counts, and for sketches a compact solver + resolved plane summary (origin,
+outward normal, in-plane X) — no raw meshes."""
 
 RENDER_DESCRIPTION = """Render the document to a PNG image, returned inline as an
 image content block — so you can SEE the scene and compare it against what the
@@ -349,22 +366,33 @@ class McpServer:
         entities = []
         for e in scene["entities"]:
             stats = mesh_stats(e["mesh"])
-            entities.append(
-                {
-                    "id": e["id"],
-                    "name": e["name"],
-                    "translation": e["translation"],
-                    "rotation_deg": e["rotation_deg"],
-                    "scale": e["scale"],
-                    # World space, after the entity transform — trust this
-                    # one for placement. `stats.local_bbox` is entity-local.
-                    # .get so an older attached engine (pre-world_bbox) does
-                    # not crash inspection.
-                    "world_bbox": e.get("world_bbox"),
-                    "color": e["color"],
-                    **stats,
+            entry = {
+                "id": e["id"],
+                "name": e["name"],
+                "translation": e["translation"],
+                "rotation_deg": e["rotation_deg"],
+                "scale": e["scale"],
+                # World space, after the entity transform — trust this
+                # one for placement. `stats.local_bbox` is entity-local.
+                # .get so an older attached engine (pre-world_bbox) does
+                # not crash inspection.
+                "world_bbox": e.get("world_bbox"),
+                "color": e["color"],
+                **stats,
+            }
+            # Sketches carry a compact solver + plane summary: enough to
+            # verify where the drawing sits without shipping every line.
+            sketch = e.get("sketch")
+            if sketch:
+                entry["sketch"] = {
+                    "solved": sketch.get("solved"),
+                    "residual": sketch.get("residual"),
+                    "dof": sketch.get("dof"),
+                    "elements": len(sketch.get("elements", [])),
+                    "constraints": len(sketch.get("constraints", [])),
+                    "plane": sketch.get("plane"),
                 }
-            )
+            entities.append(entry)
         payload = {"doc": doc, "parameters": params["params"], "entities": entities}
         return {"content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}]}
 
