@@ -809,6 +809,28 @@ class Agcad:
         per-object colors) — a session command."""
         return self._request("export_3mf", doc=doc, path=path, entities=entities)
 
+    def pick(
+        self,
+        doc: int,
+        origin: tuple[float, float, float],
+        direction: tuple[float, float, float],
+        tolerance: float | None = None,
+    ) -> dict[str, Any]:
+        """Cast a world-space ray and return the nearest solid hit.
+
+        ``hit`` is ``None`` when the ray misses (a valid answer, not an
+        error). A hit carries its entity/name/point/normal plus two
+        ready-made selectors: ``face`` (pass it as ``add_sketch(plane=...)``)
+        and, when the hit is within ``tolerance`` mm of a sharp edge,
+        ``edge`` (pass it to ``fillet``/``chamfer`` as ``edges=...``).
+        Sketches are display-only and never absorb a ray. Omit
+        ``tolerance`` for 1% of the picked entity's bbox diagonal."""
+        return self._request(
+            "pick", doc=doc,
+            ray={"origin": list(origin), "direction": list(direction)},
+            tolerance=tolerance,
+        )
+
     def render_offscreen(
         self,
         doc: int,

@@ -37,8 +37,8 @@ Keep the `README.md` and `index.html` in synch with the code.
   constraints, booleans, fillets, software rasterizer; `crates/server` JSON-RPC
   over stdio/TCP; `crates/viewer` wgpu client. The bus is the only API; the
   viewer and MCP own no document state. Viewer-side labels are display only;
-  hit-testing/selection belongs in a `pick` bus command (M13), not in the
-  viewer.
+  hit-testing and selector construction live in the engine's `pick` command,
+  never in the viewer.
 - Units are mm and degrees, Z is up, colors are `[r,g,b,a]` floats 0..1, and
   cylinders extrude along +Z. Document ids start at 1; `create_document`
   accepts an explicit unused id so create + populate can share one batch.

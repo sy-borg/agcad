@@ -53,8 +53,10 @@ save_document -> .agcad is a replayable snapshot (program + current parameter
 values + the embedded script). get_program exposes all three, so a handoff can
 recover the recipe without executing it. For durable work keep the script and
 pass it as save_document{source:{language:"python",text:...}}; an MCP-only
-document with no script is scratch state. Failed commands report a hint; fix
-the named issue and retry."""
+document with no script is scratch state. A human working in the viewer can
+label entities and click a face or edge; the click arrives as a pick result
+whose face/edge selectors you pass straight to add_sketch/fillet/chamfer.
+Failed commands report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
@@ -134,6 +136,14 @@ open_document{path,name?} (loads a .agcad file as a NEW document and replays it;
 get_program{doc} (read-only program + parameters + embedded source — the
   complete handoff: the source is the canonical script; the program is the
   replayable IR),
+pick{doc,ray:{origin:[x,y,z],direction:[x,y,z]},tolerance?} (world-space ray
+  at the solids; answers {hit:{entity,name,distance,point,normal,face,edge?}}
+  or hit:null on a miss. The selectors are ready to pass straight back:
+  face -> add_sketch{plane:{face:<face>}} (its body is exactly
+  {entity,normal,near}; the Python client's plane= takes it directly);
+  edge -> fillet/chamfer{edges:<edge>} (exactly {direction,near,near_radius},
+  present only when the hit is within tolerance mm of a sharp edge). This is
+  how a human click in the viewer reaches the agent; sketches are skipped),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),

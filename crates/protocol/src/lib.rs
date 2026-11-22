@@ -266,6 +266,23 @@ pub enum Command {
 
     GetScene { doc: DocId },
 
+    /// Cast a world-space ray at the document's solids and report what it
+    /// hits, with a ready-made geometric selector for the face and (when
+    /// the hit is near one) the closest sharp edge. A session command: it
+    /// changes no state and is not part of the program. Sketches are
+    /// display-only and are skipped, so a sketch ribbon never blocks a
+    /// pick.
+    Pick {
+        doc: DocId,
+        ray: Ray,
+        /// Edge snap radius in mm. A hit within this distance of a sharp
+        /// edge also reports an `edge` selector. Defaults to 1% of the
+        /// picked entity's bbox diagonal (min 0.01 mm). The viewer passes
+        /// its click radius in pixels converted to world units.
+        #[serde(default)]
+        tolerance: Option<f64>,
+    },
+
     /// Write a binary STL of the selected entities' **world-space**
     /// geometry (default: every entity in the document). A session
     /// command, not part of the program — exporting changes no state.
@@ -496,6 +513,63 @@ pub struct EdgeFilter {
     pub convex: Option<bool>,
 }
 
+/// A world-space ray. `direction` is normalized by the engine, so the
+/// reported hit distance is in millimeters. A ray that misses is a valid
+/// result (`hit: null`), not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Ray {
+    pub origin: Vec3,
+    /// Non-zero; need not be unit length.
+    pub direction: Vec3,
+}
+
+/// The result of a [`Command::Pick`]: the nearest solid hit, or `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PickHit {
+    pub entity: EntityId,
+    pub name: String,
+    /// Distance along the ray in mm.
+    pub distance: f64,
+    /// The world-space hit point on the solid surface.
+    pub point: Vec3,
+    /// Outward normal of the hit face (the whole planar patch, not just
+    /// the hit triangle).
+    pub normal: Vec3,
+    /// Immediately usable as `add_sketch{plane: face}`.
+    pub face: FaceSelector,
+    /// Present when the hit landed within the snap tolerance of a sharp
+    /// edge; immediately usable as `fillet`/`chamfer`'s `edges` filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<EdgeSelector>,
+}
+
+/// A planar face reference, shaped exactly like
+/// [`SketchPlane::Face`] so it can be passed straight back to the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FaceSelector {
+    pub entity: EntityId,
+    /// Outward face normal in world space.
+    pub normal: Vec3,
+    /// A world-space point on the face; selects between parallel faces
+    /// and becomes the sketch origin (projected onto the face plane).
+    pub near: Vec3,
+}
+
+/// A sharp-edge reference, shaped exactly like [`EdgeFilter`] so it can be
+/// passed straight to `fillet`/`chamfer` as `edges`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EdgeSelector {
+    /// Edge direction in world space.
+    pub direction: Vec3,
+    /// Midpoint of the picked edge segment.
+    pub near: Vec3,
+    /// A quarter of the edge length plus the snap tolerance. `near` is
+    /// exact, so this radius also tracks the edge through modest parameter
+    /// changes without swallowing the parallel edge on the other side of a
+    /// thin wall.
+    pub near_radius: f64,
+}
+
 /// Which set operation a [`Command::Boolean`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -549,6 +623,9 @@ pub enum CommandResult {
     Undone { doc: DocId },
     Redone { doc: DocId },
     Scene { doc: DocId, entities: Vec<EntitySnapshot> },
+    /// A ray query (see [`Command::Pick`]). `hit` is `None` when the ray
+    /// missed every solid; that is a valid answer, not an error.
+    Picked { doc: DocId, hit: Option<PickHit> },
     StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
     /// A 3MF package was written. `objects` is how many build items it
     /// contains, `tris` the total triangle count.

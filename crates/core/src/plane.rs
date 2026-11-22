@@ -126,14 +126,22 @@ fn in_plane_x(normal: Vec3) -> Vec3 {
 }
 
 /// A maximal coplanar patch of the mesh.
-struct Face {
+///
+/// `triangles` indexes the **input mesh's** triangle order (`indices` in
+/// triples), which is the same order the welded mesh keeps; a picking
+/// consumer can use it to map a hit triangle back to its face. Fields are
+/// world-space when the mesh handed to [`planar_faces`] is.
+#[derive(Debug, Clone)]
+pub struct PlanarFace {
     /// Area-weighted outward normal.
-    normal: Vec3,
+    pub normal: Vec3,
     /// Area-weighted centroid (a point on the plane).
-    centroid: Vec3,
+    pub centroid: Vec3,
     /// `dot(normal, centroid)`: the plane offset.
-    offset: f64,
-    area: f64,
+    pub offset: f64,
+    pub area: f64,
+    /// Triangle indices belonging to this patch, ascending.
+    pub triangles: Vec<usize>,
 }
 
 /// Choose a planar face and build its sketch frame. `normal_filter` is an
@@ -174,7 +182,7 @@ pub fn face_frame(
         )));
     }
 
-    let candidates: Vec<&Face> = faces
+    let candidates: Vec<&PlanarFace> = faces
         .iter()
         .filter(|f| match want {
             Some(w) => dot(f.normal, w) >= min_cos,
@@ -232,7 +240,7 @@ pub fn face_frame(
 }
 
 /// Group a welded triangle mesh into maximal coplanar patches.
-fn planar_faces(mesh: &Mesh) -> Result<Vec<Face>, Error> {
+pub fn planar_faces(mesh: &Mesh) -> Result<Vec<PlanarFace>, Error> {
     let (positions, tris) = edges::weld(mesh)?;
     let count = tris.len() / 3;
     if count == 0 {
@@ -330,7 +338,7 @@ fn planar_faces(mesh: &Mesh) -> Result<Vec<Face>, Error> {
             centroid_sum[2] / area,
         ];
         let offset = dot(normal, centroid);
-        faces.push(Face { normal, centroid, offset, area });
+        faces.push(PlanarFace { normal, centroid, offset, area, triangles: group });
     }
     Ok(faces)
 }

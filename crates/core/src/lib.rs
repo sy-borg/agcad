@@ -21,6 +21,7 @@ pub mod expr;
 pub mod fillet;
 pub mod geo;
 pub mod mat4;
+pub mod pick;
 pub mod plane;
 pub mod render;
 pub mod sketch;
@@ -369,6 +370,7 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Undo { doc: d }
         | Command::Redo { doc: d }
         | Command::GetScene { doc: d }
+        | Command::Pick { doc: d, .. }
         | Command::GetProgram { doc: d }
         | Command::ExportStl { doc: d, .. }
         | Command::Export3mf { doc: d, .. }
@@ -590,6 +592,12 @@ impl Engine {
                     doc: *doc,
                     entities: d.entities.values().map(|e| e.snapshot()).collect(),
                 })
+            },
+
+            Command::Pick { doc, ray, tolerance } => {
+                let d = self.doc(*doc)?;
+                let hit = pick::pick(&d.entities, ray, *tolerance)?;
+                Ok(CommandResult::Picked { doc: *doc, hit })
             },
 
             Command::ExportStl { doc, path, entities } => {

@@ -113,7 +113,7 @@ Commands: `initialize`, `list_documents`, `create_document`, `close_document`,
 `get_parameters`, `undo`, `redo`, `get_scene`, `get_program`, `add_sketch`,
 `add_sketch_line`, `add_sketch_circle`, `constrain`, `remove_constraint`,
 `move_sketch_point`, `delete_sketch_element`, `extrude`, `revolve`,
-`export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
+`pick`, `export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
 `open_document`. `get_program` returns the program, the parameters and any
 embedded authoring source — the complete handoff for the script-as-source
 workflow.
@@ -126,6 +126,19 @@ normal = all its edges, two = the edge between them) and `convex` — so "the
 vertical corners" or "the top rim" keeps its meaning when a parameter moves
 the geometry. Omit it to treat every sharp edge; `min_angle_deg` (default 30)
 separates real edges from tessellation seams.
+
+`pick{doc,ray:{origin,direction},tolerance?}` casts a world-space ray at the
+document's solids and answers `{hit:{entity,name,distance,point,normal,face,
+edge?}}` — or `hit:null` when nothing is under the ray (a valid answer, not an
+error). The selectors are ready to use: `face` carries the
+`{entity,normal,near}` body of `add_sketch`'s face plane (pass it straight to
+the Python client's `plane=`, or wrap it as `plane:{"face":…}` on the raw
+bus), and `edge` is exactly the `edges` filter `fillet`/`chamfer` take
+(`{direction,near,near_radius}`), present when the hit lands within
+`tolerance` mm of a sharp edge (default: 1% of the entity's bbox diagonal).
+Sketches are display-only, so they never absorb a ray. The viewer turns a
+click into this command; the human copies the selector and the agent passes
+it straight back — no parallel face or edge ID namespace.
 
 Conventions: millimeters, degrees, RGBA floats. Z is up — primitives are
 axis-aligned and `add_cylinder` extrudes along +Z. Document ids start at 1;
@@ -276,11 +289,12 @@ Two limits worth knowing:
 - the viewer shows the **first open document** (`list_documents` order, so the
   lowest id). With several documents, close the stale ones or reuse one; a
   document picker is future work.
-- the viewer is a renderer, not an editor: the human can orbit, zoom, watch
-  live updates and read the corner axis triad, but cannot yet click a face to
-  hand it back to the agent. The agent addresses geometry with the geometric
-  filters (`near`, normals) instead; M13 adds labels and click-to-select that
-  emits exactly those selectors.
+- the viewer is a reference surface, not an editor: the human can orbit,
+  zoom, watch live updates, read the corner axis triad and toggle `name #id`
+  labels. A click runs `pick` and the HUD shows the exact JSON selector to
+  hand to the agent (`C` copies edge-if-any, `F` face, `E` edge; the full hit
+  is also printed to the terminal). Models are still changed by the agent's
+  script, never by dragging geometry in the viewer.
 
 ## Exposing it to an agent: MCP
 
@@ -339,7 +353,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ./python
 
 # Human seat: viewer (needs a server with an open document)
 ./target/debug/agcad --tcp 7860 &
-./target/debug/agcad-view --port 7860     # drag = orbit, wheel = zoom, R = refresh; corner triad = world axes
+./target/debug/agcad-view --port 7860     # drag = orbit, wheel = zoom, L = labels, click = pick, R = refresh
 ```
 
 Minimal agent session:
@@ -448,20 +462,23 @@ turns, while the script remains the editing surface.
       instructions teach the contract, `examples/save_load.py` asserts the
       round trip, and the roadmap is ordered around it. MCP-only documents
       without a script are explicitly scratch state
+- [x] **Human reference: labels + `pick`** (M13): the viewer labels every
+      entity `name #id` (toggleable with `L`, anchored by a leader dot at the
+      projected world bbox), and a click casts a world-space ray through
+      `pick{doc,ray,tolerance?}`. The engine answers with the entity, hit
+      point, normal and ready-made selectors — `face` carries the
+      `{entity,normal,near}` body of `add_sketch`'s face plane (Python's
+      `plane=` takes it directly), and when the click is within tolerance of
+      a sharp edge `edge` is exactly the fillet/chamfer
+      `{direction,near,near_radius}` filter. The HUD shows the exact JSON and
+      `C`/`F`/`E` copy it, so the human can hand a face or edge to the agent
+      and the agent passes it straight back. Picking lives in the engine
+      (reusing the planar-face grouping and `sharp_edges`), so the viewer stays
+      dumb and no parallel face-ID namespace appears. Text is a tiny embedded
+      8×8 bitmap atlas — no font files or new runtime services
 
 ### Next
 
-- [ ] **M13 — Human reference: labels + `pick`**: the viewer labels entities
-      as `name #id` (toggleable, projected from the world bbox, with leader
-      dots) so a human can say “make `boss #3` taller”. A click sends a
-      world-space ray to a new `pick{doc, ray}` bus command, which answers with
-      the entity, hit point, face normal and a ready-made geometric selector —
-      `{entity, normal, near}` for a face, `{direction, near, near_radius}` for
-      an edge. The human hands that selector to the agent, who passes it
-      straight to `fillet`/`chamfer`/`add_sketch`. Picking lives in the engine
-      (reusing the planar-face grouping and `sharp_edges`), so the viewer stays
-      dumb and no parallel face-ID namespace appears. Sequence: labels, then
-      `pick`, then a selector HUD/copy
 - [ ] **M14 — Trust: `validate` + scene diff**: check watertightness,
       self-intersection, volume/bbox and (cheap) minimum wall per solid, and
       compare two revisions by entity signature. Regeneration is only a
@@ -491,7 +508,8 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 12 complete: the script is the source of truth. 113 tests cover the solver
+Milestone 13 complete: a human can point at geometry and the agent can act on
+exactly that reference. 128 tests (120 engine + 8 viewer) cover the solver
 (rectangles from messy input, radius/diameter, parallel/perpendicular,
 over-constraint reporting, bit-identical determinism), the engine path
 (constraints through the bus, parametric re-solve, undo/redo, cascade
@@ -513,20 +531,25 @@ grouping and normal/`near` selection, outward-normal extrude direction,
 face references that follow parameters, rotated entities, save/open replay,
 and actionable errors), and the script-as-source contract (embedded source
 returned by `get_program`, `get_script` recovering the original text, and
-save/open preserving it).
+save/open preserving it), and picking (rays against world-space meshes,
+nearest-entity and entity-id tie-breaking, planar-face lookup, edge snapping
+with an explicit tolerance, miss-is-not-an-error, skipped sketches, rotated
+entities, ready-made face/edge selectors that drive `add_sketch` and
+`fillet`, and viewer-side label/HUD/ray geometry).
 
-The next milestone is the human side of the loop: M13 labels entities
-(`name #id`) and turns a click into a `pick` result carrying the geometric
-selector the agent already understands. After that, prove the rebuild with
-`validate` and a scene diff, make replay incremental, then widen the shape and
-sketch vocabulary. A GUI feature tree is not on the list — the agent edits the
-script and replays.
+The next milestone is trust: M14 adds `validate` (watertightness,
+self-intersection, volume/bbox and minimum wall) and a scene diff, so an agent
+can prove a rebuild is correct and say what changed. Then replay becomes
+incremental, and the shape and sketch vocabulary widens. A GUI feature tree is
+not on the list — the agent edits the script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
 `examples/revolve_bushing.py`, `examples/face_sketch.py` (a top-face pocket
 cut with a negative extrude and a +X-face boss grown with a positive one,
-both following the parametric block), `examples/cross_block.py` — a picture →
+both following the parametric block), `examples/pick.py` (face and edge
+selectors from rays, with the edge click surviving a height change before it
+drives a fillet), `examples/cross_block.py` — a picture →
 model reproduction: `examples/example_body.png` is read for its two views
 (45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
 profile and extruded, rendered from a camera fitted to the drawing, then

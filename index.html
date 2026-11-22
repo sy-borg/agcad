@@ -284,7 +284,7 @@ footer{padding:0 0 48px}
 {"jsonrpc":"2.0","id":1,
  "result":{"entity_created":
   {"doc":1,"entity":1,"mesh":{...}}}}</pre>
-        <p>Commands cover documents, primitives, booleans, sketches and constraints, extrude, revolve, fillet, chamfer, export, undo and redo, and rendering.</p>
+        <p>Commands cover documents, primitives, booleans, sketches and constraints, extrude, revolve, fillet, chamfer, picking, export, undo and redo, and rendering.</p>
       </div>
       <div>
         <h3>From Python</h3>
@@ -335,8 +335,9 @@ footer{padding:0 0 48px}
 AGCAD_CONNECT=127.0.0.1:7860 agcad-mcp
 
 <span class="c"># 3. the viewer refreshes on every change</span>
-./target/debug/agcad-view --port 7860</pre>
-        <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation. Without <code>AGCAD_CONNECT</code>, the MCP server runs a private engine.</p>
+./target/debug/agcad-view --port 7860
+<span class="c"># labels: name #id · click: pick a face or edge · C: copy selector</span></pre>
+        <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation. Without <code>AGCAD_CONNECT</code>, the MCP server runs a private engine. A click sends a ray through <code>pick</code>; the HUD shows the exact <code>{entity,normal,near}</code> face or <code>{direction,near,near_radius}</code> edge selector to hand to the agent, who passes it straight to <code>add_sketch</code>, <code>fillet</code> or <code>chamfer</code>.</p>
       </div>
     </div>
   </div>
@@ -359,10 +360,10 @@ python3 -m venv .venv
 <pre>./target/debug/agcad --tcp 7860 &amp;
 ./target/debug/agcad-view --port 7860
 
-<span class="c"># drag = orbit, wheel = zoom, R = refresh</span></pre>
+<span class="c"># drag = orbit, wheel = zoom, L = labels, click = pick, R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/agcad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches and a save and load round trip.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/agcad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a face/edge pick that drives a sketch and a fillet, and a save and load round trip.</p>
   </div>
 </section>
 
@@ -387,12 +388,12 @@ python3 -m venv .venv
           <li><b>3MF export</b> <span>named, colored objects</span></li>
           <li><b>Face and datum sketch planes</b></li>
           <li><b>Script as source</b> <span>embedded scripts, <code>get_script</code></span></li>
+          <li><b>Labels and pick</b> <span>click a face, copy a real selector</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M13 Labels and pick</b> <span>click a face, hand the agent a selector</span></li>
           <li><b>M14 Validate and scene diff</b> <span>prove the rebuild is correct</span></li>
           <li><b>M15 Incremental rebuild</b> <span>replay only what a knob affects</span></li>
           <li><b>M16 Shape leverage</b> <span>patterns, mirror, shell, sweep, loft, holes</span></li>
@@ -411,7 +412,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">agcad</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/agcad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/agcad">sy-borg/agcad</a></div>
-      <div><small>Status</small>Milestone 12</div>
+      <div><small>Status</small>Milestone 13</div>
     </div>
   </div>
 </footer>
