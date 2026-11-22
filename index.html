@@ -289,7 +289,7 @@ footer{padding:0 0 48px}
 {"jsonrpc":"2.0","id":1,
  "result":{"entity_created":
   {"doc":1,"entity":1,"mesh":{...}}}}</pre>
-        <p>Commands cover documents, primitives, booleans, sketches and constraints, extrude, revolve, fillet, chamfer, picking, export, undo and redo, and rendering.</p>
+        <p>Commands cover documents, primitives, booleans, sketches and constraints, extrude, revolve, fillet, chamfer, picking, validation, scene diff, export, undo and redo, and rendering.</p>
       </div>
       <div>
         <h3>From Python</h3>
@@ -312,6 +312,8 @@ footer{padding:0 0 48px}
         <p>The expression grammar is tiny and safe: <code>+ - * /</code>, parentheses, identifiers. A typo lists the valid parameter names.</p>
       </div>
     </div>
+
+    <p><b>Trust loop.</b> <code>validate</code> checks every solid for watertightness, non-manifold edges, self-intersections, volume and an approximate thinnest wall (optionally against <code>min_wall_mm</code>), and every sketch for solver status and a closed profile. <code>diff_scene</code> compares two revisions by entity signature — against another open document or a saved <code>.agcad</code> — and names what changed: added, removed and modified entities with field-level detail, parameter values and the program. Both are queries: no program entry, no state change. A rebuild is proven correct, not assumed.</p>
   </div>
 </section>
 
@@ -369,7 +371,7 @@ python3 -m venv .venv
 <span class="c"># drag = orbit, wheel = zoom, L = labels, click = pick, R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/agcad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a face/edge pick that drives a sketch and a fillet, and a save and load round trip.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/agcad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a face/edge pick that drives a sketch and a fillet, a validate-and-diff trust loop, and a save and load round trip.</p>
   </div>
 </section>
 
@@ -395,12 +397,12 @@ python3 -m venv .venv
           <li><b>Face and datum sketch planes</b></li>
           <li><b>Script as source</b> <span>embedded scripts, <code>get_script</code></span></li>
           <li><b>Labels and pick</b> <span>click a face, copy a real selector</span></li>
+          <li><b>M14 Validate and scene diff</b> <span>prove the rebuild is correct</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M14 Validate and scene diff</b> <span>prove the rebuild is correct</span></li>
           <li><b>M15 Incremental rebuild</b> <span>replay only what a knob affects</span></li>
           <li><b>M16 Shape leverage</b> <span>patterns, mirror, shell, sweep, loft, holes</span></li>
           <li><b>M17 Sketch completeness</b> <span>arcs, splines, more constraints</span></li>
@@ -418,7 +420,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">agcad</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/agcad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/agcad">sy-borg/agcad</a></div>
-      <div><small>Status</small>Milestone 13</div>
+      <div><small>Status</small>Milestone 14</div>
     </div>
   </div>
 </footer>

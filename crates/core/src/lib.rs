@@ -28,14 +28,16 @@ pub mod sketch;
 pub mod solid;
 pub mod stl;
 pub mod threemf;
+pub mod validate;
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use agcad_protocol::{
     Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EdgeFilter,
-    EntityId, EntitySnapshot, Mat4, Mesh, ParamInfo, Rgba, RevolveAxis, SavedParameter, Scalar,
-    SketchElement, SketchPlane, SourceDoc, SVec3, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION,
+    EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, ParamInfo, ParameterChange,
+    Rgba, RevolveAxis, SavedParameter, Scalar, SketchElement, SketchPlane, SketchValidation,
+    SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION,
     PROTOCOL_VERSION, SERVER_NAME,
 };
 
@@ -141,6 +143,21 @@ pub enum Shape {
         axis: RevolveAxis,
         segments: Option<u32>,
     },
+}
+
+impl Shape {
+    /// Stable lowercase name for reports and diffs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Box { .. } => "box",
+            Self::Sphere { .. } => "sphere",
+            Self::Cylinder { .. } => "cylinder",
+            Self::Boolean { .. } => "boolean",
+            Self::Sketch { .. } => "sketch",
+            Self::Extrude { .. } => "extrude",
+            Self::Revolve { .. } => "revolve",
+        }
+    }
 }
 
 impl Entity {
@@ -340,6 +357,60 @@ impl Document {
             source: source.or_else(|| self.source.clone()),
         }
     }
+
+    /// Rebuild a document from a saved snapshot and replay its program.
+    /// `id` is the id the rebuilt document will live under; program commands
+    /// are rebound to it. Used by `open_document` and by `diff_scene`'s
+    /// read-only baseline path (which passes a throwaway id and never inserts
+    /// the document into the engine).
+    fn from_snapshot(snapshot: DocumentSnapshot, id: DocId, name: String) -> Result<Self> {
+        let mut d = Document::new(id, name);
+        d.params = snapshot
+            .parameters
+            .iter()
+            .map(|(k, p)| {
+                (k.clone(), Param { value: p.value, description: p.description.clone() })
+            })
+            .collect();
+        d.source = snapshot.source;
+        d.program = snapshot.program;
+        for cmd in &mut d.program {
+            set_doc(cmd, id);
+        }
+        d.replay()?;
+        Ok(d)
+    }
+}
+
+/// Read and check a `.agcad` file without opening it into the engine.
+fn read_snapshot(path: &str) -> Result<DocumentSnapshot> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        Error::Document(format!(
+            "cannot read document '{path}': {e} \
+             (hint: use an absolute path the server can read)"
+        ))
+    })?;
+    let snap: DocumentSnapshot = serde_json::from_str(&text).map_err(|e| {
+        Error::Document(format!(
+            "cannot parse document '{path}': {e} \
+             (hint: .agcad files are JSON written by save_document)"
+        ))
+    })?;
+    if snap.format != DOCUMENT_FORMAT {
+        return Err(Error::Document(format!(
+            "'{path}' is not an agcad document (format: '{}'; \
+             hint: the file must start with {{\"format\": \"{DOCUMENT_FORMAT}\"}})",
+            snap.format
+        )));
+    }
+    if snap.version > DOCUMENT_VERSION {
+        return Err(Error::Document(format!(
+            "document '{path}' is version {} but this build reads up to \
+             {DOCUMENT_VERSION} (hint: upgrade the server)",
+            snap.version
+        )));
+    }
+    Ok(snap)
 }
 
 /// Rebind every `doc` field of a command. Programs are per-document, so
@@ -371,6 +442,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Redo { doc: d }
         | Command::GetScene { doc: d }
         | Command::Pick { doc: d, .. }
+        | Command::Validate { doc: d, .. }
+        | Command::DiffScene { doc: d, .. }
         | Command::GetProgram { doc: d }
         | Command::ExportStl { doc: d, .. }
         | Command::Export3mf { doc: d, .. }
@@ -600,6 +673,146 @@ impl Engine {
                 Ok(CommandResult::Picked { doc: *doc, hit })
             },
 
+            Command::Validate { doc, entities, min_wall_mm } => {
+                if let Some(threshold) = min_wall_mm {
+                    if !threshold.is_finite() || *threshold <= 0.0 {
+                        return Err(Error::Invalid(
+                            "min_wall_mm must be a finite value > 0 (hint: omit it to report the \
+                             estimate without a pass/fail threshold)"
+                                .into(),
+                        ));
+                    }
+                }
+                let d = self.doc(*doc)?;
+                let ids: Vec<EntityId> = match entities {
+                    Some(ids) => ids.clone(),
+                    None => d.entities.keys().copied().collect(),
+                };
+                let mut solids = Vec::new();
+                let mut sketches = Vec::new();
+                let mut warnings = Vec::new();
+                for id in ids {
+                    let e = d.entities.get(&id).ok_or(Error::UnknownEntity { doc: *doc, entity: id })?;
+                    if matches!(e.shape, Shape::Sketch { .. }) {
+                        let report = sketch_validation(e);
+                        if !report.solved {
+                            warnings.push(format!(
+                                "sketch {} '{}': solver reports residual {:.3e} (hint: inspect \
+                                 its constraints with get_scene)",
+                                report.entity, report.name, report.residual
+                            ));
+                        }
+                        if report.profile_error.is_some() {
+                            warnings.push(format!(
+                                "sketch {} '{}': {}",
+                                report.entity,
+                                report.name,
+                                report.profile_error.as_deref().unwrap_or_default()
+                            ));
+                        }
+                        sketches.push(report);
+                    } else {
+                        let report = solid_validation(e, *min_wall_mm);
+                        if !report.watertight {
+                            warnings.push(format!(
+                                "solid {} '{}' is not watertight ({} open, {} non-manifold \
+                                 edge(s); hint: a closed solid has exactly two triangles per edge)",
+                                report.entity,
+                                report.name,
+                                report.open_edges,
+                                report.non_manifold_edges
+                            ));
+                        }
+                        if report.self_intersections > 0 {
+                            warnings.push(format!(
+                                "solid {} '{}' self-intersects in {} triangle pair(s) (hint: the \
+                                 surfaces cross; boolean the overlapping pieces instead of \
+                                 leaving them in one mesh)",
+                                report.entity, report.name, report.self_intersections
+                            ));
+                        }
+                        if report.volume <= 0.0 {
+                            warnings.push(format!(
+                                "solid {} '{}' has non-positive signed volume ({:.3} mm^3; hint: \
+                                 the winding is inward)",
+                                report.entity, report.name, report.volume
+                            ));
+                        }
+                        if report.thin {
+                            warnings.push(format!(
+                                "solid {} '{}' is thinner than {} mm (estimated wall {:.3} mm \
+                                 near {})",
+                                report.entity,
+                                report.name,
+                                min_wall_mm.unwrap_or(0.0),
+                                report.min_wall.unwrap_or(0.0),
+                                report
+                                    .min_wall_at
+                                    .map(|p| format!("({:.2}, {:.2}, {:.2})", p[0], p[1], p[2]))
+                                    .unwrap_or_else(|| "an unsampled location".into())
+                            ));
+                        } else if min_wall_mm.is_some() && report.min_wall.is_none() && report.watertight {
+                            warnings.push(format!(
+                                "solid {} '{}': no wall estimate (the sampled inward rays found \
+                                 no opposite surface; hint: the mesh may be too coarse or \
+                                 disconnected)",
+                                report.entity, report.name
+                            ));
+                        }
+                        solids.push(report);
+                    }
+                }
+
+                let totals = validation_totals(&solids, &sketches);
+                let ok = solids.iter().all(|s| s.ok) && sketches.iter().all(|s| s.ok);
+                Ok(CommandResult::Validated { doc: *doc, ok, solids, sketches, totals, warnings })
+            },
+
+            Command::DiffScene { doc, against, path } => {
+                if against.is_some() == path.is_some() {
+                    return Err(Error::Invalid(
+                        "diff_scene needs exactly one baseline: `against` (an open document id) \
+                         or `path` (a saved .agcad file)"
+                            .into(),
+                    ));
+                }
+                let d = self.doc(*doc)?;
+                let loaded;
+                let (baseline, against_id, against_name): (&Document, Option<DocId>, String) =
+                    match (against, path) {
+                        (Some(id), None) => {
+                            if *id == *doc {
+                                return Err(Error::Invalid(
+                                    "diff_scene needs two revisions (hint: the baseline is this \
+                                     same document; compare with another doc or a saved file)"
+                                        .into(),
+                                ));
+                            }
+                            let base = self.doc(*id)?;
+                            (base, Some(*id), base.name.clone())
+                        },
+                        (None, Some(p)) => {
+                            let snap = read_snapshot(p)?;
+                            let stored_name = if snap.name.trim().is_empty() {
+                                p.clone()
+                            } else {
+                                snap.name.clone()
+                            };
+                            loaded = Document::from_snapshot(snap, 0, stored_name).map_err(|e| {
+                                Error::Document(format!(
+                                    "baseline '{p}' failed to replay ({e}; hint: the file may \
+                                     use features this build lacks, or reference an undefined \
+                                     parameter)"
+                                ))
+                            })?;
+                            (&loaded, None, p.clone())
+                        },
+                        _ => unreachable!("validated exactly one baseline above"),
+                    };
+
+                Ok(diff_documents(*doc, d, baseline, against_id, against_name))
+            },
+
             Command::ExportStl { doc, path, entities } => {
                 let d = self.doc(*doc)?;
                 let ids: Vec<EntityId> = match entities {
@@ -703,33 +916,7 @@ impl Engine {
             },
 
             Command::OpenDocument { path, name } => {
-                let text = std::fs::read_to_string(path).map_err(|e| {
-                    Error::Document(format!(
-                        "cannot read document '{path}': {e} \
-                         (hint: use an absolute path the server can read)"
-                    ))
-                })?;
-                let snap: DocumentSnapshot = serde_json::from_str(&text).map_err(|e| {
-                    Error::Document(format!(
-                        "cannot parse document '{path}': {e} \
-                         (hint: .agcad files are JSON written by save_document)"
-                    ))
-                })?;
-                if snap.format != DOCUMENT_FORMAT {
-                    return Err(Error::Document(format!(
-                        "'{path}' is not an agcad document (format: '{}'; \
-                         hint: the file must start with {{\"format\": \"{DOCUMENT_FORMAT}\"}})",
-                        snap.format
-                    )));
-                }
-                if snap.version > DOCUMENT_VERSION {
-                    return Err(Error::Document(format!(
-                        "document '{path}' is version {} but this build reads up to \
-                         {DOCUMENT_VERSION} (hint: upgrade the server)",
-                        snap.version
-                    )));
-                }
-
+                let snap = read_snapshot(path)?;
                 let doc = self.next_doc;
                 let stored_name = if snap.name.trim().is_empty() {
                     std::path::Path::new(path)
@@ -739,27 +926,15 @@ impl Engine {
                 } else {
                     snap.name.clone()
                 };
-                let mut d = Document::new(doc, name.clone().unwrap_or(stored_name));
-                d.params = snap
-                    .parameters
-                    .iter()
-                    .map(|(k, p)| {
-                        (k.clone(), Param { value: p.value, description: p.description.clone() })
-                    })
-                    .collect();
-                d.source = snap.source.clone();
-                d.program = snap.program;
-                for cmd in &mut d.program {
-                    set_doc(cmd, doc);
-                }
                 // Rebuild geometry from the program. If it fails, nothing is
                 // inserted, so the engine never holds a half-open document.
-                d.replay().map_err(|e| {
-                    Error::Document(format!(
-                        "document '{path}' failed to replay ({e}; hint: the file may use \
-                         features this build lacks, or reference an undefined parameter)"
-                    ))
-                })?;
+                let d = Document::from_snapshot(snap, doc, name.clone().unwrap_or(stored_name))
+                    .map_err(|e| {
+                        Error::Document(format!(
+                            "document '{path}' failed to replay ({e}; hint: the file may use \
+                             features this build lacks, or reference an undefined parameter)"
+                        ))
+                    })?;
 
                 let result = CommandResult::DocumentOpened {
                     doc,
@@ -862,6 +1037,282 @@ impl Engine {
     }
 }
 
+/// One solid's trust report (see [`Command::Validate`]).
+fn solid_validation(entity: &Entity, min_wall_mm: Option<f64>) -> SolidValidation {
+    let world = transform_mesh(&entity.mesh, &entity.transform());
+    let check = validate::check_solid(&world);
+    let thin = min_wall_mm.is_some_and(|t| check.min_wall.is_some_and(|w| w < t));
+    let ok = check.watertight
+        && check.non_manifold_edges == 0
+        && check.self_intersections == 0
+        && check.volume > 0.0
+        && !thin;
+    SolidValidation {
+        entity: entity.id,
+        name: entity.name.clone(),
+        kind: entity.shape.kind().to_string(),
+        ok,
+        watertight: check.watertight,
+        open_edges: check.open_edges,
+        non_manifold_edges: check.non_manifold_edges,
+        degenerate_tris: check.degenerate_tris,
+        self_intersections: check.self_intersections,
+        self_intersection_points: check.self_intersection_points,
+        volume: check.volume,
+        tris: check.tris,
+        bbox: check.bbox,
+        min_wall: check.min_wall,
+        min_wall_at: check.min_wall_at,
+        thin,
+        signature: validate::entity_signature(entity),
+    }
+}
+
+/// One sketch's trust report: solver status and whether it can be extruded.
+fn sketch_validation(entity: &Entity) -> SketchValidation {
+    let Shape::Sketch { elements, constraints, solved, residual, dof, .. } = &entity.shape else {
+        unreachable!("sketch_validation is only called for sketches")
+    };
+    let (closed_profile, loops, profile_error) = if elements.is_empty() {
+        (false, 0, None)
+    } else {
+        match sketch::profile_loops(elements) {
+            Ok(loops) => (true, loops.len(), None),
+            Err(err) => (false, 0, Some(err)),
+        }
+    };
+    SketchValidation {
+        entity: entity.id,
+        name: entity.name.clone(),
+        ok: *solved && (elements.is_empty() || closed_profile),
+        solved: *solved,
+        residual: *residual,
+        dof: *dof,
+        elements: elements.len(),
+        constraints: constraints.len(),
+        closed_profile,
+        loops,
+        profile_error,
+        signature: validate::entity_signature(entity),
+    }
+}
+
+/// Roll per-entity reports up into document totals.
+fn validation_totals(solids: &[SolidValidation], sketches: &[SketchValidation]) -> ValidationTotals {
+    let mut totals = ValidationTotals {
+        solids: solids.len(),
+        sketches: sketches.len(),
+        tris: 0,
+        volume: 0.0,
+        open_edges: 0,
+        non_manifold_edges: 0,
+        self_intersections: 0,
+        degenerate_tris: 0,
+        min_wall: None,
+        bbox: None,
+    };
+    for s in solids {
+        totals.tris += s.tris;
+        totals.volume += s.volume;
+        totals.open_edges += s.open_edges;
+        totals.non_manifold_edges += s.non_manifold_edges;
+        totals.self_intersections += s.self_intersections;
+        totals.degenerate_tris += s.degenerate_tris;
+        if let Some(wall) = s.min_wall {
+            totals.min_wall = Some(totals.min_wall.map_or(wall, |m: f64| m.min(wall)));
+        }
+        totals.bbox = Some(match totals.bbox {
+            None => s.bbox,
+            Some(b) => Bbox {
+                min: [b.min[0].min(s.bbox.min[0]), b.min[1].min(s.bbox.min[1]), b.min[2].min(s.bbox.min[2])],
+                max: [b.max[0].max(s.bbox.max[0]), b.max[1].max(s.bbox.max[1]), b.max[2].max(s.bbox.max[2])],
+            },
+        });
+    }
+    totals
+}
+
+/// Compact entity description for a scene diff.
+fn entity_summary(entity: &Entity) -> EntitySummary {
+    let is_sketch = matches!(entity.shape, Shape::Sketch { .. });
+    let transform = entity.transform();
+    EntitySummary {
+        entity: entity.id,
+        name: entity.name.clone(),
+        kind: entity.shape.kind().to_string(),
+        signature: validate::entity_signature(entity),
+        volume: if is_sketch {
+            None
+        } else {
+            Some(fillet::signed_volume(&transform_mesh(&entity.mesh, &transform)))
+        },
+        tris: if is_sketch { None } else { Some(entity.mesh.indices.len() / 3) },
+        world_bbox: world_bbox(&entity.mesh, &transform),
+    }
+}
+
+/// Build the full revision comparison (the `diff_scene` command body).
+fn diff_documents(
+    doc: DocId,
+    current: &Document,
+    baseline: &Document,
+    against: Option<DocId>,
+    against_name: String,
+) -> CommandResult {
+    use std::collections::BTreeSet;
+
+    let current_signature = validate::scene_signature(&current.entities);
+    let baseline_signature = validate::scene_signature(&baseline.entities);
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+    let mut unchanged = 0usize;
+
+    for (id, e) in &current.entities {
+        let Some(b) = baseline.entities.get(id) else {
+            added.push(entity_summary(e));
+            continue;
+        };
+        let from_sig = validate::entity_signature(b);
+        let to_sig = validate::entity_signature(e);
+        if from_sig == to_sig {
+            unchanged += 1;
+            continue;
+        }
+        let mut changed = Vec::new();
+        if b.name != e.name {
+            changed.push("name".to_string());
+        }
+        if b.color != e.color {
+            changed.push("color".to_string());
+        }
+        if b.shape.kind() != e.shape.kind() {
+            changed.push("kind".to_string());
+        }
+        if b.translation != e.translation {
+            changed.push("translation".to_string());
+        }
+        if b.rotation_deg != e.rotation_deg {
+            changed.push("rotation_deg".to_string());
+        }
+        if b.scale != e.scale {
+            changed.push("scale".to_string());
+        }
+        if !mesh_eq(&b.mesh, &e.mesh) {
+            changed.push("mesh".to_string());
+        }
+        if !sketch_eq(&b.shape, &e.shape) {
+            changed.push("sketch".to_string());
+        }
+        modified.push(EntityChange {
+            entity: *id,
+            changed,
+            from: EntitySummary {
+                entity: b.id,
+                name: b.name.clone(),
+                kind: b.shape.kind().to_string(),
+                signature: from_sig,
+                volume: if matches!(b.shape, Shape::Sketch { .. }) {
+                    None
+                } else {
+                    Some(fillet::signed_volume(&transform_mesh(&b.mesh, &b.transform())))
+                },
+                tris: if matches!(b.shape, Shape::Sketch { .. }) {
+                    None
+                } else {
+                    Some(b.mesh.indices.len() / 3)
+                },
+                world_bbox: world_bbox(&b.mesh, &b.transform()),
+            },
+            to: entity_summary(e),
+        });
+    }
+    for (id, b) in &baseline.entities {
+        if !current.entities.contains_key(id) {
+            removed.push(entity_summary(b));
+        }
+    }
+
+    let names: BTreeSet<&String> = current.params.keys().chain(baseline.params.keys()).collect();
+    let mut parameters = Vec::new();
+    for name in names {
+        let from = baseline.params.get(name).map(|p| p.value);
+        let to = current.params.get(name).map(|p| p.value);
+        if from != to {
+            parameters.push(ParameterChange { name: name.clone(), from, to });
+        }
+    }
+
+    let commands_from = baseline.program.len();
+    let commands_to = current.program.len();
+    let program_changed = canonical_program(&baseline.program) != canonical_program(&current.program);
+    let changed = !added.is_empty()
+        || !removed.is_empty()
+        || !modified.is_empty()
+        || !parameters.is_empty()
+        || program_changed;
+
+    CommandResult::SceneDiff {
+        doc,
+        against,
+        against_name,
+        changed,
+        scene_signature: current_signature,
+        against_signature: baseline_signature,
+        added,
+        removed,
+        modified,
+        unchanged,
+        parameters,
+        program_changed,
+        commands_from,
+        commands_to,
+    }
+}
+
+/// Mesh equality for diffing: positions and indices, bit for bit. Normals
+/// are derived from those and are intentionally ignored.
+fn mesh_eq(a: &Mesh, b: &Mesh) -> bool {
+    a.indices == b.indices
+        && a.positions.len() == b.positions.len()
+        && a.positions.iter().zip(&b.positions).all(|(p, q)| {
+            p[0].to_bits() == q[0].to_bits()
+                && p[1].to_bits() == q[1].to_bits()
+                && p[2].to_bits() == q[2].to_bits()
+        })
+}
+
+/// Whether the non-placement content of two shapes differs. Solids are
+/// covered by the mesh comparison; this catches sketch elements, constraints
+/// and solver status.
+fn sketch_eq(a: &Shape, b: &Shape) -> bool {
+    match (a, b) {
+        (
+            Shape::Sketch { elements: ea, constraints: ca, solved: sa, residual: ra, dof: da, .. },
+            Shape::Sketch { elements: eb, constraints: cb, solved: sb, residual: rb, dof: db, .. },
+        ) => {
+            ea == eb
+                && ca == cb
+                && sa == sb
+                && ra.to_bits() == rb.to_bits()
+                && da == db
+        },
+        (Shape::Sketch { .. }, _) | (_, Shape::Sketch { .. }) => false,
+        _ => true,
+    }
+}
+
+/// Serialize a program with doc ids normalized, for an order-sensitive but
+/// id-independent comparison.
+fn canonical_program(program: &[Command]) -> String {
+    let mut normalized = program.to_vec();
+    for cmd in &mut normalized {
+        set_doc(cmd, 1);
+    }
+    serde_json::to_string(&normalized).unwrap_or_default()
+}
+
 fn doc_of(command: &Command) -> Option<DocId> {
     match command {
         Command::AddBox { doc, .. }
@@ -888,6 +1339,9 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Undo { doc }
         | Command::Redo { doc }
         | Command::GetScene { doc }
+        | Command::Pick { doc, .. }
+        | Command::Validate { doc, .. }
+        | Command::DiffScene { doc, .. }
         | Command::ExportStl { doc, .. }
         | Command::Export3mf { doc, .. }
         | Command::RenderOffscreen { doc, .. }
@@ -3871,5 +4325,371 @@ mod tests {
         assert_eq!(reopened.indices, saved.indices);
         assert_eq!(reopened.positions, saved.positions);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_reports_a_printable_box() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0, 0.0, 0.0], [10.0, 20.0, 30.0]);
+        let program_before = match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { program, .. } => program.len(),
+            r => panic!("unexpected result {r:?}"),
+        };
+
+        match e
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(5.0) })
+            .unwrap()
+        {
+            CommandResult::Validated { ok, solids, sketches, totals, warnings, .. } => {
+                assert!(ok, "box should pass: {warnings:?}");
+                assert!(warnings.is_empty());
+                assert!(sketches.is_empty());
+                assert_eq!(solids.len(), 1);
+                let s = &solids[0];
+                assert_eq!(s.entity, id);
+                assert_eq!(s.kind, "box");
+                assert!(s.ok && s.watertight);
+                assert_eq!(s.open_edges, 0);
+                assert_eq!(s.non_manifold_edges, 0);
+                assert_eq!(s.self_intersections, 0);
+                assert_eq!(s.tris, 12);
+                assert!((s.volume - 6000.0).abs() < 1e-6, "volume {}", s.volume);
+                let wall = s.min_wall.expect("box has a wall estimate");
+                assert!((wall - 10.0).abs() < 0.01, "min wall {wall}");
+                assert!(!s.thin);
+                assert_eq!(s.signature.len(), 16);
+                assert_eq!(totals.solids, 1);
+                assert!((totals.volume - 6000.0).abs() < 1e-6);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Validation is a query: it does not touch the program or history.
+        let program_after = match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { program, .. } => program.len(),
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(program_after, program_before);
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        assert!(matches!(
+            e.execute(Command::GetScene { doc: 1 }).unwrap(),
+            CommandResult::Scene { entities, .. } if entities.is_empty()
+        ));
+    }
+
+    #[test]
+    fn validate_flags_a_thin_solid_and_reports_the_wall() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0, 0.0, 0.0], [20.0, 20.0, 1.0]);
+        match e
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(2.0) })
+            .unwrap()
+        {
+            CommandResult::Validated { ok, solids, warnings, .. } => {
+                assert!(!ok);
+                let s = &solids[0];
+                assert_eq!(s.entity, id);
+                assert!(s.ok == false && s.thin);
+                let wall = s.min_wall.expect("thin plate has a wall estimate");
+                assert!((wall - 1.0).abs() < 0.01, "min wall {wall}");
+                assert!(
+                    warnings.iter().any(|w| w.contains("thinner than 2 mm")),
+                    "{warnings:?}"
+                );
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let err = e
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(0.0) })
+            .unwrap_err();
+        assert!(err.to_string().contains("min_wall_mm"), "{err}");
+    }
+
+    #[test]
+    fn validate_checks_sketch_solver_and_profile() {
+        let mut e = engine();
+        let (sketch, lines) = rect_sketch(&mut e, 40.0, 30.0);
+        match e
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None })
+            .unwrap()
+        {
+            CommandResult::Validated { ok, solids, sketches, .. } => {
+                assert!(ok, "a closed, solved rectangle is valid");
+                assert!(solids.is_empty());
+                let s = &sketches[0];
+                assert_eq!(s.entity, sketch);
+                assert!(s.ok && s.solved && s.closed_profile);
+                assert_eq!(s.elements, 4);
+                assert_eq!(s.loops, 1);
+                assert!(s.profile_error.is_none());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Open the loop: the sketch is still solvable but cannot be extruded.
+        e.execute(Command::DeleteSketchElement { doc: 1, sketch, element: lines[2] })
+            .unwrap();
+        match e
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None })
+            .unwrap()
+        {
+            CommandResult::Validated { ok, sketches, warnings, .. } => {
+                assert!(!ok);
+                let s = &sketches[0];
+                assert!(!s.ok && !s.closed_profile);
+                assert!(s.profile_error.as_deref().unwrap_or("").contains("open"), "{s:?}");
+                assert!(warnings.iter().any(|w| w.contains("sketch")), "{warnings:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_a_filleted_boolean() {
+        // A rounded union is the shape that used to trip a naive
+        // self-intersection test: tangent seams and sub-micron slivers are
+        // not crossings, and the thin fin they make is not a printable wall.
+        let mut e = engine();
+        let base = add_box(&mut e, [0.0, 0.0, 5.0], [40.0, 40.0, 10.0]);
+        let boss = match e
+            .execute(Command::AddCylinder {
+                doc: 1,
+                name: "boss".into(),
+                center: vec3(0.0),
+                radius: num(8.0),
+                height: num(14.0),
+                segments: Some(24),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let fused = match e
+            .execute(Command::Boolean {
+                doc: 1,
+                op: BooleanOp::Union,
+                entities: vec![base, boss],
+                name: Some("fused".into()),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::Fillet {
+            doc: 1,
+            entity: fused,
+            radius: num(1.0),
+            edges: Some(EdgeFilter { normals: Some(vec![[0.0, 0.0, 1.0]]), ..Default::default() }),
+            min_angle_deg: None,
+        })
+        .unwrap();
+
+        match e
+            .execute(Command::Validate { doc: 1, entities: Some(vec![fused]), min_wall_mm: Some(1.5) })
+            .unwrap()
+        {
+            CommandResult::Validated { ok, solids, warnings, .. } => {
+                let s = &solids[0];
+                assert!(s.watertight && s.ok, "{warnings:?}");
+                assert_eq!(s.self_intersections, 0, "tangent seams are not crossings");
+                let wall = s.min_wall.expect("rounded union has a wall estimate");
+                assert!(wall > 1.5, "min wall {wall} should ignore fin slivers");
+                assert!(!s.thin);
+                assert!(ok, "{warnings:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_scene_detects_a_parameter_driven_rebuild() {
+        let (path, path_s) = temp_file("agcad_diff_scene.agcad");
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "t".into(),
+            value: num(4.0),
+            description: Some("plate thickness".into()),
+        })
+        .unwrap();
+        let id = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "plate".into(),
+                center: [num(0.0), num(0.0), Scalar::Expression("t/2".into())],
+                size: [num(20.0), num(20.0), Scalar::Expression("t".into())],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::SaveDocument { doc: 1, path: path_s.clone(), source: None }).unwrap();
+
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "t".into(),
+            value: num(0.8),
+            description: None,
+        })
+        .unwrap();
+        match e
+            .execute(Command::DiffScene { doc: 1, against: None, path: Some(path_s.clone()) })
+            .unwrap()
+        {
+            CommandResult::SceneDiff {
+                changed,
+                added,
+                removed,
+                modified,
+                unchanged,
+                parameters,
+                program_changed,
+                commands_from,
+                commands_to,
+                scene_signature,
+                against_signature,
+                ..
+            } => {
+                assert!(changed);
+                assert!(added.is_empty() && removed.is_empty());
+                assert_eq!(unchanged, 0);
+                assert_eq!(modified.len(), 1);
+                let m = &modified[0];
+                assert_eq!(m.entity, id);
+                assert!(m.changed.iter().any(|c| c == "mesh"), "{:?}", m.changed);
+                assert!(m.changed.iter().any(|c| c == "translation"), "{:?}", m.changed);
+                assert!((m.from.volume.unwrap() - 1600.0).abs() < 1e-6);
+                assert!((m.to.volume.unwrap() - 320.0).abs() < 1e-3);
+                assert_ne!(m.from.signature, m.to.signature);
+                assert_eq!(parameters.len(), 1);
+                assert_eq!(parameters[0].name, "t");
+                assert_eq!(parameters[0].from, Some(4.0));
+                assert_eq!(parameters[0].to, Some(0.8));
+                assert!(!program_changed);
+                assert_eq!(commands_from, commands_to);
+                assert_ne!(scene_signature, against_signature);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Back to the baseline: nothing changed, and the program is intact.
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "t".into(),
+            value: num(4.0),
+            description: None,
+        })
+        .unwrap();
+        match e
+            .execute(Command::DiffScene { doc: 1, against: None, path: Some(path_s) })
+            .unwrap()
+        {
+            CommandResult::SceneDiff {
+                changed,
+                added,
+                removed,
+                modified,
+                unchanged,
+                parameters,
+                program_changed,
+                scene_signature,
+                against_signature,
+                ..
+            } => {
+                assert!(!changed);
+                assert!(added.is_empty() && removed.is_empty() && modified.is_empty());
+                assert_eq!(unchanged, 1);
+                assert!(parameters.is_empty());
+                assert!(!program_changed);
+                assert_eq!(scene_signature, against_signature);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn diff_scene_compares_two_open_documents() {
+        let mut e = engine();
+        add_box(&mut e, [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+
+        e.execute(Command::CreateDocument { name: "baseline".into(), doc: Some(2) }).unwrap();
+        match e
+            .execute(Command::AddBox {
+                doc: 2,
+                name: "box".into(),
+                center: vec3(0.0),
+                size: vec3(20.0),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => assert_eq!(entity, 1),
+            r => panic!("unexpected result {r:?}"),
+        }
+        // The baseline has one extra solid, so the current revision is
+        // missing it.
+        e.execute(Command::AddBox {
+            doc: 2,
+            name: "extra".into(),
+            center: vec3(50.0),
+            size: vec3(2.0),
+            color: None,
+        })
+        .unwrap();
+
+        match e
+            .execute(Command::DiffScene { doc: 1, against: Some(2), path: None })
+            .unwrap()
+        {
+            CommandResult::SceneDiff { changed, added, removed, modified, unchanged, .. } => {
+                assert!(changed);
+                assert!(added.is_empty());
+                assert_eq!(removed.len(), 1);
+                assert_eq!(removed[0].entity, 2);
+                assert_eq!(modified.len(), 1);
+                assert!(modified[0].changed.iter().any(|c| c == "mesh"));
+                assert_eq!(unchanged, 0);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Identical revisions compare clean, including the params/program.
+        e.execute(Command::CreateDocument { name: "copy".into(), doc: Some(3) }).unwrap();
+        e.execute(Command::AddBox {
+            doc: 3,
+            name: "box".into(),
+            center: vec3(0.0),
+            size: vec3(10.0),
+            color: None,
+        })
+        .unwrap();
+        match e
+            .execute(Command::DiffScene { doc: 1, against: Some(3), path: None })
+            .unwrap()
+        {
+            CommandResult::SceneDiff { changed, unchanged, modified, parameters, .. } => {
+                assert!(!changed);
+                assert_eq!(unchanged, 1);
+                assert!(modified.is_empty() && parameters.is_empty());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let err = e
+            .execute(Command::DiffScene { doc: 1, against: None, path: None })
+            .unwrap_err();
+        assert!(err.to_string().contains("exactly one baseline"), "{err}");
+        let err = e
+            .execute(Command::DiffScene { doc: 1, against: Some(1), path: None })
+            .unwrap_err();
+        assert!(err.to_string().contains("same document"), "{err}");
     }
 }

@@ -37,7 +37,9 @@ Cylinders extrude along +Z. Document ids start at 1; create_document takes an
 optional explicit `doc` id, so create-then-populate fits in one batch.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
 dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
-verify -> agcad_render to SEE the result -> export_stl/export_3mf for slicing. Sketches are
+verify -> validate to prove watertightness/printability and diff_scene to see
+exactly what a knob changed -> agcad_render to SEE the result -> export_stl/
+export_3mf for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change ->
 extrude/revolve turns a closed profile into a printable solid. Sketch planes can
@@ -144,6 +146,20 @@ pick{doc,ray:{origin:[x,y,z],direction:[x,y,z]},tolerance?} (world-space ray
   edge -> fillet/chamfer{edges:<edge>} (exactly {direction,near,near_radius},
   present only when the hit is within tolerance mm of a sharp edge). This is
   how a human click in the viewer reaches the agent; sketches are skipped),
+validate{doc,entities?,min_wall_mm?} (trust check, changes no state). For every
+  solid: watertight/open/non-manifold edges, degenerate triangles,
+  self-intersections, signed world volume, world bbox and an approximate
+  thinnest wall (inward rays; sub-0.05 mm contact is treated as numerical
+  noise); for every sketch: solver status and whether the profile is closed.
+  Returns ok + per-entity reports + totals + warnings. entities restricts the
+  check; min_wall_mm sets the thin-wall pass/fail threshold (omit to report
+  the estimate without failing),
+diff_scene{doc,against?:doc_id,path?:".agcad"} (compare two revisions by
+  entity signature; pass exactly one baseline: another open document or a
+  saved file, which is replayed read-only and not added to the document list.
+  Returns changed + added/removed/modified with the changed fields and
+  volume/triangle deltas, unchanged count, parameter changes, program change,
+  and stable scene signatures. Use it to prove a rebuild did what you meant),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),

@@ -144,6 +144,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Redo { doc }
         | Command::GetScene { doc }
         | Command::Pick { doc, .. }
+        | Command::Validate { doc, .. }
+        | Command::DiffScene { doc, .. }
         | Command::GetParameters { doc }
         | Command::ExportStl { doc, .. }
         | Command::Export3mf { doc, .. }

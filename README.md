@@ -112,8 +112,9 @@ Commands, grouped by intent:
 - **Sketches and solids**: `add_sketch`, `add_sketch_line`,
   `add_sketch_circle`, `constrain`, `remove_constraint`, `move_sketch_point`,
   `delete_sketch_element`, `extrude`, `revolve`
-- **Queries and I/O**: `get_scene`, `get_program`, `pick`, `export_stl`,
-  `export_3mf`, `render_offscreen`, `save_document`, `open_document`
+- **Queries and I/O**: `get_scene`, `get_program`, `pick`, `validate`,
+  `diff_scene`, `export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
+  `open_document`
 - **History**: `undo`, `redo`
 
 `get_program` returns the program, the parameters and any embedded authoring
@@ -242,6 +243,58 @@ top = cad.add_sketch(doc, "pocket", plane={"entity": base, "normal": [0, 0, 1]})
 side = cad.add_sketch(doc, "boss", plane={"entity": base, "normal": [1, 0, 0]})
 cad.add_sketch(doc, "plate_top", plane="xy", offset="wall*2")
 ```
+
+## Trust: prove the rebuild and see what changed
+
+Regeneration is only a substitute for feature editing if the agent can prove
+the rebuilt part is right. `validate` checks every solid and sketch; the
+result's `ok` is the short answer, and per-entity reports say why:
+
+```json
+{"method":"validate","params":{"doc":1,"min_wall_mm":2.0}}
+{"result":{"validated":{
+  "doc":1,"ok":false,
+  "solids":[{"entity":3,"name":"bracket","kind":"boolean",
+    "ok":false,"watertight":true,"open_edges":0,"non_manifold_edges":0,
+    "degenerate_tris":0,"self_intersections":0,
+    "volume":17772.06,"tris":10664,"bbox":{...},
+    "min_wall":1.21,"min_wall_at":[7.03,-3.87,10.87],"thin":true,
+    "signature":"4f0c…"}],
+  "sketches":[],"totals":{...},"warnings":["solid 3 'bracket' is thinner than 2 mm …"]}}}
+```
+
+A solid passes when it is watertight (every welded edge has exactly two
+triangles), manifold, free of self-intersections, has positive signed world
+volume and meets `min_wall_mm` when given. Self-intersection is a cheap
+deterministic sweep over triangle AABBs, with a strict plane-crossing test so
+tangent seams do not count; the minimum wall is one inward ray per sampled
+triangle, with sub-0.05 mm contact treated as numerical noise rather than a
+printable wall. Sketches report solver status and whether their profile is
+closed, so `ok` also catches an open loop before `extrude` fails.
+
+`diff_scene{doc, against|path}` compares two revisions by entity signature
+(name, placement, color and geometry, hashed with FNV-1a). `against` is
+another open document; `path` is a saved `.agcad` baseline, replayed
+privately and never added to the document list. The result names added,
+removed and modified entities, the changed fields, volume/triangle deltas,
+parameter changes, program changes and stable scene fingerprints:
+
+```json
+{"method":"diff_scene","params":{"doc":1,"path":"/tmp/baseline.agcad"}}
+{"result":{"scene_diff":{
+  "doc":1,"against_name":"/tmp/baseline.agcad","changed":true,
+  "scene_signature":"b106a1410b271387","against_signature":"ca8b1e033525cd94",
+  "modified":[{"entity":1,"changed":["translation","mesh"],
+    "from":{"volume":1600.0,"signature":"ca8b…"},
+    "to":{"volume":320.0,"signature":"b106…"}}],
+  "added":[],"removed":[],"unchanged":0,
+  "parameters":[{"name":"thickness","from":4.0,"to":0.8}],
+  "program_changed":false,"commands_from":1,"commands_to":1}}}
+```
+
+Both are session commands: they change no state and are not part of the
+program. The loop is **build → validate → render → change a knob → diff**,
+and a no-op rebuild shows `changed:false` with identical signatures.
 
 ## Live preview: MCP agent + viewer, one shared scene
 
@@ -377,9 +430,10 @@ This session is private. For the human/agent loop, start
 ## Roadmap
 
 Direction: **the script is the source of truth**. The next milestones make the
-agent-authored script loop trustworthy and expressive — validation, shape and
-sketch coverage, interoperability — and give the human a concrete way to point
-at geometry, rather than building a GUI feature tree. Feature-history editing is
+agent-authored script loop faster and more expressive — incremental rebuilds,
+shape and sketch coverage, interoperability — and give the human a concrete way
+to point at geometry, rather than building a GUI feature tree. Validation and
+scene diffs (M14) make a rebuild provable; feature-history editing is
 deliberately not a goal: replay is deterministic and `set_parameter` covers knob
 turns, while the script remains the editing surface.
 
@@ -438,14 +492,18 @@ turns, while the script remains the editing surface.
       `fillet` or `chamfer`. Picking lives in the engine, so the viewer stays
       dumb; text is a tiny embedded 8×8 bitmap atlas — no font files or new
       runtime services.
+- [x] **M14 — Trust: `validate` + scene diff**: per solid, watertight and
+      non-manifold edges, degenerate triangles, self-intersections, signed
+      volume, world bbox and an approximate thinnest wall (with an optional
+      `min_wall_mm` threshold); per sketch, solver status and a closed
+      profile. `diff_scene` compares two revisions by stable entity signature,
+      against another open document or a saved `.agcad`, and reports added,
+      removed and modified entities with field-level changes plus parameter
+      and program diffs. Both are session commands — no program entries, no
+      state change.
 
 ### Next
 
-- [ ] **M14 — Trust: `validate` + scene diff**: check watertightness,
-      self-intersection, volume/bbox and (cheap) minimum wall per solid, and
-      compare two revisions by entity signature. Regeneration is only a
-      substitute for feature editing if the agent can prove the rebuild is
-      correct and identify what changed.
 - [ ] **M15 — Speed: incremental rebuild**: `set_parameter` currently replays
       the whole program. Track dependencies so a knob change rebuilds only the
       features downstream of it; keep the full replay as the correctness
@@ -469,8 +527,9 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 13 is complete: a human can point at geometry and the agent can act
-on exactly that reference. The suite is **128 tests** (120 engine + 8 viewer).
+Milestone 14 is complete: a rebuild can be proven printable, and two revisions
+can be compared field by field. The suite is **138 tests** (130 engine + 8
+viewer).
 
 What it covers:
 
@@ -499,10 +558,17 @@ What it covers:
   selectors, and viewer-side label/HUD/ray geometry; embedded source returned
   by `get_program`, `get_script` recovering the original text, and save/open
   preserving it.
+- **Trust** — watertight and manifold edge counts, open-mesh detection,
+  self-intersections that ignore tangent seams and sub-resolution slivers,
+  volume/bbox and thin-plate wall estimates, sketch solver/profile checks,
+  `min_wall_mm` pass/fail, and scene diffs by signature (parameter-driven
+  rebuilds, no-op replays, added/removed entities, file and open-document
+  baselines, and baseline validation errors).
 
-The next milestone is trust: M14 adds `validate` and a scene diff, so an agent
-can prove a rebuild is correct and say what changed. Then replay becomes
-incremental, and the shape and sketch vocabulary widens. A GUI feature tree is
+The next milestone is speed: M15 makes replay incremental, so a knob change
+rebuilds only the features downstream of it. The full replay stays as the
+correctness oracle, and `validate` + `diff_scene` are how the faster path is
+checked. Then the shape and sketch vocabulary widens. A GUI feature tree is
 not on the list — the agent edits the script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
@@ -511,10 +577,11 @@ profile with holes → extrude → STL/3MF → render),
 cut with a negative extrude and a +X-face boss grown with a positive one,
 both following the parametric block), `examples/pick.py` (face and edge
 selectors from rays, with the edge click surviving a height change before it
-drives a fillet), `examples/cross_block.py` (the picture → model
-reproduction above), and `examples/save_load.py` (save → open in a fresh
-engine → recover the embedded source, change a knob → export back to Python
-and run it).
+drives a fillet), `examples/validate.py` (validate a plate, fail it with a
+thin-wall knob, then diff the rebuild against the saved baseline),
+`examples/cross_block.py` (the picture → model reproduction above), and
+`examples/save_load.py` (save → open in a fresh engine → recover the embedded
+source, change a knob → export back to Python and run it).
 
 ## What agents say
 

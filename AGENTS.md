@@ -87,6 +87,13 @@ bytes; tests and agents rely on exact replay.
   geometry — re-test rim fillets before changing it.
 - Topology consumers (`edges::sharp_edges`) weld by exact f32 position bits.
   `world_bbox` is the tight world-space mesh bbox, not the rotated local bbox.
+- `validate` and `diff_scene` are read-only session commands (never program
+  entries). Entity signatures are FNV-1a over name/placement/color/geometry
+  bits; scene signatures include ids, so diffs match entities by id. The
+  self-intersection sweep and wall sampling are deterministic, and they
+  intentionally ignore tangent seams, sub-resolution slivers and sub-0.05 mm
+  contact — keep those tolerances when touching them or a filleted boolean
+  starts reporting phantom defects.
 
 ## Testing and artifacts
 

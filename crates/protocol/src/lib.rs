@@ -342,6 +342,44 @@ pub enum Command {
     /// language-agnostic.
     GetProgram { doc: DocId },
 
+    /// Check the document's printable solids and sketches. For every solid
+    /// this reports watertightness (open/non-manifold edges), degenerate
+    /// triangles, self-intersections, signed world volume, world bbox and an
+    /// approximate thinnest wall; for every sketch it reports solver status
+    /// and whether the profile is closed. A session command: it changes no
+    /// state and is not part of the program.
+    ///
+    /// `ok` is the short answer: every solid is closed, manifold,
+    /// self-intersection free, has positive volume and meets `min_wall_mm`
+    /// when given; every sketch is solved and (if it has elements) closed.
+    Validate {
+        doc: DocId,
+        /// Restrict the check to these entities. Omit for the whole scene.
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+        /// Flag solids whose estimated thinnest wall is below this value
+        /// (mm). Omit to report the estimate without failing on it.
+        #[serde(default)]
+        min_wall_mm: Option<f64>,
+    },
+
+    /// Compare two revisions by entity signature. The baseline is either
+    /// another open document (`against`) or a saved `.agcad` file (`path`),
+    /// which is replayed privately and discarded — exactly one must be given.
+    /// The diff classifies entities as added, removed, modified (with the
+    /// changed fields and volume/triangle deltas) or unchanged, and includes
+    /// parameter and program changes. A session command: it changes no state.
+    DiffScene {
+        doc: DocId,
+        /// Compare against this open document.
+        #[serde(default)]
+        against: Option<DocId>,
+        /// Compare against this `.agcad` file. Read-only: the document is
+        /// not opened into the document list.
+        #[serde(default)]
+        path: Option<String>,
+    },
+
     /// Headless software render of the document's world-space scene to a
     /// PNG, returned inline as base64 (and optionally written to `path`).
     /// A session command — rendering changes no state. Deterministic:
@@ -570,6 +608,134 @@ pub struct EdgeSelector {
     pub near_radius: f64,
 }
 
+/// Validation of one printable solid (see [`Command::Validate`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolidValidation {
+    pub entity: EntityId,
+    pub name: String,
+    /// `box`, `sphere`, `cylinder`, `boolean`, `extrude` or `revolve`.
+    pub kind: String,
+    /// Watertight, manifold, no self-intersections, positive volume and (when
+    /// a threshold was requested) not thinner than it.
+    pub ok: bool,
+    pub watertight: bool,
+    /// Edges used by exactly one triangle — a hole in the surface.
+    pub open_edges: usize,
+    /// Edges used by more than two triangles.
+    pub non_manifold_edges: usize,
+    /// Zero-area triangles (tolerated on tangent seams, reported for trust).
+    pub degenerate_tris: usize,
+    /// Pairs of non-adjacent triangles that intersect. A cheap check with a
+    /// deterministic spatial sweep; 0 means none found.
+    pub self_intersections: usize,
+    /// Up to a few representative locations (midpoints between the offending
+    /// triangle centroids), for diagnosis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub self_intersection_points: Vec<Vec3>,
+    /// Signed volume in world space (mm³); positive means outward winding.
+    pub volume: f64,
+    pub tris: usize,
+    pub bbox: Bbox,
+    /// Approximate thinnest wall in mm, from inward ray casts at sampled
+    /// triangles. `None` when the mesh is not closed or no opposite surface
+    /// was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_wall: Option<f64>,
+    /// Where the thinnest wall was measured (a surface point), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_wall_at: Option<Vec3>,
+    /// Whether `min_wall` fell below the requested `min_wall_mm` threshold.
+    pub thin: bool,
+    /// Content signature (name, placement, color and geometry).
+    pub signature: String,
+}
+
+/// Validation of one sketch: solver status plus whether it can be extruded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SketchValidation {
+    pub entity: EntityId,
+    pub name: String,
+    /// Solved, and closed when it has any elements. An empty sketch is a
+    /// valid scratch drawing, not a failure.
+    pub ok: bool,
+    pub solved: bool,
+    /// Worst remaining constraint violation.
+    pub residual: f64,
+    /// Approximate degrees of freedom left.
+    pub dof: i64,
+    pub elements: usize,
+    pub constraints: usize,
+    /// Whether the elements form a closed profile that extrude/revolve can
+    /// consume. Empty sketches are not closed.
+    pub closed_profile: bool,
+    pub loops: usize,
+    /// Why the profile is not closed, when it has elements but cannot be
+    /// extruded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_error: Option<String>,
+    pub signature: String,
+}
+
+/// Document-level totals for [`Command::Validate`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationTotals {
+    pub solids: usize,
+    pub sketches: usize,
+    pub tris: usize,
+    /// Sum of the solids' signed world volumes (mm³).
+    pub volume: f64,
+    pub open_edges: usize,
+    pub non_manifold_edges: usize,
+    pub self_intersections: usize,
+    pub degenerate_tris: usize,
+    /// Thinnest wall found across every solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_wall: Option<f64>,
+    /// Union of every solid's world bbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<Bbox>,
+}
+
+/// Compact entity description used by [`Command::DiffScene`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntitySummary {
+    pub entity: EntityId,
+    pub name: String,
+    /// `box`, `sphere`, `cylinder`, `boolean`, `sketch`, `extrude` or `revolve`.
+    pub kind: String,
+    pub signature: String,
+    /// Signed world volume (mm³); `None` for sketches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
+    /// Triangle count; `None` for sketches (their mesh is display ribbons).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tris: Option<usize>,
+    pub world_bbox: Bbox,
+}
+
+/// One entity that exists in both revisions but differs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityChange {
+    pub entity: EntityId,
+    /// The changed fields, in a stable order: `name`, `color`, `kind`,
+    /// `translation`, `rotation_deg`, `scale`, `mesh`, `sketch`.
+    pub changed: Vec<String>,
+    pub from: EntitySummary,
+    pub to: EntitySummary,
+}
+
+/// One parameter whose resolved value differs between revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterChange {
+    pub name: String,
+    /// `None` when the parameter did not exist in the baseline (`to` is set),
+    /// or was removed from the current revision (`from` is set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<f64>,
+}
+
 /// Which set operation a [`Command::Boolean`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -626,6 +792,42 @@ pub enum CommandResult {
     /// A ray query (see [`Command::Pick`]). `hit` is `None` when the ray
     /// missed every solid; that is a valid answer, not an error.
     Picked { doc: DocId, hit: Option<PickHit> },
+    /// Trust report for the document's solids and sketches (see
+    /// [`Command::Validate`]). `ok` is false when any solid is not printable
+    /// or any sketch is unsolved/open; the per-entity reports say why.
+    Validated {
+        doc: DocId,
+        ok: bool,
+        solids: Vec<SolidValidation>,
+        sketches: Vec<SketchValidation>,
+        totals: ValidationTotals,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+    },
+    /// Revision comparison by entity signature (see [`Command::DiffScene`]).
+    SceneDiff {
+        doc: DocId,
+        /// The baseline document id, when compared with `against`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        against: Option<DocId>,
+        /// Baseline name (document name or `.agcad` path).
+        against_name: String,
+        /// True when anything differs (entities, parameters or program).
+        changed: bool,
+        /// Content fingerprint of the current scene.
+        scene_signature: String,
+        /// Content fingerprint of the baseline scene.
+        against_signature: String,
+        added: Vec<EntitySummary>,
+        removed: Vec<EntitySummary>,
+        modified: Vec<EntityChange>,
+        /// Entities present in both revisions with identical signatures.
+        unchanged: usize,
+        parameters: Vec<ParameterChange>,
+        program_changed: bool,
+        commands_from: usize,
+        commands_to: usize,
+    },
     StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
     /// A 3MF package was written. `objects` is how many build items it
     /// contains, `tris` the total triangle count.

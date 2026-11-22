@@ -666,6 +666,55 @@ class Agcad:
         """Scene snapshot: entities with transforms, colors and meshes."""
         return self._request("get_scene", doc=doc)
 
+    # -- trust ---------------------------------------------------------------
+
+    def validate(
+        self,
+        doc: int,
+        entities: list[int] | None = None,
+        min_wall_mm: float | None = None,
+    ) -> dict[str, Any]:
+        """Check that the document is printable.
+
+        For every solid this reports watertightness (open and non-manifold
+        edges), degenerate triangles, self-intersections, signed world
+        volume, world bbox and an approximate thinnest wall; for every
+        sketch it reports solver status and whether the profile is closed.
+
+        ``ok`` is the short answer: all solids are closed, manifold,
+        self-intersection free, have positive volume and are at least
+        ``min_wall_mm`` thick when that threshold is given; all sketches are
+        solved and (when non-empty) closed. ``entities`` restricts the check.
+
+        A session command: it changes no state and is not part of the
+        program. The wall estimate casts one inward ray per sampled triangle,
+        so it is a fast sanity check rather than a medial-axis measurement.
+        """
+        return self._request(
+            "validate", doc=doc, entities=entities, min_wall_mm=min_wall_mm
+        )
+
+    def diff_scene(
+        self,
+        doc: int,
+        against: int | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare two revisions by entity signature.
+
+        The baseline is either another open document (``against``) or a saved
+        ``.agcad`` file (``path``); pass exactly one. The result classifies
+        entities as added, removed, modified (with the changed fields and
+        volume/triangle deltas) or unchanged, and reports parameter and
+        program changes. ``scene_signature``/``against_signature`` are stable
+        content fingerprints.
+
+        Reading a file baseline is read-only: it is replayed privately and
+        never inserted into the document list. A session command — it
+        changes no state and is not part of the program.
+        """
+        return self._request("diff_scene", doc=doc, against=against, path=path)
+
     # -- persistence ---------------------------------------------------------
 
     def save_document(
