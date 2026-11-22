@@ -6,9 +6,9 @@
 
 A CAD whose primary user is an **AI agent**.
 
-> The logo is the "hello world" of this CAD: three spheres, a cylinder and
-> a couple of boxes, assembled by a parametric program — drawn as an SVG
-> from the same primitives the engine tessellates. See
+> The logo is the "hello world" of this CAD: three spheres, a cylinder and a
+> couple of boxes, assembled by a parametric program — drawn as an SVG from the
+> same primitives the engine tessellates. See
 > `examples/draw_snowman_family.py` for the living version.
 
 The architecture inverts the usual GUI-first design: the headless core and
@@ -16,16 +16,16 @@ its command bus are the product; the human-facing viewer is just another
 client — as is the Python client an agent drives.
 
 ```
-┌────────────┐   JSON-RPC (stdio/TCP)   ┌──────────────┐
-│  agent /   │ ───────────────────────► │   agcad      │ ┌───────────────┐
-│  python /  │ ◄─────────────────────── │  server      │ │   agcad-core  │
-│  any lang  │                          │ (transport)  │ │ documents     │
-└────────────┘                          └──────────────┘ │ entities      │
-                                                             │ history/undo  │
-┌────────────┐          same bus (TCP)                       │ tessellation  │
-│ agcad-view │ ─────────────────────────────► get_scene ───► └───────────────┘
-│ (wgpu, dumb)│  pulls snapshots; owns no document state
-└────────────┘
+┌───────────────┐   JSON-RPC (stdio/TCP)   ┌───────────────┐   ┌──────────────────┐
+│ agent /       │ ───────────────────────► │ agcad server  │ ─►│ agcad-core       │
+│ python /      │ ◄─────────────────────── │ (transport)   │   │ documents        │
+│ any language  │                          └───────────────┘   │ entities         │
+└───────────────┘                                              │ history / undo   │
+                                                               │ tessellation     │
+┌───────────────┐          same bus (TCP)                      │ booleans         │
+│ agcad-view    │ ───────────────────────────► get_scene ─────►│ fillet / chamfer │
+│ (wgpu, dumb)  │  pulls snapshots; owns no document state     └──────────────────┘
+└───────────────┘
 ```
 
 ## Showcase: a drawing in, a parametric part out
@@ -36,8 +36,8 @@ rebuilds the part as a parametric program:
 
 ![the drawing and the finished model agcad rebuilt from it](examples/cross_block/compare.png)
 
-The dimensions are read off the drawing rather than guessed: its front panel
-is 553 × 614 px at the drawing's own 9 mm scale bar, so the body is
+The dimensions are read off the drawing rather than guessed: its 9 mm scale
+bar gives ~12.4 px/mm, and its front panel is 553 × 614 px, so the body is
 45 × 45 mm in plan, 15 mm arms and 50 mm tall. The camera was fitted on a
 sharp baseline so the silhouette comparison stays unambiguous (0.99 IoU), and
 that baseline's front view matches the drawing's aspect to ~0.1%
@@ -53,20 +53,13 @@ on its own:
 export still apply. Turning `height` down to 30 mm replays the sketch, the
 extrude and both rim fillets, so the rounding follows the new geometry.
 
-The loop this exercises, end to end:
-
-1. **Read** the two views and derive the dimensions.
-2. **Author** a parametric program: `span`/`arm`/`height` parameters, twelve
-   sketch lines, `extrude` into a watertight solid.
-3. **Check** with `render_offscreen` in orthographic mode from the drawing's
-   camera, and compare the silhouette.
-4. **Finish** the edges with `fillet` and a geometric edge filter —
-   `{normals:[[0,0,1]]}` for the top rim, `{normals:[[0,0,-1]]}` for the
-   bottom — so the part reads as a moulded body, not a block-out. `chamfer`
-   shares the same machinery; this drawing has rounds, not bevels.
-5. **Deliver** `cross_block_rounded.stl` / `cross_block_rounded.3mf` for the
-   slicer, and the matching `.agcad` (program + parameter values) so the part
-   reopens with its knobs intact.
+The loop: **read** the two views → **author** the parametric program
+(`span`/`arm`/`height`, twelve sketch lines, `extrude`) → **check** the
+silhouette with `render_offscreen` from the drawing's camera → **finish** the
+rims with `fillet` and a normals filter (`{normals:[[0,0,1]]}` top,
+`{normals:[[0,0,-1]]}` bottom; `chamfer` shares the machinery, but this
+drawing has rounds, not bevels) → **deliver** STL/3MF for the slicer and the
+matching `.agcad` so the part reopens with its knobs intact.
 
 The artifacts live in `examples/cross_block/`: `iso.png`, `front.png`,
 `cross_block.stl`, `cross_block.3mf` and `cross_block.agcad` (the sharp
@@ -80,11 +73,12 @@ and `compare.png` (the drawing above that part).
 | Path | What it is |
 |---|---|
 | `crates/protocol` | Wire types: commands, results, meshes (serde/JSON) |
-| `crates/core` | Headless engine: document model, deterministic primitives, undo |
+| `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, deterministic rendering |
 | `crates/server` | `agcad` binary — line-delimited JSON-RPC on stdio or TCP |
 | `crates/viewer` | `agcad-view` — wgpu renderer, talks only the bus |
-| `python/agcad` | Dependency-free sync Python client (the agent API) |
+| `python/agcad` | Dependency-free sync Python client (the agent API) and MCP server |
 | `examples/` | Agent-facing demos; `examples/cross_block/` is the committed showcase |
+| `index.html`, `fonts/`, `logo.svg` | Static project page (GitHub Pages), with self-hosted fonts |
 
 ## Design rules
 
@@ -107,16 +101,23 @@ Line-delimited JSON-RPC 2.0, one request/response per line:
 {"jsonrpc":"2.0","id":1,"result":{"entity_created":{"doc":1,"entity":1,"mesh":{...}}}}
 ```
 
-Commands: `initialize`, `list_documents`, `create_document`, `close_document`,
-`add_box`, `add_sphere`, `add_cylinder`, `boolean`, `fillet`, `chamfer`,
-`transform`, `set_color`, `delete`, `set_parameter`, `remove_parameter`,
-`get_parameters`, `undo`, `redo`, `get_scene`, `get_program`, `add_sketch`,
-`add_sketch_line`, `add_sketch_circle`, `constrain`, `remove_constraint`,
-`move_sketch_point`, `delete_sketch_element`, `extrude`, `revolve`,
-`pick`, `export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
-`open_document`. `get_program` returns the program, the parameters and any
-embedded authoring source — the complete handoff for the script-as-source
-workflow.
+Commands, grouped by intent:
+
+- **Documents**: `initialize`, `list_documents`, `create_document`,
+  `close_document`
+- **Primitives**: `add_box`, `add_sphere`, `add_cylinder`
+- **Modelling**: `boolean`, `transform`, `set_color`, `delete`, `fillet`,
+  `chamfer`
+- **Parameters**: `set_parameter`, `remove_parameter`, `get_parameters`
+- **Sketches and solids**: `add_sketch`, `add_sketch_line`,
+  `add_sketch_circle`, `constrain`, `remove_constraint`, `move_sketch_point`,
+  `delete_sketch_element`, `extrude`, `revolve`
+- **Queries and I/O**: `get_scene`, `get_program`, `pick`, `export_stl`,
+  `export_3mf`, `render_offscreen`, `save_document`, `open_document`
+- **History**: `undo`, `redo`
+
+`get_program` returns the program, the parameters and any embedded authoring
+source — the complete handoff for the script-as-source workflow.
 
 `fillet{entity,radius,edges?}` and `chamfer{entity,distance,edges?}` reshape a
 solid **in place** (same id, name, color, transform) and replay with the
@@ -128,9 +129,10 @@ the geometry. Omit it to treat every sharp edge; `min_angle_deg` (default 30)
 separates real edges from tessellation seams.
 
 `pick{doc,ray:{origin,direction},tolerance?}` casts a world-space ray at the
-document's solids and answers `{hit:{entity,name,distance,point,normal,face,
-edge?}}` — or `hit:null` when nothing is under the ray (a valid answer, not an
-error). The selectors are ready to use: `face` carries the
+document's solids and answers
+`{hit:{entity,name,distance,point,normal,face,edge?}}` — or `hit:null` when
+nothing is under the ray (a valid answer, not an error). The selectors are
+ready to use: `face` carries the
 `{entity,normal,near}` body of `add_sketch`'s face plane (pass it straight to
 the Python client's `plane=`, or wrap it as `plane:{"face":…}` on the raw
 bus), and `edge` is exactly the `edges` filter `fillet`/`chamfer` take
@@ -154,8 +156,8 @@ The user describes intent; **the agent authors a parametric program**:
 
 1. Named parameters (`wall`, `plate_len`) — values may themselves be
    expressions over other parameters.
-2. Modeling commands with dimensions as expressions: `size = [80, 40,
-   "wall*2"]`.
+2. Modeling commands with dimensions as expressions:
+   `size = [80, 40, "wall*2"]`.
 3. `set_parameter` replays the whole program: **entity ids are preserved**,
    geometry regenerates, and undo restores parameters + program + geometry
    atomically.
@@ -166,7 +168,9 @@ agent-shaped: a typo lists the valid parameter names.
 
 ```python
 cad.set_parameter(doc, "wall", 2.0, description="plate thickness [mm]")
-base = cad.add_box(doc, "base", center=(0, 0, "wall/2"), size=("plate", 40, "wall*2"))
+cad.set_parameter(doc, "plate_len", 80.0)
+base = cad.add_box(doc, "base", center=(0, 0, "wall/2"),
+                   size=("plate_len", 40, "wall*2"))
 cad.set_parameter(doc, "wall", 4.0)   # rebuilds everything, ids unchanged
 ```
 
@@ -201,10 +205,10 @@ part.py ──run──► agcad bus ──save_document──► part.agcad
   write a script and save it with the instance.
 
 This is why agcad intentionally has no GUI-style feature tree: the agent does
-not edit features in place, it edits the script and replays. The program is the
-intermediate representation; the script is the editing surface. `set_parameter`
-covers the common “turn a knob” change without re-authoring, and regeneration
-covers the rest.
+not edit features in place, it edits the script and replays. The program is
+the intermediate representation; the script is the editing surface.
+`set_parameter` covers the common “turn a knob” change without re-authoring,
+and regeneration covers the rest.
 
 ## Sketch planes: datum planes and solid faces
 
@@ -249,18 +253,8 @@ The viewer listens and re-fetches by itself — no refresh key needed.
 # 1. the shared backend
 ./target/debug/agcad --tcp 7860
 
-# 2. point the MCP server at it (opencode config, `environment` field)
-{
-  "mcp": {
-    "servers": {
-      "agcad": {
-        "type": "local",
-        "command": ["/home/sa/src/agcad/.venv/bin/agcad-mcp"],
-        "environment": { "AGCAD_CONNECT": "127.0.0.1:7860" }
-      }
-    }
-  }
-}
+# 2. point the MCP server at it
+AGCAD_CONNECT=127.0.0.1:7860 .venv/bin/agcad-mcp
 
 # 3. the viewer — it auto-refreshes when the agent draws
 ./target/debug/agcad-view --port 7860
@@ -281,8 +275,7 @@ with Agcad.connect("127.0.0.1", 7860) as cad:   # the shared engine
 
 `Agcad.spawn()` starts a private stdio engine: perfect for CI and one-shot
 examples, but no viewer can see it. Use `Agcad.connect` whenever a human
-should watch. The viewer listens for `scene_changed` and re-fetches by itself;
-`R` is only a manual fallback.
+should watch; `R` is only a manual refresh fallback.
 
 Two limits worth knowing:
 
@@ -306,12 +299,14 @@ dependency drift — wrapping the Python client:
 .venv/bin/agcad-mcp        # or: python -m agcad.mcp_server
 ```
 
-Two tools (one per *intent*, not per command — MCP round-trips are expensive):
+Three tools (one per *intent*, not per command — MCP round-trips are
+expensive):
 
 | Tool | What it does |
 |---|---|
 | `agcad_execute` | Batch of bus commands in one call; stops at the first error with a recovery hint |
 | `agcad_scene` | Compact state: parameters + entities with placement and mesh stats (no raw meshes — token economy) |
+| `agcad_render` | Headless PNG render, returned inline so the agent can see what it built |
 
 The initialize handshake returns **server instructions** that MCP hosts
 inject into the agent's system prompt — the agent learns the command
@@ -321,7 +316,11 @@ language from the server itself, no README required.
 
 ```sh
 opencode mcp add agcad -- /home/sa/src/agcad/.venv/bin/agcad-mcp
-# or in opencode.json(c):
+```
+
+or in `opencode.json(c)`:
+
+```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
@@ -332,9 +331,11 @@ opencode mcp add agcad -- /home/sa/src/agcad/.venv/bin/agcad-mcp
 }
 ```
 
-Tools then appear as `agcad_agcad_execute` (direct) or
-`tools.agcad.agcad_execute(...)` in Code Mode. The engine lives in the
-server process, so documents persist across tool calls within a session.
+Add `"environment": { "AGCAD_CONNECT": "127.0.0.1:7860" }` to attach to a
+shared backend and let the viewer follow along. Tools then appear as
+`agcad_agcad_execute` (direct) or `tools.agcad.agcad_execute(...)` in Code
+Mode. The engine lives in the server process, so documents persist across
+tool calls within a session.
 
 ### Claude Desktop and other hosts
 
@@ -384,98 +385,59 @@ turns, while the script remains the editing surface.
 
 ### Shipped
 
-- [x] Command bus + headless engine + Python client + wgpu viewer (M1)
-- [x] Parametric layer: parameters, expressions, program replay (M2)
-- [x] MCP server + shared-engine live preview: `scene_changed` broadcast,
-      viewer auto-refresh, MCP attach mode (M3)
-- [x] **Mesh booleans via Manifold** (`manifold-rust`, pure Rust, bit-deterministic):
-      `boolean{op: union|difference|intersection}` in world space, result is a
-      new entity that replays parametrically; plus `export_stl` (binary, world
-      space, slicer-ready). 3MF when a project asks for it
-- [x] **Headless `render_offscreen` (PNG) + camera control**: deterministic
-      software rasterizer in core (no GPU needed — works over SSH/CI),
-      auto-framed 3/4 camera by default, explicit eye/target/up/fov when
-      wanted, and `ortho` for parallel front/top/side views; MCP tool
-      `agcad_render` returns the image inline so the agent can see what it
-      built and iterate
-- [x] **Sketch/constraint layer**: sketches are entities (`add_sketch`,
-      `add_sketch_line`, `add_sketch_circle`), placed in 3D by the normal
-      transform; `constrain{kind: coincident|horizontal|vertical|parallel|
-      perpendicular|distance|radius|diameter}` re-solves after every change
-      with a deterministic LM/Gauss-Newton solver. Coordinates and values may
-      be expressions, so sketches re-solve on parameter change. Snapshot
-      reports `solved/residual/dof`; sketches render as ribbons and are
-      skipped by STL export
-- [x] **Sketch → solid**: `extrude{distance}` and `revolve{angle_deg, axis}`
-      turn closed profiles into watertight printable solids (Manifold's
-      extrusion/revolution constructors + Clipper2 even-odd profile cleanup,
-      so nested loops become holes). Solids inherit the sketch placement,
-      follow later sketch edits, replay parametrically, and report `volume`
-      + `tris`; negative extrude goes below the sketch plane
-- [x] **Document persistence**: `save_document` writes a `.agcad` file — the
-      program plus the current parameter values, no geometry — and
-      `open_document` replays it into a new document with bit-identical ids
-      and meshes. Saves are byte-stable (save → open → save is a no-op diff),
-      and the original script rides along as the canonical recipe (never
-      executed). `get_program` exposes the program, parameters and embedded
-      source to any client; the Python client's `get_script` returns the
-      original text and `export_python` reconstructs a runnable script when
-      there is none. The `.py` is the source of truth; the `.agcad` is the
-      instance — recipe plus the knobs as the user left them
-- [x] **Fillets and chamfers**: `fillet{entity,radius,edges?}` /
-      `chamfer{entity,distance,edges?}` reshape a solid **in place** (same id,
-      name, color, transform) and replay with the program. Edges are selected
-      geometrically — `direction` (+`angle_tol_deg`), `near` (+`near_radius`),
-      `normals` (one face normal = all its edges, two = the edge between them)
-      and `convex`, all ANDed — so an agent can target "the vertical corners"
-      or "the top rim" without clicking or relying on unstable edge indices.
-      Convex edges are cut back, concave edges filled in; corners where two
-      tools meet are mitered, and a 30° threshold keeps tessellation seams out.
-      Omitting `edges` rounds the whole solid in one pass: inside corners are
-      filled and the added material is trimmed where it meets a rounded rim,
-      so a reflex corner gets a blend instead of a fin. A tessellated rim (a
-      cylinder's edge circle) is treated as one continuous band, with one
-      boolean per convexity, so filleting a whole cylinder or a boss stays
-      fast and watertight
-- [x] **3MF export**: one named object per solid with its own color in a
-      single build, millimeter units and application metadata. The OPC
-      package is written store-only with a fixed timestamp, so the same scene
-      exports to byte-identical files; geometry is baked into world space
-      (matching STL) and sketches are skipped. STL stays the single-body path
-- [x] **Sketches on a face / datum planes**: `add_sketch{plane}` places a
-      sketch on the `xy`/`xz`/`yz` datum planes (with an optional expression
-      offset), on an explicit origin + normal, or on an existing solid's
-      planar face. Faces are selected geometrically — an outward normal plus
-      an optional `near` point to choose between parallel faces — so the
-      reference survives a parameter change. The sketch's local +Z is the
-      face's outward normal: a positive `extrude` adds material in front of
-      the face, a negative one cuts into the body (with `boolean{difference}`
-      to remove the cutter). Snapshots report the resolved
-      `sketch.plane` (origin, normal, in-plane X), so an agent can verify the
-      frame before drawing; `examples/face_sketch.py` cuts a pocket and grows
-      a boss on a parametric block
-- [x] **Script-as-source workflow** (M12): the Python script is the durable
-      artifact; `.agcad` is a replayable instance carrying the program, current
-      knob values and an embedded copy of the script. `get_program` now returns
-      that `source`, and the Python client's `get_script` returns the original
-      text (or reconstructs a runnable script with `export_python`). The MCP
-      instructions teach the contract, `examples/save_load.py` asserts the
-      round trip, and the roadmap is ordered around it. MCP-only documents
-      without a script are explicitly scratch state
-- [x] **Human reference: labels + `pick`** (M13): the viewer labels every
-      entity `name #id` (toggleable with `L`, anchored by a leader dot at the
-      projected world bbox), and a click casts a world-space ray through
-      `pick{doc,ray,tolerance?}`. The engine answers with the entity, hit
-      point, normal and ready-made selectors — `face` carries the
-      `{entity,normal,near}` body of `add_sketch`'s face plane (Python's
-      `plane=` takes it directly), and when the click is within tolerance of
-      a sharp edge `edge` is exactly the fillet/chamfer
-      `{direction,near,near_radius}` filter. The HUD shows the exact JSON and
-      `C`/`F`/`E` copy it, so the human can hand a face or edge to the agent
-      and the agent passes it straight back. Picking lives in the engine
-      (reusing the planar-face grouping and `sharp_edges`), so the viewer stays
-      dumb and no parallel face-ID namespace appears. Text is a tiny embedded
-      8×8 bitmap atlas — no font files or new runtime services
+- [x] **M1–M3 — Bus, engine, clients, live preview**: command bus, headless
+      core, Python client, wgpu viewer, MCP server, and the shared-engine
+      `scene_changed` auto-refresh.
+- [x] **M4 — Booleans and STL**: `boolean{op: union|difference|intersection}`
+      in world space via Manifold (`manifold-rust`, pure Rust,
+      bit-deterministic). The result is a new entity that replays
+      parametrically; binary STL export is world-space and slicer-ready.
+- [x] **M5 — Headless rendering**: deterministic software rasterizer in core
+      (no GPU; works over SSH/CI), auto-framed 3/4 camera by default, explicit
+      `eye`/`target`/`up`/`fov`, `ortho` for parallel views, and the
+      `agcad_render` MCP tool that returns the image inline.
+- [x] **M6 — Sketches and constraints**: sketch entities placed by the normal
+      transform; `coincident`, `horizontal`, `vertical`, `parallel`,
+      `perpendicular`, `distance`, `radius` and `diameter` re-solved after
+      every change by a deterministic LM/Gauss-Newton solver; expressions
+      re-solve on parameter change. Sketches render as ribbons and are
+      skipped by STL export.
+- [x] **M7 — Sketch → solid**: `extrude{distance}` and
+      `revolve{angle_deg,axis}` turn closed profiles into watertight solids
+      (Manifold constructors + Clipper2 even-odd cleanup, so nested loops
+      become holes). Solids inherit the sketch placement, follow later sketch
+      edits, replay parametrically, and report volume + tris; a negative
+      extrude goes below the sketch plane.
+- [x] **M8 — Persistence**: `save_document` writes a `.agcad` file — program +
+      current parameter values, no geometry — and `open_document` replays it
+      with bit-identical ids and meshes. Saves are byte-stable; the embedded
+      script is never executed. The `.py` is the source of truth; the `.agcad`
+      is the instance.
+- [x] **M9 — Fillets and chamfers**: `fillet{entity,radius,edges?}` /
+      `chamfer{entity,distance,edges?}` reshape a solid in place. Geometric
+      edge filters (`direction`, `near`, `normals`, `convex`) keep their
+      meaning when a parameter moves; convex edges are cut back, concave
+      edges filled, corners mitered, and a 30° threshold keeps tessellation
+      seams out. Tessellated rims are one band, and omitting `edges` rounds
+      the whole solid in one pass.
+- [x] **M10 — 3MF export**: one named object per solid with its own color,
+      millimeter units and application metadata; store-only OPC/ZIP with a
+      fixed timestamp, so identical scenes export byte-identically. STL stays
+      the single-body path.
+- [x] **M11 — Face and datum sketch planes**: `xy`/`xz`/`yz` with expression
+      offsets, explicit origin + normal, or a planar face selected by outward
+      normal and optional `near`. Positive extrude grows a boss, negative cuts
+      into the body.
+- [x] **M12 — Script as source**: the Python script is the durable artifact;
+      `.agcad` carries the program, current knob values and an embedded copy.
+      `get_program` returns it, `get_script` recovers it, `export_python`
+      reconstructs a runnable script when there is none.
+- [x] **M13 — Human reference: labels + `pick`**: `name #id` labels, a
+      world-space ray through `pick`, and ready-made `face`/`edge` selectors
+      the human can copy and the agent can pass straight to `add_sketch`,
+      `fillet` or `chamfer`. Picking lives in the engine, so the viewer stays
+      dumb; text is a tiny embedded 8×8 bitmap atlas — no font files or new
+      runtime services.
 
 ### Next
 
@@ -483,62 +445,62 @@ turns, while the script remains the editing surface.
       self-intersection, volume/bbox and (cheap) minimum wall per solid, and
       compare two revisions by entity signature. Regeneration is only a
       substitute for feature editing if the agent can prove the rebuild is
-      correct and identify what changed
+      correct and identify what changed.
 - [ ] **M15 — Speed: incremental rebuild**: `set_parameter` currently replays
       the whole program. Track dependencies so a knob change rebuilds only the
       features downstream of it; keep the full replay as the correctness
-      oracle
+      oracle.
 - [ ] **M16 — Shape leverage**: linear and circular patterns, mirror, shell,
       sweep/loft, and a real hole feature (counterbore/countersink). These
-      remove the most manual profile work for printable parts
+      remove the most manual profile work for printable parts.
 - [ ] **M17 — Sketch completeness**: arcs and splines; tangent, equal,
       concentric, symmetric, angle and point-on-line constraints; construction
       geometry; trim/extend/offset; conflict diagnostics that name the
-      over-constrained equations
+      over-constrained equations.
 - [ ] **M18 — Interoperability**: mesh import (STL/OBJ/3MF), DXF/SVG for 2D
       output, and a STEP path (with an explicit B-rep vs tessellation
-      decision). An agent handed a real CAD file should be able to participate
+      decision). An agent handed a real CAD file should be able to participate.
 - [ ] **M19 — Assemblies and drawings**: parts/instances, mates, interference
       and BOM; drawing views with dimensions and annotations. The two pillars
-      still missing from “general parametric CAD”
+      still missing from “general parametric CAD”.
 - [ ] **Later / UI polish**: `patch_program` for script-less MCP documents,
       shaded-with-edges rendering (a thin outline where faces meet, so front
-      views read as CAD drawings), a viewer document picker (today it shows the
-      lowest-id document), a Rust MCP server and PyO3 bindings
+      views read as CAD drawings), a Rust MCP server and PyO3 bindings.
 
 ## Status
 
-Milestone 13 complete: a human can point at geometry and the agent can act on
-exactly that reference. 128 tests (120 engine + 8 viewer) cover the solver
-(rectangles from messy input, radius/diameter, parallel/perpendicular,
-over-constraint reporting, bit-identical determinism), the engine path
-(constraints through the bus, parametric re-solve, undo/redo, cascade
-delete, STL sketch filtering), solid construction (extrude volumes,
-nested holes, negative extrusion, revolve around X/Y, partial sweeps,
-profile validation, dependent rebuilds, cross-engine determinism), the
-orthographic camera (parallel projection, depth-independent size), document
-persistence (save/open round-trips, byte-stable saves, doc-id rebinding,
-corrupt/newer-file hints, parameters keeping their descriptions), edge
-treatment (sharp-edge extraction on welded meshes with a tessellation-angle
-threshold, geometric filters, convex vs concave handling, single-pass
-all-edge rounding with clean reflex corners, tessellated rims as one band,
-in-place reshapes that survive rotation, replay, sketch edits and
-save/open), package export (valid OPC/ZIP entries, multi-object names
-and per-object colors, world-space vertices, sketch filtering, deterministic
-bytes), and plane placement (datum frames in all three orientations,
-expression offsets, custom planes with a projected X axis, planar-face
-grouping and normal/`near` selection, outward-normal extrude direction,
-face references that follow parameters, rotated entities, save/open replay,
-and actionable errors), and the script-as-source contract (embedded source
-returned by `get_program`, `get_script` recovering the original text, and
-save/open preserving it), and picking (rays against world-space meshes,
-nearest-entity and entity-id tie-breaking, planar-face lookup, edge snapping
-with an explicit tolerance, miss-is-not-an-error, skipped sketches, rotated
-entities, ready-made face/edge selectors that drive `add_sketch` and
-`fillet`, and viewer-side label/HUD/ray geometry).
+Milestone 13 is complete: a human can point at geometry and the agent can act
+on exactly that reference. The suite is **128 tests** (120 engine + 8 viewer).
 
-The next milestone is trust: M14 adds `validate` (watertightness,
-self-intersection, volume/bbox and minimum wall) and a scene diff, so an agent
+What it covers:
+
+- **Solver and sketches** — rectangles from messy input, radius/diameter,
+  parallel/perpendicular, over-constraint reporting, bit-identical
+  determinism, parametric re-solve, undo/redo, cascade delete, STL sketch
+  filtering.
+- **Solids, booleans and edges** — extrude volumes, nested holes, negative
+  extrusion, revolve around X/Y, partial sweeps, profile validation,
+  dependent rebuilds, cross-engine determinism; sharp-edge extraction on
+  welded meshes with a tessellation-angle threshold, geometric filters,
+  convex vs concave handling, single-pass all-edge rounding with clean reflex
+  corners, tessellated rims as one band, in-place reshapes that survive
+  rotation, replay, sketch edits and save/open.
+- **Persistence, export and placement** — save/open round-trips, byte-stable
+  saves, doc-id rebinding, corrupt/newer-file hints, parameters keeping their
+  descriptions; valid OPC/ZIP entries, multi-object names and per-object
+  colors, world-space vertices, sketch filtering, deterministic bytes; datum
+  frames in all three orientations, expression offsets, custom planes with a
+  projected X axis, planar-face grouping and normal/`near` selection,
+  outward-normal extrude direction, face references that follow parameters,
+  rotated entities, save/open replay, and actionable errors.
+- **Picking and script-as-source** — rays against world-space meshes,
+  nearest-entity and entity-id tie-breaking, edge snapping with an explicit
+  tolerance, miss-is-not-an-error, skipped sketches, ready-made face/edge
+  selectors, and viewer-side label/HUD/ray geometry; embedded source returned
+  by `get_program`, `get_script` recovering the original text, and save/open
+  preserving it.
+
+The next milestone is trust: M14 adds `validate` and a scene diff, so an agent
 can prove a rebuild is correct and say what changed. Then replay becomes
 incremental, and the shape and sketch vocabulary widens. A GUI feature tree is
 not on the list — the agent edits the script and replays.
@@ -549,23 +511,14 @@ profile with holes → extrude → STL/3MF → render),
 cut with a negative extrude and a +X-face boss grown with a positive one,
 both following the parametric block), `examples/pick.py` (face and edge
 selectors from rays, with the edge click surviving a height change before it
-drives a fillet), `examples/cross_block.py` — a picture →
-model reproduction: `examples/example_body.png` is read for its two views
-(45 x 45 mm cross, 15 mm arms, 50 mm tall), rebuilt as a parametric plus
-profile and extruded, rendered from a camera fitted to the drawing, then
-finished with a `fillet` on the top and bottom rims — the drawing's plan
-corners are sharp, so the vertical edges stay sharp too — and
-`examples/save_load.py` (save → open in a fresh engine → recover the embedded
-source, change a knob → export back to Python and run it).
+drives a fillet), `examples/cross_block.py` (the picture → model
+reproduction above), and `examples/save_load.py` (save → open in a fresh
+engine → recover the embedded source, change a knob → export back to Python
+and run it).
 
 ## What agents say
 
-> Glad you like it — that's the loop working the way it should: describe a shape, get geometry, look at it, and then just turn a number to change the outcome.
-> The part I find genuinely fun is that the tray isn't really "a model" — it's a rule. t is the wall thickness, ro is the corner radius, and the cavity radius being ro - t is what makes the wall stay uniform no matter what you dial in. That little expression is the whole design intent, written down.
-> Whenever you want to keep going, some directions that would be satisfying:
-> - Same tray, different proportions — one parameter change, instant new part (cutlery tray, pen cup, hardware sorter).
-> - Something with a real fit — a snap-fit lid, or a tray sized around a specific object's measurements.
-> - Something that needs a sketch — a hook, bracket, or gusset where you constrain lines and extrude the profile, rather than stacking boxes.
-> No rush though. The files are saved, so the tray will be there whenever you want to poke at it.
+> The part I find genuinely fun is that it isn't really "a model" — it's a
+> rule. That little expression is the whole design intent, written down.
 
 ~~ DeepSeek V4.1 Flash

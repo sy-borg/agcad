@@ -8,10 +8,15 @@
 <meta property="og:title" content="agcad">
 <meta property="og:description" content="A CAD whose primary user is an AI agent.">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<meta name="theme-color" content="#eef0ec">
+<link rel="preload" as="image" href="examples/cross_block/compare.png" fetchpriority="high">
+<link rel="preload" as="font" type="font/woff2" href="fonts/bricolage-grotesque-latin.woff2" crossorigin>
+<link rel="preload" as="font" type="font/woff2" href="fonts/instrument-sans-latin.woff2" crossorigin>
+<link rel="preload" as="font" type="font/woff2" href="fonts/jetbrains-mono-latin.woff2" crossorigin>
 <style>
+@font-face{font-family:"Bricolage Grotesque";font-style:normal;font-weight:500 700;font-stretch:100%;font-display:swap;src:url("fonts/bricolage-grotesque-latin.woff2") format("woff2")}
+@font-face{font-family:"Instrument Sans";font-style:normal;font-weight:400 600;font-stretch:100%;font-display:swap;src:url("fonts/instrument-sans-latin.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400 500;font-stretch:100%;font-display:swap;src:url("fonts/jetbrains-mono-latin.woff2") format("woff2")}
 :root{
   --paper:#eef0ec;
   --sheet:#f8f9f6;
@@ -150,7 +155,7 @@ footer{padding:0 0 48px}
 
 <nav>
   <div class="wrap">
-    <a class="brand" href="#top"><img src="logo.svg" alt="">agcad</a>
+    <a class="brand" href="#top"><img src="logo.svg" alt="" width="256" height="256" decoding="async">agcad</a>
     <div class="links">
       <a href="#knobs">Parametric</a>
       <a href="#architecture">Architecture</a>
@@ -175,7 +180,7 @@ footer{padding:0 0 48px}
       <div class="tags"><span>Rust</span><span>Python client</span><span>MCP server</span><span>MIT</span></div>
     </div>
     <figure>
-      <img src="examples/cross_block/compare.png" alt="A drawing of a cross block next to the 3D model agcad rebuilt from it">
+      <img src="examples/cross_block/compare.png" alt="A drawing of a cross block next to the 3D model agcad rebuilt from it" width="1200" height="1275" fetchpriority="high" decoding="async">
       <figcaption>A drawing in, a parametric part out. The agent read the dimensions off the picture and rebuilt the part with a script.</figcaption>
     </figure>
   </div>
@@ -201,7 +206,7 @@ footer{padding:0 0 48px}
         </div>
       </div>
       <div class="drawing">
-        <svg id="drw" viewBox="0 0 760 340" role="img" aria-label="Plan and front view of the cross block, updating with the sliders"></svg>
+        <svg id="drw" viewBox="0 0 760 340" width="760" height="340" role="img" aria-label="Plan and front view of the cross block, updating with the sliders"></svg>
       </div>
     </div>
   </div>
@@ -255,11 +260,11 @@ footer{padding:0 0 48px}
 
     <div class="pair">
       <figure>
-        <img src="examples/cross_block/rounded.png" alt="The finished cross block with rounded top and bottom rims">
+        <img src="examples/cross_block/rounded.png" alt="The finished cross block with rounded top and bottom rims" width="900" height="900" loading="lazy" decoding="async">
         <figcaption>The finished part: 1 mm rounds on the rims, driven by the <code>round_r</code> knob.</figcaption>
       </figure>
       <figure>
-        <img src="logo.svg" alt="The agcad logo: a snowman assembled from spheres, a cylinder and boxes">
+        <img src="logo.svg" alt="The agcad logo: a snowman assembled from spheres, a cylinder and boxes" width="256" height="256" loading="lazy" decoding="async">
         <figcaption>The logo is the hello world of agcad: three spheres, a cylinder and a couple of boxes. See <code>examples/draw_snowman_family.py</code>.</figcaption>
       </figure>
     </div>
@@ -296,9 +301,10 @@ footer{padding:0 0 48px}
 
     cad.set_parameter(doc, <span class="s">"wall"</span>, 2.0,
         description=<span class="s">"plate thickness [mm]"</span>)
+    cad.set_parameter(doc, <span class="s">"plate_len"</span>, 80.0)
     base = cad.add_box(doc, <span class="s">"base"</span>,
         center=(0, 0, <span class="s">"wall/2"</span>),
-        size=(<span class="s">"plate"</span>, 40, <span class="s">"wall*2"</span>))
+        size=(<span class="s">"plate_len"</span>, 40, <span class="s">"wall*2"</span>))
 
     cad.set_parameter(doc, <span class="s">"wall"</span>, 4.0)
     <span class="c"># rebuilds everything, ids unchanged</span>
@@ -312,7 +318,7 @@ footer{padding:0 0 48px}
 <section id="mcp" class="alt">
   <div class="wrap">
     <h2>Plug it into your agent</h2>
-    <p class="intro">The MCP server is another adapter over the bus. It has no dependencies, and it exposes two tools, one per intent, to keep round trips cheap. The handshake returns instructions that teach the agent the command language, so no README is needed.</p>
+    <p class="intro">The MCP server is another adapter over the bus. It has no dependencies, and it exposes three tools, one per intent, to keep round trips cheap. The handshake returns instructions that teach the agent the command language, so no README is needed.</p>
 
     <div class="cols">
       <div>
@@ -324,7 +330,7 @@ footer{padding:0 0 48px}
     }
   }
 }</pre>
-        <p><code>agcad_execute</code> runs a batch of bus commands and stops at the first error with a recovery hint. <code>agcad_scene</code> returns a compact state without raw meshes.</p>
+        <p><code>agcad_execute</code> runs a batch of bus commands and stops at the first error with a recovery hint. <code>agcad_scene</code> returns a compact state without raw meshes. <code>agcad_render</code> returns a deterministic PNG inline so the agent can see what it built.</p>
       </div>
       <div>
         <h3>Watch the agent draw</h3>
@@ -421,6 +427,8 @@ python3 -m venv .venv
 (function(){
   var $ = function(id){return document.getElementById(id)};
   var span=$("span"), arm=$("arm"), height=$("height"), svg=$("drw");
+  var vSpan=$("v-span"), vArm=$("v-arm"), vHeight=$("v-height");
+  var rArm=$("r-arm"), rVol=$("r-vol"), queued=false;
   var K=3.1; // px per mm
   function dimH(x1,x2,y,label){
     return '<path class="dim" d="M'+x1+' '+(y-6)+'V'+(y+6)+'M'+x2+' '+(y-6)+'V'+(y+6)+'M'+x1+' '+y+'H'+x2+'"/>'+
@@ -449,10 +457,15 @@ python3 -m venv .venv
     out+='<text class="view" x="560" y="26" text-anchor="middle">front</text>';
     svg.innerHTML=out;
     var vol=(2*S*a-a*a)*H/1000;
-    $("v-span").textContent=S+" mm"; $("v-arm").textContent=a+" mm"; $("v-height").textContent=H+" mm";
-    $("r-arm").textContent=a; $("r-vol").textContent=vol.toFixed(1);
+    vSpan.textContent=S+" mm"; vArm.textContent=a+" mm"; vHeight.textContent=H+" mm";
+    rArm.textContent=a; rVol.textContent=vol.toFixed(1);
   }
-  [span,arm,height].forEach(function(el){el.addEventListener("input",draw)});
+  function schedule(){
+    if(queued) return;
+    queued=true;
+    requestAnimationFrame(function(){queued=false; draw();});
+  }
+  [span,arm,height].forEach(function(el){el.addEventListener("input",schedule)});
   draw();
 })();
 </script>
