@@ -106,6 +106,7 @@ ol.loop li:last-child{border-right:0}
 ol.loop li::before{content:counter(s);display:block;font-family:var(--display);font-weight:700;font-size:1.8rem;color:var(--dim);line-height:1;margin-bottom:8px}
 ol.loop strong{display:block;font-family:var(--display);font-size:1.05rem;margin-bottom:4px}
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:32px}
+.pair.twoone{grid-template-columns:2fr 1fr}
 .pair figure{margin:0;background:var(--sheet);border:1px solid var(--rule);padding:10px}
 .pair img{display:block;width:100%;height:auto}
 .pair figcaption{font-size:.85rem;color:var(--muted);padding:8px 2px 0}
@@ -258,14 +259,14 @@ footer{padding:0 0 48px}
       <li><strong>Deliver</strong>Export STL and 3MF for the slicer, plus a <code>.agcad</code> that reopens with its knobs.</li>
     </ol>
 
-    <div class="pair">
+    <div class="pair twoone">
       <figure>
-        <img src="examples/cross_block/rounded.png" alt="The finished cross block with rounded top and bottom rims" width="900" height="900" loading="lazy" decoding="async">
-        <figcaption>The finished part: 1 mm rounds on the rims, driven by the <code>round_r</code> knob.</figcaption>
+        <img src="examples/example_body.png" alt="The source picture" width="600" height="900" loading="lazy" decoding="async">
+        <figcaption>The source picture to resemble including the size with the scale. See <code>examples/example_body.png</code>.</figcaption>
       </figure>
       <figure>
-        <img src="logo.svg" alt="The agcad logo: a snowman assembled from spheres, a cylinder and boxes" width="256" height="256" loading="lazy" decoding="async">
-        <figcaption>The logo is the hello world of agcad: three spheres, a cylinder and a couple of boxes. See <code>examples/draw_snowman_family.py</code>.</figcaption>
+        <img src="examples/cross_block/rounded.png" alt="The finished cross block with rounded top and bottom rims" width="300" height="900" loading="lazy" decoding="async">
+        <figcaption>The finished part: 1 mm rounds on the rims, driven by the <code>round_r</code> knob.</figcaption>
       </figure>
     </div>
   </div>
