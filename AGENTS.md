@@ -5,6 +5,8 @@ JSON-RPC command bus are the product; the Python client, MCP server and wgpu
 viewer are clients. `README.md` is the authoritative user/protocol doc — read
 it first; this file only records what is easy to get wrong.
 
+Keep the `README.md` and `index.html` in synch with the code.
+
 ## Commands
 
 - `cargo build` before running any Python example or live demo. They spawn
