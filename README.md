@@ -510,7 +510,12 @@ turns, while the script remains the editing surface.
       oracle.
 - [ ] **M16 — Shape leverage**: linear and circular patterns, mirror, shell,
       sweep/loft, and a real hole feature (counterbore/countersink). These
-      remove the most manual profile work for printable parts.
+      remove the most manual profile work for printable parts. The same
+      machinery adds a helical sweep (axis, radius, pitch, turns, direction)
+      and a `thread` feature on top of it (major/minor diameter, pitch,
+      length, hand, flank profile), so screw threads and threaded holes are
+      one shape instead of hundreds of partial revolves; M17's arcs and
+      splines tighten the flanks afterwards.
 - [ ] **M17 — Sketch completeness**: arcs and splines; tangent, equal,
       concentric, symmetric, angle and point-on-line constraints; construction
       geometry; trim/extend/offset; conflict diagnostics that name the
