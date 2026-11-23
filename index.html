@@ -110,6 +110,9 @@ ol.loop strong{display:block;font-family:var(--display);font-size:1.05rem;margin
 .pair figure{margin:0;background:var(--sheet);border:1px solid var(--rule);padding:10px}
 .pair img{display:block;width:100%;height:auto}
 .pair figcaption{font-size:.85rem;color:var(--muted);padding:8px 2px 0}
+.note{margin-top:32px;padding:14px 18px;border-left:3px solid var(--dim);background:var(--dim-soft);font-size:.95rem}
+.note p{margin:0;max-width:78ch}
+.note code{background:var(--sheet)}
 
 /* code */
 pre{background:var(--code-bg);color:var(--code-ink);padding:18px 20px;overflow-x:auto;font-size:.82rem;line-height:1.65;margin:0;border-radius:2px}
@@ -269,6 +272,49 @@ footer{padding:0 0 48px}
         <figcaption>The finished part: 1 mm rounds on the rims, driven by the <code>round_r</code> knob.</figcaption>
       </figure>
     </div>
+  </div>
+</section>
+
+<section id="showcase-prompt" class="alt">
+  <div class="wrap">
+    <h2>From a sentence to a printable part</h2>
+    <p class="intro">The brief was one line: <code>Use the agcad tool to create me a M10 screw with 20mm length.</code> No drawing, no dimension table. The agent chose ISO 4762 socket-head proportions, drove the MCP server, and watched the part appear in the live viewer.</p>
+
+    <ol class="loop">
+      <li><strong>Ask</strong>M10 and 20 mm are the only hard facts. Head, drive, pitch and chamfer are choices the agent makes and can justify.</li>
+      <li><strong>Model</strong><code>thread</code> sweeps a real helical thread with a 60° included angle at the M10 coarse pitch; a Ø16 × 10 mm head is unioned on top.</li>
+      <li><strong>Verify</strong><code>validate</code> comes back watertight: 0 open edges, 0 non-manifold edges, 0 self-intersections, 2949.9 mm³.</li>
+      <li><strong>Look</strong><code>render_offscreen</code> returns a PNG inline, so the agent reviews its own work instead of guessing at it.</li>
+      <li><strong>Deliver</strong>A 10,578-triangle STL and a replayable <code>.agcad</code> with seven named parameters.</li>
+    </ol>
+
+    <div class="pair">
+      <figure>
+        <img src="examples/m10x20_screw/m10screw_prompt.png" alt="An agent session showing the one-line prompt and the agent's summary of the screw it built" width="1912" height="2159" loading="lazy" decoding="async">
+        <figcaption>The whole session: one sentence in, then thread, head, chamfer, validation and file list out. About 22k tokens.</figcaption>
+      </figure>
+      <figure>
+        <img src="examples/m10x20_screw/m10screw_result.png" alt="The M10x20 screw in the agcad viewer, labelled M10x20_screw #5" width="2061" height="2324" loading="lazy" decoding="async">
+        <figcaption>The part in the live viewer while the agent worked. The viewer is another bus client: no document state, no hidden modelling code.</figcaption>
+      </figure>
+    </div>
+
+    <aside class="note">
+      <p><b>Spot the mistake.</b> The report above says “6 mm hex socket”. The parameter is <code>socket_af = 8</code>, the ISO 4762 size for M10, and that is what the program cut. The prose is wrong, the part is right — a reminder that the script, not the summary, is the deliverable.</p>
+    </aside>
+
+    <div class="pair twoone">
+      <figure>
+        <img src="examples/m10x20_screw/m10x20.png" alt="Headless render of the screw from a three-quarter view" width="800" height="640" loading="lazy" decoding="async">
+        <figcaption>Headless render from the engine's software rasterizer. Same solid, no GPU, byte-identical every time: Ø16 mm head, 8 mm hex socket, 20 mm of thread.</figcaption>
+      </figure>
+      <figure>
+        <img src="examples/m10x20_screw/m10x20_side.png" alt="Side view of the screw showing the 60 degree thread angle" width="420" height="760" loading="lazy" decoding="async">
+        <figcaption>Side view: 1.5 mm coarse pitch, a 60° thread angle, and a 0.6 mm chamfer on the head rim. The thread is geometry, not a texture.</figcaption>
+      </figure>
+    </div>
+
+    <p class="intro">Both files live in <code>examples/m10x20_screw/</code>. The <a href="examples/m10x20_screw/m10x20_screw.stl">STL</a> goes to the slicer; the <a href="examples/m10x20_screw/m10x20_screw.agcad"><code>.agcad</code></a> is the source of truth: opening it replays the program and restores its seven parameters, so setting <code>length</code> to 30 turns it into an M10 × 30.</p>
   </div>
 </section>
 

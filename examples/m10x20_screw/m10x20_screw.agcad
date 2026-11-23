@@ -1,0 +1,176 @@
+{
+  "format": "agcad-document",
+  "version": 3,
+  "protocol": 1,
+  "name": "M10x20 Socket Head Cap Screw",
+  "parameters": {
+    "head_dia": {
+      "value": 16.0,
+      "description": "ISO 4762 M10 head diameter"
+    },
+    "head_height": {
+      "value": 10.0,
+      "description": "ISO 4762 M10 head height"
+    },
+    "length": {
+      "value": 20.0,
+      "description": "Threaded length under head"
+    },
+    "major_dia": {
+      "value": 10.0,
+      "description": "M10 nominal major diameter"
+    },
+    "pitch": {
+      "value": 1.5,
+      "description": "M10 coarse pitch"
+    },
+    "socket_af": {
+      "value": 8.0,
+      "description": "Hex socket across flats"
+    },
+    "socket_depth": {
+      "value": 5.0,
+      "description": "Hex socket depth"
+    }
+  },
+  "program": [
+    {
+      "method": "thread",
+      "doc": 1,
+      "major_diameter": "major_dia",
+      "minor_diameter": "major_dia-1.84",
+      "pitch": "pitch",
+      "length": "length",
+      "hand": "right",
+      "flank_angle_deg": 60.0,
+      "segments_per_turn": 72,
+      "origin": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "thread",
+      "color": [
+        0.72,
+        0.74,
+        0.78,
+        1.0
+      ]
+    },
+    {
+      "method": "add_cylinder",
+      "doc": 1,
+      "name": "head",
+      "center": [
+        0.0,
+        0.0,
+        "length+head_height/2-0.1"
+      ],
+      "radius": "head_dia/2",
+      "height": "head_height+0.2",
+      "segments": 96,
+      "color": [
+        0.72,
+        0.74,
+        0.78,
+        1.0
+      ]
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "union",
+      "entities": [
+        1,
+        2
+      ],
+      "name": "body",
+      "color": [
+        0.72,
+        0.74,
+        0.78,
+        1.0
+      ]
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 1
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 2
+    },
+    {
+      "method": "chamfer",
+      "doc": 1,
+      "entity": 3,
+      "distance": 0.6,
+      "edges": {
+        "direction": null,
+        "angle_tol_deg": null,
+        "near": null,
+        "near_radius": null,
+        "normals": [
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "convex": null
+      },
+      "min_angle_deg": null
+    },
+    {
+      "method": "add_cylinder",
+      "doc": 1,
+      "name": "socket_cutter",
+      "center": [
+        0.0,
+        0.0,
+        "length+head_height-socket_depth/2+0.5"
+      ],
+      "radius": "socket_af*0.5773503",
+      "height": "socket_depth+1",
+      "segments": 6,
+      "color": [
+        0.9,
+        0.5,
+        0.2,
+        1.0
+      ]
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "difference",
+      "entities": [
+        3,
+        4
+      ],
+      "name": "M10x20_screw",
+      "color": [
+        0.72,
+        0.74,
+        0.78,
+        1.0
+      ]
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 3
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 4
+    }
+  ],
+  "source": {
+    "language": "python",
+    "text": "# M10 x 20 socket head cap screw (ISO 4762 style)\n# Threaded length 20 mm, real 60 deg helical thread, 6 mm hex socket.\ndoc = new_document(\"M10x20 Socket Head Cap Screw\")\n\nmajor_dia   = 10.0   # M10 nominal\npitch       = 1.5    # M10 coarse\nlength      = 20.0   # thread length under head\nhead_dia    = 16.0   # ISO 4762 M10 head\nhead_height = 10.0\nsocket_af   = 8.0    # hex socket across flats\nsocket_depth= 5.0\n\nthread_solid = thread(doc, major_diameter=major_dia,\n                      minor_diameter=major_dia - 1.84,\n                      pitch=pitch, length=length, origin=(0, 0, 0))\n\nhead = cylinder(doc, center=(0, 0, length + head_height / 2 - 0.1),\n                radius=head_dia / 2, height=head_height + 0.2)\n\nbody = boolean(doc, \"union\", [thread_solid, head])\nchamfer(doc, body, 0.6, edges={\"normals\": [[0, 0, 1]]})   # head top rim\n\ncut = cylinder(doc, center=(0, 0, length + head_height - socket_depth / 2 + 0.5),\n               radius=socket_af / 3**0.5, height=socket_depth + 1, segments=6)\n\nscrew = boolean(doc, \"difference\", [body, cut], name=\"M10x20_screw\")\n"
+  }
+}
