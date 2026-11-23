@@ -783,7 +783,22 @@ pub enum CommandResult {
     },
     Transformed { doc: DocId, entity: EntityId },
     Deleted { doc: DocId, entity: EntityId },
-    ParameterSet { doc: DocId, name: String, value: f64 },
+    ParameterSet {
+        doc: DocId,
+        name: String,
+        value: f64,
+        /// Geometry features that regenerated their mesh during this replay.
+        #[serde(default)]
+        rebuilt: usize,
+        /// Geometry features whose mesh came from the content cache because
+        /// neither they nor their upstream inputs changed.
+        #[serde(default)]
+        reused: usize,
+        /// Program steps replayed (every step still runs; only geometry is
+        /// memoized).
+        #[serde(default)]
+        steps: usize,
+    },
     ParameterRemoved { doc: DocId, name: String },
     Parameters { doc: DocId, params: Vec<ParamInfo> },
     Undone { doc: DocId },

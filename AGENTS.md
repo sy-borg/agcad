@@ -87,6 +87,10 @@ bytes; tests and agents rely on exact replay.
   geometry — re-test rim fillets before changing it.
 - Topology consumers (`edges::sharp_edges`) weld by exact f32 position bits.
   `world_bbox` is the tight world-space mesh bbox, not the rotated local bbox.
+- The incremental-rebuild cache is derived state: feature meshes are keyed by
+  content (exact bits folded through upstream geometry keys), never saved and
+  never part of undo snapshots. Cached output must stay byte-identical to a
+  cold replay; clearing the cache may only cost speed.
 - `validate` and `diff_scene` are read-only session commands (never program
   entries). Entity signatures are FNV-1a over name/placement/color/geometry
   bits; scene signatures include ids, so diffs match entities by id. The

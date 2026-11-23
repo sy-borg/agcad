@@ -356,8 +356,10 @@ class Agcad:
     ) -> dict[str, Any]:
         """Define or update a named parameter. ``value`` may be an
         expression over other parameters ("wall*2"). Changing a parameter
-        replays the document program: entity ids are preserved, geometry
-        regenerates."""
+        re-executes the document program: entity ids are preserved and only
+        geometry downstream of the change is regenerated. The result reports
+        ``rebuilt`` and ``reused`` feature counts plus the number of program
+        ``steps``."""
         return self._request("set_parameter", doc=doc, name=name, value=value, description=description)
 
     def remove_parameter(self, doc: int, name: str) -> dict[str, Any]:

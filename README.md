@@ -159,9 +159,10 @@ The user describes intent; **the agent authors a parametric program**:
    expressions over other parameters.
 2. Modeling commands with dimensions as expressions:
    `size = [80, 40, "wall*2"]`.
-3. `set_parameter` replays the whole program: **entity ids are preserved**,
-   geometry regenerates, and undo restores parameters + program + geometry
-   atomically.
+3. `set_parameter` re-executes the program with **entity ids preserved**.
+   Geometry is content-memoized per feature: a knob change regenerates only
+   the features downstream of it, while independent features reuse their
+   cached meshes. The full replay stays the correctness oracle.
 
 Expression grammar is deliberately tiny and safe (`+ - * /`, parentheses,
 identifiers, unary minus) — no functions, no injection surface. Errors are
@@ -172,8 +173,17 @@ cad.set_parameter(doc, "wall", 2.0, description="plate thickness [mm]")
 cad.set_parameter(doc, "plate_len", 80.0)
 base = cad.add_box(doc, "base", center=(0, 0, "wall/2"),
                    size=("plate_len", 40, "wall*2"))
-cad.set_parameter(doc, "wall", 4.0)   # rebuilds everything, ids unchanged
+cad.set_parameter(doc, "wall", 4.0)   # downstream features rebuild; ids unchanged
 ```
+
+Every geometry-producing step memoizes its result under a key folded from its
+resolved arguments **and the keys of the geometry it consumes**. An extrude's
+key follows its sketch profile, a boolean's key follows its operands, and a
+fillet's key follows the solid it reshapes. A knob turn therefore recomputes
+exactly the affected branch; unrelated branches keep their meshes. The cache
+is derived state — never saved, and empty after `open_document` — so a cold replay
+always reproduces the same bytes. `set_parameter` reports `rebuilt`, `reused`
+and `steps` so the work is visible, and a no-op turn rebuilds nothing.
 
 This is the substrate for the target workflow: a vision model looks at a
 picture, the agent writes the parametric program, renders it headless,
@@ -194,8 +204,9 @@ part.py ──run──► agcad bus ──save_document──► part.agcad
 
 - **Authoring**: the agent writes or edits `part.py`, runs it, renders and
   validates the result.
-- **User knobs**: `set_parameter` is the fast path — it replays the program
-  with stable ids. `export_python` bakes the current values back into a script
+- **User knobs**: `set_parameter` is the fast path — it re-executes the program
+  with stable ids but regenerates only the geometry whose inputs changed.
+  `export_python` bakes the current values back into a script
   when an instance should become the new source.
 - **Handoff**: `save_document(source={language, text})` embeds the script and
   remembers it on the document; `get_program` returns it immediately and after
@@ -430,10 +441,11 @@ This session is private. For the human/agent loop, start
 ## Roadmap
 
 Direction: **the script is the source of truth**. The next milestones make the
-agent-authored script loop faster and more expressive — incremental rebuilds,
-shape and sketch coverage, interoperability — and give the human a concrete way
+agent-authored script loop faster and more expressive — shape and sketch
+coverage, interoperability — and give the human a concrete way
 to point at geometry, rather than building a GUI feature tree. Validation and
-scene diffs (M14) make a rebuild provable; feature-history editing is
+scene diffs (M14) make a rebuild provable; incremental rebuilds (M15) make it
+fast. Feature-history editing is
 deliberately not a goal: replay is deterministic and `set_parameter` covers knob
 turns, while the script remains the editing surface.
 
@@ -501,13 +513,16 @@ turns, while the script remains the editing surface.
       removed and modified entities with field-level changes plus parameter
       and program diffs. Both are session commands — no program entries, no
       state change.
+- [x] **M15 — Speed: incremental rebuild**: every geometry feature memoizes
+      its result under a content key folded from its resolved arguments and its
+      upstream geometry keys, so a knob change regenerates exactly the features
+      downstream of it while independent branches reuse their meshes. The
+      program still replays in full — the cache is derived state and the cold
+      replay is the correctness oracle — and `set_parameter` reports
+      `rebuilt`/`reused`/`steps` so the work is visible.
 
 ### Next
 
-- [ ] **M15 — Speed: incremental rebuild**: `set_parameter` currently replays
-      the whole program. Track dependencies so a knob change rebuilds only the
-      features downstream of it; keep the full replay as the correctness
-      oracle.
 - [ ] **M16 — Shape leverage**: linear and circular patterns, mirror, shell,
       sweep/loft, and a real hole feature (counterbore/countersink). These
       remove the most manual profile work for printable parts. The same
@@ -532,9 +547,9 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 14 is complete: a rebuild can be proven printable, and two revisions
-can be compared field by field. The suite is **138 tests** (130 engine + 8
-viewer).
+Milestone 15 is complete: a knob change rebuilds only the features downstream
+of it, while the cold replay remains the correctness oracle. The suite is
+**144 tests** (136 engine + 8 viewer).
 
 What it covers:
 
@@ -569,12 +584,16 @@ What it covers:
   `min_wall_mm` pass/fail, and scene diffs by signature (parameter-driven
   rebuilds, no-op replays, added/removed entities, file and open-document
   baselines, and baseline validation errors).
+- **Incremental rebuild** — content keys folded through sketch profiles,
+  extrudes/revolves, boolean operands and fillet inputs; downstream-only
+  regeneration with independent branches served from cache, no-op knob turns
+  rebuilding nothing, `rebuilt`/`reused`/`steps` counts, and cached bytes that
+  match a cold replay after parameter changes and undo/redo.
 
-The next milestone is speed: M15 makes replay incremental, so a knob change
-rebuilds only the features downstream of it. The full replay stays as the
-correctness oracle, and `validate` + `diff_scene` are how the faster path is
-checked. Then the shape and sketch vocabulary widens. A GUI feature tree is
-not on the list — the agent edits the script and replays.
+The next milestone is shape leverage (M16): patterns, mirror, shell,
+sweep/loft and a real hole feature, so printable parts need less manual profile
+work. Then the sketch vocabulary widens. A GUI feature tree is not on the
+list — the agent edits the script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
@@ -584,9 +603,11 @@ both following the parametric block), `examples/pick.py` (face and edge
 selectors from rays, with the edge click surviving a height change before it
 drives a fillet), `examples/validate.py` (validate a plate, fail it with a
 thin-wall knob, then diff the rebuild against the saved baseline),
-`examples/cross_block.py` (the picture → model reproduction above), and
+`examples/cross_block.py` (the picture → model reproduction above),
 `examples/save_load.py` (save → open in a fresh engine → recover the embedded
-source, change a knob → export back to Python and run it).
+source, change a knob → export back to Python and run it), and
+`examples/incremental_rebuild.py` (a knob turn reports how few features
+rebuilt, beside a cold replay that rebuilds all of them).
 
 ## What agents say
 

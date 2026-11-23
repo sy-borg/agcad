@@ -23,6 +23,7 @@ pub mod geo;
 pub mod mat4;
 pub mod pick;
 pub mod plane;
+mod rebuild;
 pub mod render;
 pub mod sketch;
 pub mod solid;
@@ -107,6 +108,11 @@ pub struct Entity {
     pub rotation_deg: Vec3,
     pub scale: Vec3,
     pub color: Rgba,
+    /// Content key of the local mesh. Downstream geometry folds this into its
+    /// own key, which is how an incremental replay knows that a fillet on an
+    /// unchanged extrude can be reused while a fillet on a changed one cannot.
+    /// Derived state; not saved and not part of the scene signature.
+    pub(crate) geom_key: rebuild::GeomKey,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +236,13 @@ pub struct Document {
     /// the cheap path then, because the program's own later commands (e.g.
     /// a fillet on an extrude) will redo the work in order.
     replaying: bool,
+    /// Program step currently being executed, when known. Replay sets it so a
+    /// geometry result can be memoized per feature; live commands use the
+    /// index of the command they are about to append.
+    step: Option<usize>,
+    /// Per-feature geometry memo, keyed by content. Derived state: not saved,
+    /// not part of undo snapshots, safe to clear at any time.
+    cache: rebuild::GeometryCache,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
 }
@@ -245,6 +258,8 @@ impl Document {
             params: BTreeMap::new(),
             source: None,
             replaying: false,
+            step: None,
+            cache: rebuild::GeometryCache::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -303,20 +318,42 @@ impl Document {
     /// Re-execute the program from an empty scene. Deterministic: ids,
     /// meshes and transforms come out identical when parameters didn't
     /// change.
+    ///
+    /// Every command runs, but geometry-producing steps are memoized by
+    /// content: a step whose inputs (including upstream geometry keys) did not
+    /// move reuses its previous mesh instead of calling the kernel. That is
+    /// what makes a knob change incremental while keeping this full replay as
+    /// the correctness oracle.
     fn replay(&mut self) -> Result<()> {
         let program = self.program.clone();
         self.entities.clear();
         self.next_entity = 1;
         self.replaying = true;
+        self.cache.begin();
         let mut result = Ok(());
         for (step, cmd) in program.iter().enumerate() {
+            self.step = Some(step);
             if let Err(e) = exec(self, cmd) {
                 result = Err(Error::Replay { step, source: e.to_string() });
                 break;
             }
         }
+        self.step = None;
         self.replaying = false;
         result
+    }
+
+    /// Memoize one geometry result by content key at the current program step.
+    /// `build` only runs on a miss, so a cache hit skips the kernel entirely.
+    fn cached_geometry<F>(&mut self, key: rebuild::GeomKey, build: F) -> Result<rebuild::CachedGeometry>
+    where
+        F: FnOnce(&mut Self) -> Result<rebuild::CachedGeometry>,
+    {
+        if let Some(cached) = self.cache.get(self.step, key) {
+            return Ok(cached);
+        }
+        let geometry = build(self)?;
+        Ok(self.cache.put(self.step, key, geometry))
     }
 
     /// Re-derive everything that a live sketch edit affects. During a
@@ -552,8 +589,12 @@ impl Engine {
                 let doc = doc_of(&command).expect("modeling commands always carry a doc");
                 let d = self.doc_mut(doc)?;
                 d.checkpoint();
+                let step = d.program.len();
                 d.program.push(command.clone());
-                match exec(d, &command) {
+                d.step = Some(step);
+                let result = exec(d, &command);
+                d.step = None;
+                match result {
                     Ok(result) => Ok(result),
                     Err(e) => {
                         d.rollback();
@@ -590,6 +631,9 @@ impl Engine {
                         doc: *doc,
                         name: name.clone(),
                         value: resolved,
+                        rebuilt: d.cache.rebuilt,
+                        reused: d.cache.reused,
+                        steps: d.program.len(),
                     }),
                     Err(e) => {
                         d.rollback();
@@ -1437,35 +1481,61 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     entities.len()
                 )));
             }
+            // The operands' content keys plus their placements determine the
+            // result; record them before touching the kernel so a cache hit can
+            // skip the world-space transforms and the boolean entirely.
+            let inputs: Vec<(rebuild::GeomKey, Vec3, Vec3, Vec3)> = entities
+                .iter()
+                .map(|&eid| {
+                    let e = d
+                        .entities
+                        .get(&eid)
+                        .ok_or(Error::UnknownEntity { doc: *doc, entity: eid })?;
+                    Ok((e.geom_key, e.translation, e.rotation_deg, e.scale))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let key = rebuild::boolean_key(*op, &inputs);
+
             // Gather operands in *world space*: local mesh through the
             // entity's model matrix. Color and name inherit from the
             // first operand unless overridden.
-            let mut world: Vec<Mesh> = Vec::with_capacity(entities.len());
-            let mut source_color: Option<Rgba> = None;
-            for &eid in entities {
-                let e = d.entities.get(&eid).ok_or(Error::UnknownEntity { doc: *doc, entity: eid })?;
-                let m = transform_mesh(&e.mesh, &e.transform());
-                world.push(m);
-                if source_color.is_none() {
-                    source_color = Some(e.color);
+            let source_color = entities
+                .iter()
+                .find_map(|eid| d.entities.get(eid).map(|e| e.color));
+            let cached = d.cached_geometry(key, |d| {
+                let mut world: Vec<Mesh> = Vec::with_capacity(entities.len());
+                for &eid in entities {
+                    let e = d
+                        .entities
+                        .get(&eid)
+                        .ok_or(Error::UnknownEntity { doc: *doc, entity: eid })?;
+                    world.push(transform_mesh(&e.mesh, &e.transform()));
                 }
-            }
-            let result = boolean::boolean(*op, &world)?;
+                let result = boolean::boolean(*op, &world)?;
+                // Bake the result centered on its bounding-box center so the
+                // entity follows the usual "geometry local, transform places"
+                // convention.
+                let (mesh, center) = recenter(&result);
+                Ok(rebuild::CachedGeometry {
+                    mesh,
+                    volume: None,
+                    edges: None,
+                    center: Some(center),
+                })
+            })?;
 
-            // Bake the result centered on its bounding-box center so the
-            // entity follows the usual "geometry local, transform places"
-            // convention.
-            let (mesh, center) = recenter(&result);
+            let center = cached.center.unwrap_or([0.0; 3]);
             let id = d.next_entity();
             let entity = Entity {
                 id,
                 name: name.clone().unwrap_or_else(|| op.as_str().to_string()),
                 shape: Shape::Boolean { op: *op, entities: entities.clone() },
-                mesh,
+                mesh: cached.mesh,
                 translation: center,
                 rotation_deg: [0.0; 3],
                 scale: [1.0; 3],
                 color: color.unwrap_or(source_color.unwrap_or([0.7, 0.72, 0.75, 1.0])),
+                geom_key: key,
             };
             let mesh = entity.mesh.clone();
             d.entities.insert(id, entity);
@@ -1515,6 +1585,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 rotation_deg,
                 scale: [1.0; 3],
                 color: [0.15, 0.55, 0.85, 1.0],
+                geom_key: rebuild::sketch_key(&[]),
             };
             let mesh = entity.mesh.clone();
             d.entities.insert(id, entity);
@@ -1636,8 +1707,18 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 ));
             }
             let (loops, (translation, rotation_deg, scale)) = sketch_profile(d, *doc, *sketch)?;
-            let (mesh, volume) = solid::extrude(&loops, distance)?;
-            let tris = mesh.indices.len() / 3;
+            let key = rebuild::extrude_key(&loops, distance);
+            let cached = d.cached_geometry(key, |_| {
+                let (mesh, volume) = solid::extrude(&loops, distance)?;
+                Ok(rebuild::CachedGeometry {
+                    mesh,
+                    volume: Some(volume),
+                    edges: None,
+                    center: None,
+                })
+            })?;
+            let volume = cached.volume.unwrap_or(0.0);
+            let tris = cached.mesh.indices.len() / 3;
             let id = d.next_entity();
             d.entities.insert(
                 id,
@@ -1645,11 +1726,12 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     id,
                     name: name.clone().unwrap_or_else(|| "extrude".into()),
                     shape: Shape::Extrude { sketch: *sketch, distance },
-                    mesh,
+                    mesh: cached.mesh,
                     translation,
                     rotation_deg,
                     scale,
                     color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                    geom_key: key,
                 },
             );
             Ok(CommandResult::SolidCreated { doc: *doc, entity: id, sketch: *sketch, volume, tris })
@@ -1668,8 +1750,18 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             let axis = axis.unwrap_or(RevolveAxis::X);
             let segments = segments.map(|n| n.clamp(3, 512));
             let (loops, (translation, rotation_deg, scale)) = sketch_profile(d, *doc, *sketch)?;
-            let (mesh, volume) = solid::revolve(&loops, angle, axis, segments)?;
-            let tris = mesh.indices.len() / 3;
+            let key = rebuild::revolve_key(&loops, angle, axis, segments);
+            let cached = d.cached_geometry(key, |_| {
+                let (mesh, volume) = solid::revolve(&loops, angle, axis, segments)?;
+                Ok(rebuild::CachedGeometry {
+                    mesh,
+                    volume: Some(volume),
+                    edges: None,
+                    center: None,
+                })
+            })?;
+            let volume = cached.volume.unwrap_or(0.0);
+            let tris = cached.mesh.indices.len() / 3;
             let id = d.next_entity();
             d.entities.insert(
                 id,
@@ -1677,11 +1769,12 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     id,
                     name: name.clone().unwrap_or_else(|| "revolve".into()),
                     shape: Shape::Revolve { sketch: *sketch, angle_deg: angle, axis, segments },
-                    mesh,
+                    mesh: cached.mesh,
                     translation,
                     rotation_deg,
                     scale,
                     color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                    geom_key: key,
                 },
             );
             Ok(CommandResult::SolidCreated { doc: *doc, entity: id, sketch: *sketch, volume, tris })
@@ -1791,7 +1884,8 @@ fn reshape(
     edges: Option<&EdgeFilter>,
     min_angle_deg: Option<f64>,
 ) -> Result<CommandResult> {
-    let (world, transform) = {
+    let min_angle_deg = min_angle_deg.unwrap_or(30.0);
+    let (input_key, placement, transform) = {
         let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
         if matches!(e.shape, Shape::Sketch { .. }) {
             return Err(Error::Invalid(format!(
@@ -1799,28 +1893,50 @@ fn reshape(
                  extrude the sketch into a solid first)"
             )));
         }
-        let m = e.transform();
-        (transform_mesh(&e.mesh, &m), m)
+        (
+            e.geom_key,
+            (e.translation, e.rotation_deg, e.scale),
+            e.transform(),
+        )
     };
 
     let empty = EdgeFilter::default();
     let filter = edges.unwrap_or(&empty);
-    let (world, edges) = fillet::apply(&world, kind, filter, min_angle_deg.unwrap_or(30.0))?;
-    let volume = fillet::signed_volume(&world);
+    let key = rebuild::reshape_key(input_key, placement, kind, filter, min_angle_deg);
 
-    let inv = mat4::inverse(&transform).ok_or_else(|| {
-        Error::Invalid(format!(
-            "entity {entity} has a singular transform (a zero scale component); cannot map the \
-             reshaped mesh back into its local frame"
-        ))
+    let cached = d.cached_geometry(key, |d| {
+        let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
+        let world = transform_mesh(&e.mesh, &transform);
+        let (world, edges) = fillet::apply(&world, kind, filter, min_angle_deg)?;
+        let volume = fillet::signed_volume(&world);
+
+        let inv = mat4::inverse(&transform).ok_or_else(|| {
+            Error::Invalid(format!(
+                "entity {entity} has a singular transform (a zero scale component); cannot map the \
+                 reshaped mesh back into its local frame"
+            ))
+        })?;
+        let positions: Vec<[f32; 3]> =
+            world.positions.iter().map(|&p| mat4::transform_point(&inv, p)).collect();
+        // Re-derive normals in the local frame (the world ones would be wrong
+        // after a rotation) with the same crease rule the kernel used.
+        let mesh = boolean::crease_mesh(&positions, &world.indices);
+        Ok(rebuild::CachedGeometry {
+            mesh,
+            volume: Some(volume),
+            edges: Some(edges),
+            center: None,
+        })
     })?;
-    let positions: Vec<[f32; 3]> =
-        world.positions.iter().map(|&p| mat4::transform_point(&inv, p)).collect();
-    // Re-derive normals in the local frame (the world ones would be wrong
-    // after a rotation) with the same crease rule the kernel used.
-    let mesh = boolean::crease_mesh(&positions, &world.indices);
 
-    d.entity_mut(entity)?.mesh = mesh.clone();
+    let edges = cached.edges.unwrap_or(0);
+    let volume = cached.volume.unwrap_or(0.0);
+    let mesh = cached.mesh;
+    {
+        let e = d.entity_mut(entity)?;
+        e.mesh = mesh.clone();
+        e.geom_key = key;
+    }
     Ok(CommandResult::EntityModified { doc, entity, edges, volume, mesh })
 }
 
@@ -1843,6 +1959,12 @@ fn rebuild_dependents(d: &mut Document, doc: DocId, sketch: EntityId) -> Result<
         let Some(kind) = kind else { continue };
 
         let (loops, placement) = sketch_profile(d, doc, sketch)?;
+        let key = match kind {
+            ExtrudeKind::Extrude(distance) => rebuild::extrude_key(&loops, distance),
+            ExtrudeKind::Revolve(angle, axis, segments) => {
+                rebuild::revolve_key(&loops, angle, axis, segments)
+            },
+        };
         let (mesh, _volume) = match kind {
             ExtrudeKind::Extrude(distance) => solid::extrude(&loops, distance),
             ExtrudeKind::Revolve(angle, axis, segments) => solid::revolve(&loops, angle, axis, segments),
@@ -1855,6 +1977,7 @@ fn rebuild_dependents(d: &mut Document, doc: DocId, sketch: EntityId) -> Result<
         let e = d.entity_mut(id)?;
         e.mesh = mesh;
         (e.translation, e.rotation_deg, e.scale) = placement;
+        e.geom_key = key;
     }
     Ok(())
 }
@@ -1900,13 +2023,18 @@ fn refresh_sketch(d: &mut Document, doc: DocId, sketch: EntityId) -> Result<sket
     };
     let report = sketch::solve(&mut elements, &constraints);
     let mesh = sketch::display_mesh(&elements);
+    let key = rebuild::sketch_key(&elements);
     let (se, sc, _, _, solved, residual, dof) = sketch_parts(d, sketch)?;
     *se = elements;
     *sc = constraints;
     *solved = report.solved;
     *residual = report.residual;
     *dof = report.dof;
-    d.entity_mut(sketch)?.mesh = mesh;
+    {
+        let e = d.entity_mut(sketch)?;
+        e.mesh = mesh;
+        e.geom_key = key;
+    }
     // Solids built from this sketch must follow it immediately.
     d.after_sketch_change(doc, sketch)?;
     Ok(report)
@@ -1986,11 +2114,38 @@ fn add_entity(
     color: Option<Rgba>,
 ) -> Result<CommandResult> {
     let id = d.next_entity();
-    let mesh = match &shape {
-        Shape::Box { size } => geo::box_mesh(*size),
-        Shape::Sphere { radius, segments } => geo::sphere_mesh(*radius, *segments),
+    let (mesh, geom_key) = match &shape {
+        Shape::Box { size } => {
+            let key = rebuild::box_key(*size);
+            let size = *size;
+            let mesh = d
+                .cached_geometry(key, |_| {
+                    Ok(rebuild::CachedGeometry::mesh(geo::box_mesh(size)))
+                })?
+                .mesh;
+            (mesh, key)
+        },
+        Shape::Sphere { radius, segments } => {
+            let (radius, segments) = (*radius, *segments);
+            let key = rebuild::sphere_key(radius, segments);
+            let mesh = d
+                .cached_geometry(key, |_| {
+                    Ok(rebuild::CachedGeometry::mesh(geo::sphere_mesh(radius, segments)))
+                })?
+                .mesh;
+            (mesh, key)
+        },
         Shape::Cylinder { radius, height, segments } => {
-            geo::cylinder_mesh(*radius, *height, *segments)
+            let (radius, height, segments) = (*radius, *height, *segments);
+            let key = rebuild::cylinder_key(radius, height, segments);
+            let mesh = d
+                .cached_geometry(key, |_| {
+                    Ok(rebuild::CachedGeometry::mesh(geo::cylinder_mesh(
+                        radius, height, segments,
+                    )))
+                })?
+                .mesh;
+            (mesh, key)
         },
         // Boolean entities are produced by the boolean path, which builds
         // the Entity directly — add_entity never sees this shape.
@@ -2012,6 +2167,7 @@ fn add_entity(
         rotation_deg,
         scale,
         color: color.unwrap_or([0.7, 0.72, 0.75, 1.0]),
+        geom_key,
     };
     let mesh = entity.mesh.clone();
     d.entities.insert(id, entity);
@@ -4691,5 +4847,206 @@ mod tests {
             .execute(Command::DiffScene { doc: 1, against: Some(1), path: None })
             .unwrap_err();
         assert!(err.to_string().contains("same document"), "{err}");
+    }
+
+    // --- incremental rebuild (M15) -------------------------------------------
+
+    /// Turn a knob and return `(rebuilt, reused, steps)` from the result.
+    fn set_param(e: &mut Engine, name: &str, value: f64) -> (usize, usize, usize) {
+        match e
+            .execute(Command::SetParameter {
+                doc: 1,
+                name: name.into(),
+                value: num(value),
+                description: None,
+            })
+            .unwrap()
+        {
+            CommandResult::ParameterSet { rebuilt, reused, steps, .. } => (rebuilt, reused, steps),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn add_box_expr(e: &mut Engine, center: [f64; 3], size: [Scalar; 3]) -> EntityId {
+        match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "box".into(),
+                center: [num(center[0]), num(center[1]), num(center[2])],
+                size,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn union(e: &mut Engine, ids: &[EntityId]) -> EntityId {
+        match e
+            .execute(Command::Boolean {
+                doc: 1,
+                op: BooleanOp::Union,
+                entities: ids.to_vec(),
+                name: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn round_all(e: &mut Engine, id: EntityId, radius: f64) -> EntityId {
+        match e
+            .execute(Command::Fillet {
+                doc: 1,
+                entity: id,
+                radius: num(radius),
+                edges: None,
+                min_angle_deg: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityModified { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn scene_sig(e: &Engine) -> String {
+        validate::scene_signature(&e.docs[&1].entities)
+    }
+
+    fn scene_meshes(e: &Engine) -> Vec<(EntityId, Mesh)> {
+        e.docs[&1].entities.iter().map(|(id, x)| (*id, x.mesh.clone())).collect()
+    }
+
+    /// Drop the memo and replay cold: the correctness oracle for the cache.
+    fn cold_replay(e: &mut Engine) {
+        let d = e.docs.get_mut(&1).unwrap();
+        d.cache.clear();
+        d.replay().unwrap();
+    }
+
+    fn assert_same_meshes(a: &[(EntityId, Mesh)], b: &[(EntityId, Mesh)]) {
+        assert_eq!(a.len(), b.len());
+        for ((ida, ma), (idb, mb)) in a.iter().zip(b) {
+            assert_eq!(ida, idb);
+            assert!(mesh_eq(ma, mb), "entity {ida} mesh differs after a cold replay");
+        }
+    }
+
+    #[test]
+    fn a_knob_change_rebuilds_only_downstream_features() {
+        let mut e = engine();
+        set_param(&mut e, "a", 10.0);
+        set_param(&mut e, "b", 8.0);
+
+        let left = add_box_expr(
+            &mut e,
+            [0.0, 0.0, 0.0],
+            [Scalar::Expression("a".into()), num(10.0), num(10.0)],
+        );
+        let cap = add_box(&mut e, [0.0, 0.0, 8.0], [6.0, 6.0, 6.0]);
+        let fused = union(&mut e, &[left, cap]);
+        let rounded = round_all(&mut e, fused, 0.4);
+        assert_eq!(rounded, fused, "a fillet reshapes in place");
+        let _right = add_box_expr(
+            &mut e,
+            [30.0, 0.0, 0.0],
+            [Scalar::Expression("b".into()), num(10.0), num(10.0)],
+        );
+
+        // a → left box, the union and its fillet. The cap and the independent
+        // right box keep their cached bytes.
+        assert_eq!(set_param(&mut e, "a", 12.0), (3, 2, 5));
+
+        // b only reaches the right box.
+        assert_eq!(set_param(&mut e, "b", 9.0), (1, 4, 5));
+
+        // A no-op knob turn rebuilds nothing.
+        assert_eq!(set_param(&mut e, "a", 12.0), (0, 5, 5));
+
+        // The cached meshes are exactly the cold-replay bytes.
+        let sig = scene_sig(&e);
+        let meshes = scene_meshes(&e);
+        cold_replay(&mut e);
+        assert_eq!(scene_sig(&e), sig);
+        assert_same_meshes(&meshes, &scene_meshes(&e));
+        assert_eq!(e.docs[&1].cache.rebuilt, 5);
+        assert_eq!(e.docs[&1].cache.reused, 0);
+    }
+
+    #[test]
+    fn a_sketch_parameter_rebuilds_its_extrude_and_downstream_fillet() {
+        let mut e = engine();
+        set_param(&mut e, "w", 12.0);
+        set_param(&mut e, "d", 6.0);
+
+        let sketch = add_sketch(&mut e, "profile");
+        let z = || num(0.0);
+        let x = || Scalar::Expression("w".into());
+        let y = || num(8.0);
+        for (p1, p2) in [
+            ([z(), z()], [x(), z()]),
+            ([x(), z()], [x(), y()]),
+            ([x(), y()], [z(), y()]),
+            ([z(), y()], [z(), z()]),
+        ] {
+            e.execute(Command::AddSketchLine { doc: 1, sketch, p1, p2 }).unwrap();
+        }
+        let swept = extrude(&mut e, sketch, Scalar::Expression("d".into())).0;
+        round_all(&mut e, swept, 0.3);
+
+        // An independent solid whose inputs never move.
+        let (other_sketch, _) = rect_sketch(&mut e, 6.0, 6.0);
+        extrude(&mut e, other_sketch, num(4.0));
+
+        // w moves the profile: the extrude and its fillet rebuild, the other
+        // extrude does not.
+        assert_eq!(set_param(&mut e, "w", 15.0), (2, 1, 21));
+
+        // d moves only the swept distance, same two features.
+        assert_eq!(set_param(&mut e, "d", 9.0), (2, 1, 21));
+
+        let sig = scene_sig(&e);
+        let meshes = scene_meshes(&e);
+        cold_replay(&mut e);
+        assert_eq!(scene_sig(&e), sig);
+        assert_same_meshes(&meshes, &scene_meshes(&e));
+    }
+
+    #[test]
+    fn undo_and_redo_leave_the_incremental_cache_honest() {
+        let mut e = engine();
+        set_param(&mut e, "h", 10.0);
+        let a = add_box_expr(
+            &mut e,
+            [0.0, 0.0, 0.0],
+            [num(10.0), num(10.0), Scalar::Expression("h".into())],
+        );
+        let b = add_box(&mut e, [0.0, 0.0, 6.0], [6.0, 6.0, 6.0]);
+        union(&mut e, &[a, b]);
+
+        let original_sig = scene_sig(&e);
+        assert_eq!(set_param(&mut e, "h", 14.0), (2, 1, 3));
+        let taller_sig = scene_sig(&e);
+        assert_ne!(taller_sig, original_sig);
+
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        assert_eq!(scene_sig(&e), original_sig, "undo restores the old geometry");
+        e.execute(Command::Redo { doc: 1 }).unwrap();
+        assert_eq!(scene_sig(&e), taller_sig);
+
+        // A later change after the undo/redo pair must not inherit stale
+        // meshes from either revision.
+        assert_eq!(set_param(&mut e, "h", 18.0), (2, 1, 3));
+        let sig = scene_sig(&e);
+        let meshes = scene_meshes(&e);
+        cold_replay(&mut e);
+        assert_eq!(scene_sig(&e), sig);
+        assert_same_meshes(&meshes, &scene_meshes(&e));
     }
 }

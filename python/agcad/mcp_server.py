@@ -30,8 +30,9 @@ MAX_BATCH = 500
 INSTRUCTIONS = """agcad is a headless parametric CAD for 3D printing.
 A document holds a program: every modeling command is recorded, dimensions may be
 expressions over named parameters ("wall*2"). set_parameter replays the program
-deterministically (entity ids stay stable). undo/redo revert one command each and
-restore parameters + program + geometry atomically.
+deterministically (entity ids stay stable) and regenerates only the geometry
+downstream of the change; unchanged features reuse memoized meshes. undo/redo
+revert one command each and restore parameters + program + geometry atomically.
 Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
 Cylinders extrude along +Z. Document ids start at 1; create_document takes an
 optional explicit `doc` id, so create-then-populate fits in one batch.
@@ -65,7 +66,8 @@ EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object
 Commands: initialize{}, list_documents{}, create_document{name,doc?}
   (doc is an unused id >= 1; omit it to allocate the next one — pass it to
   create+populate in a single batch), close_document{doc},
-set_parameter{doc,name,value(number|string expression),description?},
+set_parameter{doc,name,value(number|string expression),description?} (returns
+  rebuilt/reused geometry-feature counts and total program steps),
 remove_parameter{doc,name}, get_parameters{doc},
 add_box{doc,name,center:[x,y,z],size:[w,d,h],color?},
 add_sphere{doc,name,center,radius,segments?,color?},

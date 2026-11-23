@@ -190,7 +190,7 @@ footer{padding:0 0 48px}
 <section id="knobs" class="alt">
   <div class="wrap">
     <h2>The program is the function</h2>
-    <p class="intro">The agent doesn't edit a feature tree. It authors a parametric program with named parameters and expressions, then turns knobs. Every change replays the whole program, and entity ids stay the same. Try it on the cross block from the showcase.</p>
+    <p class="intro">The agent doesn't edit a feature tree. It authors a parametric program with named parameters and expressions, then turns knobs. Every change re-executes the program but only regenerates the geometry whose inputs moved, and entity ids stay the same. Try it on the cross block from the showcase.</p>
 
     <div class="demo">
       <div class="controls">
@@ -308,7 +308,7 @@ footer{padding:0 0 48px}
         size=(<span class="s">"plate_len"</span>, 40, <span class="s">"wall*2"</span>))
 
     cad.set_parameter(doc, <span class="s">"wall"</span>, 4.0)
-    <span class="c"># rebuilds everything, ids unchanged</span>
+    <span class="c"># only downstream features rebuild; ids unchanged</span>
     cad.undo(doc)</pre>
         <p>The expression grammar is tiny and safe: <code>+ - * /</code>, parentheses, identifiers. A typo lists the valid parameter names.</p>
       </div>
@@ -399,12 +399,12 @@ python3 -m venv .venv
           <li><b>Script as source</b> <span>embedded scripts, <code>get_script</code></span></li>
           <li><b>Labels and pick</b> <span>click a face, copy a real selector</span></li>
           <li><b>M14 Validate and scene diff</b> <span>prove the rebuild is correct</span></li>
+          <li><b>M15 Incremental rebuild</b> <span>regenerate only what a knob affects</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M15 Incremental rebuild</b> <span>replay only what a knob affects</span></li>
           <li><b>M16 Shape leverage</b> <span>patterns, mirror, shell, sweep, loft, holes, threads</span></li>
           <li><b>M17 Sketch completeness</b> <span>arcs, splines, more constraints</span></li>
           <li><b>M18 Interoperability</b> <span>mesh import, DXF/SVG, STEP</span></li>
@@ -421,7 +421,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">agcad</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/agcad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/agcad">sy-borg/agcad</a></div>
-      <div><small>Status</small>Milestone 14</div>
+      <div><small>Status</small>Milestone 15</div>
     </div>
   </div>
 </footer>
