@@ -147,17 +147,38 @@ pub fn entity_signature(entity: &Entity) -> String {
             h.u64(elements.len() as u64);
             for element in elements {
                 match element {
-                    SketchElement::Line { id, p1, p2 } => {
+                    SketchElement::Line { id, p1, p2, construction } => {
                         h.str("line");
                         h.u64(*id);
+                        h.u64(u64::from(*construction));
                         h.xy(*p1);
                         h.xy(*p2);
                     }
-                    SketchElement::Circle { id, center, radius } => {
+                    SketchElement::Circle { id, center, radius, construction } => {
                         h.str("circle");
                         h.u64(*id);
+                        h.u64(u64::from(*construction));
                         h.xy(*center);
                         h.f64(*radius);
+                    }
+                    SketchElement::Arc { id, center, radius, start_deg, end_deg, construction } => {
+                        h.str("arc");
+                        h.u64(*id);
+                        h.u64(u64::from(*construction));
+                        h.xy(*center);
+                        h.f64(*radius);
+                        h.f64(*start_deg);
+                        h.f64(*end_deg);
+                    }
+                    SketchElement::Spline { id, points, closed, construction } => {
+                        h.str("spline");
+                        h.u64(*id);
+                        h.u64(u64::from(*construction));
+                        h.u64(u64::from(*closed));
+                        h.u64(points.len() as u64);
+                        for p in points {
+                            h.xy(*p);
+                        }
                     }
                 }
             }

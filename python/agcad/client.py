@@ -599,9 +599,21 @@ class Agcad:
         sketch: int,
         p1: tuple[float | str, float | str],
         p2: tuple[float | str, float | str],
+        construction: bool = False,
     ) -> dict[str, Any]:
-        """Append a line segment (sketch-local mm, expressions allowed)."""
-        return self._request("add_sketch_line", doc=doc, sketch=sketch, p1=list(p1), p2=list(p2))
+        """Append a line segment (sketch-local mm, expressions allowed).
+
+        ``construction=True`` draws a guide that participates in constraints
+        and display but is excluded from the extrudable profile.
+        """
+        return self._request(
+            "add_sketch_line",
+            doc=doc,
+            sketch=sketch,
+            p1=list(p1),
+            p2=list(p2),
+            construction=construction,
+        )
 
     def add_sketch_circle(
         self,
@@ -609,10 +621,66 @@ class Agcad:
         sketch: int,
         center: tuple[float | str, float | str],
         radius: float | str,
+        construction: bool = False,
     ) -> dict[str, Any]:
         """Append a circle (sketch-local mm, expressions allowed)."""
         return self._request(
-            "add_sketch_circle", doc=doc, sketch=sketch, center=list(center), radius=radius
+            "add_sketch_circle",
+            doc=doc,
+            sketch=sketch,
+            center=list(center),
+            radius=radius,
+            construction=construction,
+        )
+
+    def add_sketch_arc(
+        self,
+        doc: int,
+        sketch: int,
+        center: tuple[float | str, float | str],
+        radius: float | str,
+        start_deg: float | str,
+        end_deg: float | str,
+        construction: bool = False,
+    ) -> dict[str, Any]:
+        """Append a counter-clockwise arc from ``start_deg`` to ``end_deg``.
+
+        Angles are degrees from the sketch's local +X. A sweep of 360° is a
+        full circle, so use :meth:`add_sketch_circle` for that. ``construction``
+        excludes the arc from the extrudable profile.
+        """
+        return self._request(
+            "add_sketch_arc",
+            doc=doc,
+            sketch=sketch,
+            center=list(center),
+            radius=radius,
+            start_deg=start_deg,
+            end_deg=end_deg,
+            construction=construction,
+        )
+
+    def add_sketch_spline(
+        self,
+        doc: int,
+        sketch: int,
+        points: list[tuple[float | str, float | str]],
+        closed: bool = False,
+        construction: bool = False,
+    ) -> dict[str, Any]:
+        """Append an interpolating spline through ``points``.
+
+        The curve passes through every point (Catmull-Rom). An open spline
+        needs at least 2 points, a closed one at least 3; open endpoints
+        connect to other elements like a line.
+        """
+        return self._request(
+            "add_sketch_spline",
+            doc=doc,
+            sketch=sketch,
+            points=[list(p) for p in points],
+            closed=closed,
+            construction=construction,
         )
 
     def constrain(
@@ -627,9 +695,12 @@ class Agcad:
 
         ``kind`` is one of ``coincident``, ``horizontal``, ``vertical``,
         ``parallel``, ``perpendicular``, ``distance``, ``radius``,
-        ``diameter``. Each ref is ``{"element": id, "point": 0|1}`` for a
-        point or ``{"element": id}`` for a whole element. The result
-        reports ``solved``, ``residual`` and remaining ``dof``.
+        ``diameter``, ``equal``, ``concentric``, ``symmetric``, ``angle``,
+        ``point_on_line`` or ``tangent``. Each ref is
+        ``{"element": id, "point": 0|1|...}`` for a point or ``{"element": id}``
+        for a whole element. The result reports ``solved``, ``residual``,
+        ``dof`` and ``diagnostics``; ``over_constrained`` names redundant
+        constraints by id.
         """
         return self._request(
             "constrain", doc=doc, sketch=sketch, kind=kind, refs=refs, value=value
@@ -647,8 +718,11 @@ class Agcad:
         point: int,
         to: tuple[float, float],
     ) -> dict[str, Any]:
-        """Drag a point (0 = line start / circle center, 1 = line end),
-        then re-solve."""
+        """Drag a point then re-solve.
+
+        Point refs are line 0=start/1=end, circle 0=center, arc
+        0=center/1=start/2=end, spline ``i``=control point ``i``.
+        """
         return self._request(
             "move_sketch_point", doc=doc, sketch=sketch, element=element, point=point, to=list(to)
         )
@@ -657,6 +731,52 @@ class Agcad:
         """Delete an element; constraints referencing it cascade away."""
         return self._request(
             "delete_sketch_element", doc=doc, sketch=sketch, element=element
+        )
+
+    def trim_sketch(
+        self, doc: int, sketch: int, element: int, at: tuple[float, float]
+    ) -> dict[str, Any]:
+        """Trim the piece of ``element`` containing ``at`` (sketch-local).
+
+        The piece is bounded by the nearest intersections with other elements;
+        circles need two cuts and become arcs. Returns ``created``/``removed``/
+        ``modified`` element ids plus the solver report.
+        """
+        return self._request(
+            "trim_sketch", doc=doc, sketch=sketch, element=element, at=list(at)
+        )
+
+    def extend_sketch(
+        self, doc: int, sketch: int, element: int, point: int
+    ) -> dict[str, Any]:
+        """Extend one line endpoint (0=start/1=end) to its nearest boundary."""
+        return self._request(
+            "extend_sketch", doc=doc, sketch=sketch, element=element, point=point
+        )
+
+    def offset_sketch(
+        self,
+        doc: int,
+        sketch: int,
+        distance: float | str,
+        elements: list[int] | None = None,
+        construction: bool | None = None,
+    ) -> dict[str, Any]:
+        """Offset curves, creating new elements.
+
+        Positive distances move to the left of each element's direction; a
+        single closed loop of lines is mitered into a proper outline and
+        positive moves outward. ``elements`` restricts the selection (default:
+        every printable element). Lines, circles, arcs and splines are
+        supported; spline offsets move the control points.
+        """
+        return self._request(
+            "offset_sketch",
+            doc=doc,
+            sketch=sketch,
+            elements=elements,
+            distance=distance,
+            construction=construction,
         )
 
     # -- sketch → solid ------------------------------------------------------

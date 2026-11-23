@@ -140,6 +140,8 @@ pub enum Shape {
         solved: bool,
         residual: f64,
         dof: i64,
+        over_constrained: bool,
+        diagnostics: Vec<String>,
     },
     /// A solid made by extruding a sketch profile along its normal. Keeps
     /// the source sketch id so it can rebuild when the sketch changes.
@@ -210,16 +212,25 @@ impl Entity {
             color: self.color,
             mesh: self.mesh.clone(),
             sketch: match &self.shape {
-                Shape::Sketch { elements, constraints, solved, residual, dof, .. } => {
-                    Some(agcad_protocol::SketchSnapshot {
-                        elements: elements.clone(),
-                        constraints: constraints.clone(),
-                        solved: *solved,
-                        residual: *residual,
-                        dof: *dof,
-                        plane: Some(plane::frame_from_transform(&transform)),
-                    })
-                },
+                Shape::Sketch {
+                    elements,
+                    constraints,
+                    solved,
+                    residual,
+                    dof,
+                    over_constrained,
+                    diagnostics,
+                    ..
+                } => Some(agcad_protocol::SketchSnapshot {
+                    elements: elements.clone(),
+                    constraints: constraints.clone(),
+                    solved: *solved,
+                    residual: *residual,
+                    dof: *dof,
+                    over_constrained: *over_constrained,
+                    diagnostics: diagnostics.clone(),
+                    plane: Some(plane::frame_from_transform(&transform)),
+                }),
                 _ => None,
             },
         }
@@ -491,6 +502,11 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::AddSketch { doc: d, .. }
         | Command::AddSketchLine { doc: d, .. }
         | Command::AddSketchCircle { doc: d, .. }
+        | Command::AddSketchArc { doc: d, .. }
+        | Command::AddSketchSpline { doc: d, .. }
+        | Command::TrimSketch { doc: d, .. }
+        | Command::ExtendSketch { doc: d, .. }
+        | Command::OffsetSketch { doc: d, .. }
         | Command::Constrain { doc: d, .. }
         | Command::RemoveConstraint { doc: d, .. }
         | Command::MoveSketchPoint { doc: d, .. }
@@ -613,6 +629,11 @@ impl Engine {
             | Command::AddSketch { .. }
             | Command::AddSketchLine { .. }
             | Command::AddSketchCircle { .. }
+            | Command::AddSketchArc { .. }
+            | Command::AddSketchSpline { .. }
+            | Command::TrimSketch { .. }
+            | Command::ExtendSketch { .. }
+            | Command::OffsetSketch { .. }
             | Command::Constrain { .. }
             | Command::RemoveConstraint { .. }
             | Command::MoveSketchPoint { .. }
@@ -1155,7 +1176,17 @@ fn solid_validation(entity: &Entity, min_wall_mm: Option<f64>) -> SolidValidatio
 
 /// One sketch's trust report: solver status and whether it can be extruded.
 fn sketch_validation(entity: &Entity) -> SketchValidation {
-    let Shape::Sketch { elements, constraints, solved, residual, dof, .. } = &entity.shape else {
+    let Shape::Sketch {
+        elements,
+        constraints,
+        solved,
+        residual,
+        dof,
+        over_constrained,
+        diagnostics,
+        ..
+    } = &entity.shape
+    else {
         unreachable!("sketch_validation is only called for sketches")
     };
     let (closed_profile, loops, profile_error) = if elements.is_empty() {
@@ -1175,6 +1206,8 @@ fn sketch_validation(entity: &Entity) -> SketchValidation {
         dof: *dof,
         elements: elements.len(),
         constraints: constraints.len(),
+        over_constrained: *over_constrained,
+        diagnostics: diagnostics.clone(),
         closed_profile,
         loops,
         profile_error,
@@ -1412,6 +1445,11 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::AddSketch { doc, .. }
         | Command::AddSketchLine { doc, .. }
         | Command::AddSketchCircle { doc, .. }
+        | Command::AddSketchArc { doc, .. }
+        | Command::AddSketchSpline { doc, .. }
+        | Command::TrimSketch { doc, .. }
+        | Command::ExtendSketch { doc, .. }
+        | Command::OffsetSketch { doc, .. }
         | Command::Constrain { doc, .. }
         | Command::RemoveConstraint { doc, .. }
         | Command::MoveSketchPoint { doc, .. }
@@ -1624,6 +1662,8 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 solved: true,
                 residual: 0.0,
                 dof: 0,
+                over_constrained: false,
+                diagnostics: Vec::new(),
             };
             let entity = Entity {
                 id,
@@ -1641,29 +1681,94 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
         },
 
-        Command::AddSketchLine { doc, sketch, p1, p2 } => {
+        Command::AddSketchLine { doc, sketch, p1, p2, construction } => {
             let id = {
                 let (p1, p2) = ([d.resolve(&p1[0])?, d.resolve(&p1[1])?], [d.resolve(&p2[0])?, d.resolve(&p2[1])?]);
                 let (elements, _, next_element, ..) = sketch_parts(d, *sketch)?;
                 let id = *next_element;
                 *next_element += 1;
-                elements.push(SketchElement::Line { id, p1, p2 });
+                elements.push(SketchElement::Line { id, p1, p2, construction: *construction });
                 id
             };
             refresh_sketch(d, *doc, *sketch)?;
             Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
         },
 
-        Command::AddSketchCircle { doc, sketch, center, radius } => {
+        Command::AddSketchCircle { doc, sketch, center, radius, construction } => {
             let id = {
                 let (center, radius) = ([d.resolve(&center[0])?, d.resolve(&center[1])?], d.resolve(radius)?);
-                if radius <= 0.0 {
+                if !radius.is_finite() || radius <= 0.0 {
                     return Err(Error::Invalid(format!("circle radius must be positive (got {radius})")));
                 }
                 let (elements, _, next_element, ..) = sketch_parts(d, *sketch)?;
                 let id = *next_element;
                 *next_element += 1;
-                elements.push(SketchElement::Circle { id, center, radius });
+                elements.push(SketchElement::Circle { id, center, radius, construction: *construction });
+                id
+            };
+            refresh_sketch(d, *doc, *sketch)?;
+            Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
+        },
+
+        Command::AddSketchArc { doc, sketch, center, radius, start_deg, end_deg, construction } => {
+            let id = {
+                let center = [d.resolve(&center[0])?, d.resolve(&center[1])?];
+                let radius = d.resolve(radius)?;
+                let start_deg = d.resolve(start_deg)?;
+                let end_deg = d.resolve(end_deg)?;
+                if !radius.is_finite() || radius <= 0.0 {
+                    return Err(Error::Invalid(format!("arc radius must be positive (got {radius})")));
+                }
+                if !start_deg.is_finite() || !end_deg.is_finite() {
+                    return Err(Error::Invalid("arc angles must be finite degrees".into()));
+                }
+                if ((end_deg - start_deg) % 360.0).abs() < 1e-9 {
+                    return Err(Error::Invalid(
+                        "arc start and end angles are the same; use add_sketch_circle for a full circle".into(),
+                    ));
+                }
+                let (elements, _, next_element, ..) = sketch_parts(d, *sketch)?;
+                let id = *next_element;
+                *next_element += 1;
+                elements.push(SketchElement::Arc {
+                    id,
+                    center,
+                    radius,
+                    start_deg,
+                    end_deg,
+                    construction: *construction,
+                });
+                id
+            };
+            refresh_sketch(d, *doc, *sketch)?;
+            Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
+        },
+
+        Command::AddSketchSpline { doc, sketch, points, closed, construction } => {
+            let id = {
+                let mut resolved = Vec::with_capacity(points.len());
+                for p in points {
+                    resolved.push([d.resolve(&p[0])?, d.resolve(&p[1])?]);
+                }
+                if resolved.len() < 2 {
+                    return Err(Error::Invalid(
+                        "a spline needs at least 2 points (3 when closed)".into(),
+                    ));
+                }
+                if *closed && resolved.len() < 3 {
+                    return Err(Error::Invalid(
+                        "a closed spline needs at least 3 points".into(),
+                    ));
+                }
+                let (elements, _, next_element, ..) = sketch_parts(d, *sketch)?;
+                let id = *next_element;
+                *next_element += 1;
+                elements.push(SketchElement::Spline {
+                    id,
+                    points: resolved,
+                    closed: *closed,
+                    construction: *construction,
+                });
                 id
             };
             refresh_sketch(d, *doc, *sketch)?;
@@ -1710,16 +1815,30 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
         Command::MoveSketchPoint { doc, sketch, element, point, to } => {
             {
                 let (elements, ..) = sketch_parts(d, *sketch)?;
-                let target = elements.iter_mut().find(|e| match e {
-                    SketchElement::Line { id, .. } | SketchElement::Circle { id, .. } => id == element,
-                });
+                let target = elements.iter_mut().find(|e| sketch::element_id(e) == *element);
+                let angle = |center: [f64; 2]| (to[1] - center[1]).atan2(to[0] - center[0]).to_degrees();
                 match (target, point) {
                     (Some(SketchElement::Line { p1, .. }), 0) => *p1 = *to,
                     (Some(SketchElement::Line { p2, .. }), 1) => *p2 = *to,
                     (Some(SketchElement::Circle { center, .. }), 0) => *center = *to,
+                    (Some(SketchElement::Arc { center, .. }), 0) => *center = *to,
+                    // Dragging an arc endpoint changes its angle; the radius
+                    // is driven by radius/diameter constraints instead.
+                    (Some(SketchElement::Arc { center, start_deg, .. }), 1) => *start_deg = angle(*center),
+                    (Some(SketchElement::Arc { center, end_deg, .. }), 2) => *end_deg = angle(*center),
+                    (Some(SketchElement::Spline { points, .. }), p) => {
+                        if let Some(q) = points.get_mut(*p as usize) {
+                            *q = *to;
+                        } else {
+                            return Err(Error::Invalid(format!(
+                                "spline {element} has no point {p} (hint: point is the control-point index)"
+                            )));
+                        }
+                    },
                     _ => {
                         return Err(Error::Invalid(format!(
-                            "element {element} has no point {point} (hint: 0 = line start / circle center, 1 = line end)"
+                            "element {element} has no point {point} (hint: line 0=start,1=end; \
+                             arc 0=center,1=start,2=end; circle 0=center; spline i=point i)"
                         )));
                     },
                 }
@@ -1732,9 +1851,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             {
                 let (elements, constraints, ..) = sketch_parts(d, *sketch)?;
                 let before = elements.len();
-                elements.retain(|e| match e {
-                    SketchElement::Line { id, .. } | SketchElement::Circle { id, .. } => *id != *element,
-                });
+                elements.retain(|e| sketch::element_id(e) != *element);
                 if elements.len() == before {
                     return Err(Error::UnknownEntity { doc: *doc, entity: *element });
                 }
@@ -1743,6 +1860,66 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             }
             refresh_sketch(d, *doc, *sketch)?;
             Ok(CommandResult::SketchElementDeleted { doc: *doc, sketch: *sketch, element: *element })
+        },
+
+        Command::TrimSketch { doc, sketch, element, at } => {
+            let edit = {
+                let (elements, constraints, next_element, ..) = sketch_parts(d, *sketch)?;
+                sketch::trim(elements, constraints, next_element, *element, *at)
+                    .map_err(Error::Invalid)?
+            };
+            let report = refresh_sketch(d, *doc, *sketch)?;
+            Ok(CommandResult::SketchEdited {
+                doc: *doc,
+                sketch: *sketch,
+                created: edit.created,
+                removed: edit.removed,
+                modified: edit.modified,
+                solved: report.solved,
+                residual: report.residual,
+                dof: report.dof,
+                diagnostics: report.diagnostics,
+            })
+        },
+
+        Command::ExtendSketch { doc, sketch, element, point } => {
+            let edit = {
+                let (elements, ..) = sketch_parts(d, *sketch)?;
+                sketch::extend(elements, *element, *point).map_err(Error::Invalid)?
+            };
+            let report = refresh_sketch(d, *doc, *sketch)?;
+            Ok(CommandResult::SketchEdited {
+                doc: *doc,
+                sketch: *sketch,
+                created: edit.created,
+                removed: edit.removed,
+                modified: edit.modified,
+                solved: report.solved,
+                residual: report.residual,
+                dof: report.dof,
+                diagnostics: report.diagnostics,
+            })
+        },
+
+        Command::OffsetSketch { doc, sketch, elements, distance, construction } => {
+            let distance = d.resolve(distance)?;
+            let edit = {
+                let (elements_store, _, next_element, ..) = sketch_parts(d, *sketch)?;
+                sketch::offset(elements_store, next_element, elements.as_deref(), distance, *construction)
+                    .map_err(Error::Invalid)?
+            };
+            let report = refresh_sketch(d, *doc, *sketch)?;
+            Ok(CommandResult::SketchEdited {
+                doc: *doc,
+                sketch: *sketch,
+                created: edit.created,
+                removed: edit.removed,
+                modified: edit.modified,
+                solved: report.solved,
+                residual: report.residual,
+                dof: report.dof,
+                diagnostics: report.diagnostics,
+            })
         },
 
         // --- sketch → solid -------------------------------------------------
@@ -2343,7 +2520,7 @@ enum ExtrudeKind {
 
 /// Mutable access to a sketch entity's shape fields; error if not a sketch.
 /// Returns `(elements, constraints, next_element, next_constraint, solved,
-/// residual, dof)`.
+/// residual, dof, over_constrained, diagnostics)`.
 #[allow(clippy::type_complexity)]
 fn sketch_parts(
     d: &mut Document,
@@ -2356,12 +2533,32 @@ fn sketch_parts(
     &mut bool,
     &mut f64,
     &mut i64,
+    &mut bool,
+    &mut Vec<String>,
 )> {
     let e = d.entity_mut(sketch)?;
     match &mut e.shape {
-        Shape::Sketch { elements, constraints, next_element, next_constraint, solved, residual, dof } => {
-            Ok((elements, constraints, next_element, next_constraint, solved, residual, dof))
-        },
+        Shape::Sketch {
+            elements,
+            constraints,
+            next_element,
+            next_constraint,
+            solved,
+            residual,
+            dof,
+            over_constrained,
+            diagnostics,
+        } => Ok((
+            elements,
+            constraints,
+            next_element,
+            next_constraint,
+            solved,
+            residual,
+            dof,
+            over_constrained,
+            diagnostics,
+        )),
         _ => Err(Error::Invalid(format!(
             "entity {sketch} is not a sketch (hint: create one with add_sketch first)"
         ))),
@@ -2378,12 +2575,15 @@ fn refresh_sketch(d: &mut Document, doc: DocId, sketch: EntityId) -> Result<sket
     let report = sketch::solve(&mut elements, &constraints);
     let mesh = sketch::display_mesh(&elements);
     let key = rebuild::sketch_key(&elements);
-    let (se, sc, _, _, solved, residual, dof) = sketch_parts(d, sketch)?;
+    let (se, sc, _, _, solved, residual, dof, over_constrained, diagnostics) =
+        sketch_parts(d, sketch)?;
     *se = elements;
     *sc = constraints;
     *solved = report.solved;
     *residual = report.residual;
     *dof = report.dof;
+    *over_constrained = report.over_constrained;
+    *diagnostics = report.diagnostics.clone();
     {
         let e = d.entity_mut(sketch)?;
         e.mesh = mesh;
@@ -2412,6 +2612,8 @@ fn sketch_result(outcome: SketchOutcome) -> CommandResult {
             solved: r.solved,
             residual: r.residual,
             dof: r.dof,
+            diagnostics: r.diagnostics,
+            over_constrained: r.over_constrained,
         },
     }
 }
@@ -3463,6 +3665,7 @@ mod tests {
                 sketch,
                 p1: [num(p1[0]), num(p1[1])],
                 p2: [num(p2[0]), num(p2[1])],
+                construction: false,
             })
             .unwrap()
         {
@@ -3583,6 +3786,231 @@ mod tests {
             },
             r => panic!("unexpected result {r:?}"),
         }
+    }
+
+    /// Arcs, splines and construction geometry extrude through the bus, and
+    /// the whole sketch replays after save/open.
+    #[test]
+    fn arc_spline_and_construction_extrude_through_the_bus() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "quarter");
+        e.execute(Command::AddSketchArc {
+            doc: 1,
+            sketch: s,
+            center: [num(0.0), num(0.0)],
+            radius: num(10.0),
+            start_deg: num(0.0),
+            end_deg: num(90.0),
+            construction: false,
+        })
+        .unwrap();
+        add_line(&mut e, s, [0.0, 10.0], [0.0, 0.0]);
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        // A construction diagonal guides constraints but must not split the
+        // quarter-disc profile into two faces.
+        e.execute(Command::AddSketchLine {
+            doc: 1,
+            sketch: s,
+            p1: [num(0.0), num(0.0)],
+            p2: [num(6.0), num(6.0)],
+            construction: true,
+        })
+        .unwrap();
+        let (_, volume, _) = extrude(&mut e, s, num(4.0));
+        let expected = std::f64::consts::PI * 10.0f64.powi(2) / 4.0 * 4.0;
+        assert!((volume - expected).abs() / expected < 0.02, "quarter-disc volume {volume}");
+
+        let sp = add_sketch(&mut e, "rounded");
+        e.execute(Command::AddSketchSpline {
+            doc: 1,
+            sketch: sp,
+            points: vec![
+                [num(0.0), num(0.0)],
+                [num(20.0), num(0.0)],
+                [num(20.0), num(20.0)],
+                [num(0.0), num(20.0)],
+            ],
+            closed: true,
+            construction: false,
+        })
+        .unwrap();
+        let (_, spline_volume, _) = extrude(&mut e, sp, num(2.0));
+        assert!(spline_volume > 400.0, "closed spline volume {spline_volume}");
+
+        // Save → open replays arcs, splines, construction flags and the
+        // generated solids byte-for-byte.
+        let path = std::env::temp_dir().join("agcad_m17_sketch.agcad");
+        let path_str = path.to_string_lossy().to_string();
+        e.execute(Command::SaveDocument { doc: 1, path: path_str.clone(), source: None }).unwrap();
+        let mut reopened = engine();
+        let new_doc = match reopened
+            .execute(Command::OpenDocument { path: path_str.clone(), name: None })
+            .unwrap()
+        {
+            CommandResult::DocumentOpened { doc, .. } => doc,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(new_doc, 2);
+        let scene = match reopened.execute(Command::GetScene { doc: new_doc }).unwrap() {
+            CommandResult::Scene { entities, .. } => entities,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(scene.iter().any(|x| x.name == "quarter" && x.sketch.as_ref().is_some_and(|s| s.elements.len() == 4)));
+        assert!(scene.iter().any(|x| x.name == "rounded"));
+
+        // Save → open → save is a no-op: new curve commands round-trip
+        // byte-identically through the program.
+        let path2 = std::env::temp_dir().join("agcad_m17_sketch_roundtrip.agcad");
+        let path2_str = path2.to_string_lossy().to_string();
+        reopened
+            .execute(Command::SaveDocument { doc: new_doc, path: path2_str.clone(), source: None })
+            .unwrap();
+        let a = std::fs::read(&path).unwrap();
+        let b = std::fs::read(&path2).unwrap();
+        assert_eq!(a, b, "save → open → save must be byte-identical");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
+    }
+
+    /// Moving an arc endpoint changes its angle and moving a spline point
+    /// moves that control point — the new element kinds are draggable.
+    #[test]
+    fn move_arc_and_spline_points_through_the_bus() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "curves");
+        let arc = match e
+            .execute(Command::AddSketchArc {
+                doc: 1,
+                sketch: s,
+                center: [num(0.0), num(0.0)],
+                radius: num(10.0),
+                start_deg: num(0.0),
+                end_deg: num(90.0),
+                construction: false,
+            })
+            .unwrap()
+        {
+            CommandResult::SketchElementCreated { element, .. } => element,
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::MoveSketchPoint {
+            doc: 1,
+            sketch: s,
+            element: arc,
+            point: 1,
+            to: [0.0, 10.0],
+        })
+        .unwrap();
+        let sp = match e
+            .execute(Command::AddSketchSpline {
+                doc: 1,
+                sketch: s,
+                points: vec![
+                    [num(0.0), num(0.0)],
+                    [num(5.0), num(5.0)],
+                    [num(10.0), num(0.0)],
+                ],
+                closed: false,
+                construction: false,
+            })
+            .unwrap()
+        {
+            CommandResult::SketchElementCreated { element, .. } => element,
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::MoveSketchPoint {
+            doc: 1,
+            sketch: s,
+            element: sp,
+            point: 1,
+            to: [6.0, 7.0],
+        })
+        .unwrap();
+        let snap = sketch_snapshot(&mut e, s);
+        match snap.elements.iter().find(|x| matches!(x, SketchElement::Arc { id, .. } if *id == arc)).unwrap() {
+            SketchElement::Arc { start_deg, .. } => {
+                assert!((start_deg - 90.0).abs() < 1e-6, "arc start angle {start_deg}");
+            },
+            _ => unreachable!(),
+        }
+        match snap.elements.iter().find(|x| matches!(x, SketchElement::Spline { id, .. } if *id == sp)).unwrap() {
+            SketchElement::Spline { points, .. } => {
+                assert!((points[1][0] - 6.0).abs() < 1e-9 && (points[1][1] - 7.0).abs() < 1e-9);
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    /// Trim, extend, offset and conflict diagnostics work through commands.
+    #[test]
+    fn sketch_edit_commands_and_diagnostics() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "edits");
+        let a = add_line(&mut e, s, [0.0, 0.0], [20.0, 0.0]);
+        add_line(&mut e, s, [20.0, 0.0], [20.0, 10.0]);
+        add_line(&mut e, s, [20.0, 10.0], [0.0, 10.0]);
+        add_line(&mut e, s, [0.0, 10.0], [0.0, 0.0]);
+
+        // Offset the rectangle outward: four new lines, mitered corners.
+        match e.execute(Command::OffsetSketch {
+            doc: 1,
+            sketch: s,
+            elements: None,
+            distance: num(2.0),
+            construction: None,
+        })
+        .unwrap()
+        {
+            CommandResult::SketchEdited { created, solved, .. } => {
+                assert_eq!(created.len(), 4);
+                assert!(solved);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let snap = sketch_snapshot(&mut e, s);
+        assert_eq!(snap.elements.len(), 8, "four original + four offset lines");
+
+        // Extend line a's free endpoint? It is a closed loop, so trim first.
+        let err = e
+            .execute(Command::TrimSketch { doc: 1, sketch: s, element: a, at: [10.0, 0.0] })
+            .unwrap_err();
+        assert!(err.to_string().contains("no intersection"), "{err}");
+        // Add a crossing line and trim between the two intersections.
+        add_line(&mut e, s, [5.0, -5.0], [5.0, 5.0]);
+        match e.execute(Command::TrimSketch { doc: 1, sketch: s, element: a, at: [3.0, 0.0] }).unwrap() {
+            CommandResult::SketchEdited { modified, created, .. } => {
+                assert_eq!(modified, vec![a]);
+                assert!(created.is_empty(), "one cut keeps the far piece as the original");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // A line that stops short of a boundary extends to it.
+        let ext = add_line(&mut e, s, [30.0, 20.0], [33.0, 20.0]);
+        add_line(&mut e, s, [36.0, 15.0], [36.0, 25.0]);
+        match e.execute(Command::ExtendSketch { doc: 1, sketch: s, element: ext, point: 1 }).unwrap() {
+            CommandResult::SketchEdited { modified, .. } => assert_eq!(modified, vec![ext]),
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Two contradictory distances are named by id.
+        let ds = add_sketch(&mut e, "conflict");
+        let d = add_line(&mut e, ds, [0.0, 0.0], [10.0, 0.0]);
+        constrain(&mut e, ds, K::Distance, vec![pref(d, 0), pref(d, 1)], Some(num(40.0)));
+        let (_, solved, _, _) =
+            constrain(&mut e, ds, K::Distance, vec![pref(d, 0), pref(d, 1)], Some(num(50.0)));
+        assert!(!solved);
+        let snap = sketch_snapshot(&mut e, ds);
+        assert!(
+            snap.diagnostics.iter().any(|m| m.contains("constraint 1 (distance) is unsatisfied")),
+            "{:?}",
+            snap.diagnostics
+        );
+        assert!(
+            snap.diagnostics.iter().any(|m| m.contains("contradictory")),
+            "{:?}",
+            snap.diagnostics
+        );
     }
 
     /// A distance constraint whose value is an expression re-solves when
@@ -3776,6 +4204,7 @@ mod tests {
                 sketch: s,
                 center: [num(20.0), num(15.0)],
                 radius: num(5.0),
+                construction: false,
             })
             .unwrap()
         {
@@ -5569,7 +5998,7 @@ mod tests {
             ([x(), y()], [z(), y()]),
             ([z(), y()], [z(), z()]),
         ] {
-            e.execute(Command::AddSketchLine { doc: 1, sketch, p1, p2 }).unwrap();
+            e.execute(Command::AddSketchLine { doc: 1, sketch, p1, p2, construction: false }).unwrap();
         }
         let swept = extrude(&mut e, sketch, Scalar::Expression("d".into())).0;
         round_all(&mut e, swept, 0.3);
@@ -5876,6 +6305,7 @@ mod tests {
             sketch: spring_profile,
             center: [num(0.0), num(0.0)],
             radius: Scalar::Expression("r".into()),
+            construction: false,
         })
         .unwrap();
         let spring = match e
@@ -5922,6 +6352,7 @@ mod tests {
                 sketch: lower,
                 p1: [num(p1[0]), num(p1[1])],
                 p2: [num(p2[0]), num(p2[1])],
+                construction: false,
             })
             .unwrap();
         }
@@ -5934,6 +6365,7 @@ mod tests {
             sketch: upper,
             center: [num(0.0), num(0.0)],
             radius: num(6.0),
+            construction: false,
         })
         .unwrap();
         let lofted = match e

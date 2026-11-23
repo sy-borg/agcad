@@ -430,12 +430,17 @@ pub enum Command {
     },
 
     /// Append a line segment to a sketch. 2D coordinates in sketch-local
-    /// units (mm), may be expressions.
+    /// units (mm), may be expressions. A construction line guides constraints
+    /// but is excluded from the extrudable profile.
     AddSketchLine {
         doc: DocId,
         sketch: EntityId,
         p1: [Scalar; 2],
         p2: [Scalar; 2],
+        /// Construction geometry: solved and displayed, but never part of a
+        /// closed profile. Defaults to false.
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
     },
 
     /// Append a circle to a sketch.
@@ -444,6 +449,37 @@ pub enum Command {
         sketch: EntityId,
         center: [Scalar; 2],
         radius: Scalar,
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
+    },
+
+    /// Append a circular arc to a sketch. Angles are degrees, measured
+    /// counter-clockwise from the sketch's local +X; the arc runs from
+    /// `start_deg` to `end_deg` counter-clockwise (a sweep of 360 is a full
+    /// circle, so use `add_sketch_circle` for that).
+    AddSketchArc {
+        doc: DocId,
+        sketch: EntityId,
+        center: [Scalar; 2],
+        radius: Scalar,
+        start_deg: Scalar,
+        end_deg: Scalar,
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
+    },
+
+    /// Append an interpolating spline through the given points (Catmull-Rom;
+    /// the curve passes through every point). Open by default: its two
+    /// endpoints connect to other sketch elements like a line. An open spline
+    /// needs at least 2 points, a closed one at least 3.
+    AddSketchSpline {
+        doc: DocId,
+        sketch: EntityId,
+        points: Vec<[Scalar; 2]>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        closed: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
     },
 
     /// Add a geometric/numeric constraint to a sketch and re-solve. The
@@ -455,11 +491,16 @@ pub enum Command {
         sketch: EntityId,
         kind: ConstraintKind,
         /// Element references, meaning depends on `kind`:
-        /// coincident/distance → two point refs; horizontal/vertical → one
-        /// whole-element ref; parallel/perpendicular → two element refs;
-        /// radius/diameter → one circle ref.
+        /// coincident → two point refs; distance → two point refs or one
+        /// point and one whole line; horizontal/vertical → one whole line;
+        /// parallel/perpendicular/angle → two whole lines; radius/diameter →
+        /// one circle/arc; equal → two lines or two curves; concentric → two
+        /// curves; symmetric → point, point, whole line (the mirror axis);
+        /// point_on_line → one point and one whole line; tangent → one line
+        /// and one curve, or two curves.
         refs: Vec<SketchRef>,
-        /// Required by distance/radius/diameter (mm). May be an expression.
+        /// Required by distance/radius/diameter (mm) and angle (degrees).
+        /// May be an expression.
         #[serde(default)]
         value: Option<Scalar>,
     },
@@ -473,7 +514,8 @@ pub enum Command {
         doc: DocId,
         sketch: EntityId,
         element: u64,
-        /// 0 = line start / circle center, 1 = line end.
+        /// Point index: line 0=start,1=end; circle 0=center; arc
+        /// 0=center,1=start,2=end; spline i=control point i.
         point: u8,
         to: [f64; 2],
     },
@@ -482,11 +524,50 @@ pub enum Command {
     /// too (cascade), then the sketch re-solves.
     DeleteSketchElement { doc: DocId, sketch: EntityId, element: u64 },
 
+    /// Trim a line/arc/circle at `at`: the piece containing that point is
+    /// removed, bounded by its nearest intersections with other elements
+    /// (construction guides included). Trim keeps the rest as one or two
+    /// elements (new ids are returned); a circle with one cut becomes an arc.
+    /// Constraints that still make sense for the kept geometry survive.
+    /// Splines cannot be trimmed.
+    TrimSketch {
+        doc: DocId,
+        sketch: EntityId,
+        element: u64,
+        /// A point near the piece to remove, in sketch-local coordinates.
+        at: [f64; 2],
+    },
+
+    /// Extend one line endpoint (0 = start, 1 = end) along its own direction
+    /// to the nearest intersection with another element (construction guides
+    /// included). The line must point at something: with no intersection the
+    /// command fails rather than guessing a length.
+    ExtendSketch { doc: DocId, sketch: EntityId, element: u64, point: u8 },
+
+    /// Offset sketch curves by `distance` (mm) to the left of each element's
+    /// direction, creating new elements. Lines, circles, arcs and splines are
+    /// supported. Select `elements` to copy just those, or omit it to offset
+    /// every printable element — when that selection is one closed loop of
+    /// lines, the copies are mitered into a proper offset outline (positive
+    /// distance then moves outward).
+    OffsetSketch {
+        doc: DocId,
+        sketch: EntityId,
+        /// Elements to offset. Omit for all non-construction elements.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elements: Option<Vec<u64>>,
+        distance: Scalar,
+        /// Mark the new elements as construction (default: copy the source).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        construction: Option<bool>,
+    },
+
     /// Extrude a closed sketch profile into a printable solid along the
-    /// sketch normal. The sketch must be made of closed loops (lines that
-    /// form loops, and/or circles); holes are handled (a circle inside a
-    /// loop becomes a through-hole). The result is a watertight solid
-    /// placed by the sketch's transform, and it follows later sketch edits.
+    /// sketch normal. The sketch must be made of closed loops (lines, arcs and
+    /// open splines that form loops, and/or circles or closed splines); holes
+    /// are handled (a circle inside a loop becomes a through-hole). The result
+    /// is a watertight solid placed by the sketch's transform, and it follows
+    /// later sketch edits.
     ///
     /// On a sketch placed on a solid face, the sketch normal is the face's
     /// outward normal: a positive distance adds material in front of the
@@ -854,6 +935,13 @@ pub struct SketchValidation {
     pub dof: i64,
     pub elements: usize,
     pub constraints: usize,
+    /// The constraint set is redundant (over-constrained): removing a named
+    /// constraint in `diagnostics` restores independence.
+    #[serde(default)]
+    pub over_constrained: bool,
+    /// Unsatisfied or redundant constraints, named by id and reason.
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
     /// Whether the elements form a closed profile that extrude/revolve can
     /// consume. Empty sketches are not closed.
     pub closed_profile: bool,
@@ -1186,9 +1274,31 @@ pub enum CommandResult {
         residual: f64,
         /// Approximate degrees of freedom left (vars − equations).
         dof: i64,
+        /// Redundant or unsatisfied constraints, named by id.
+        #[serde(default)]
+        diagnostics: Vec<String>,
+        /// True when the equations are redundant even though they solve.
+        #[serde(default)]
+        over_constrained: bool,
     },
     ConstraintRemoved { doc: DocId, sketch: EntityId, constraint: u64 },
     SketchPointMoved { doc: DocId, sketch: EntityId, element: u64 },
+    /// Sketch geometry was edited in place (trim, extend, offset).
+    SketchEdited {
+        doc: DocId,
+        sketch: EntityId,
+        /// New element ids, in creation order (empty when nothing was added).
+        created: Vec<u64>,
+        /// Element ids removed by the edit (empty when nothing was removed).
+        removed: Vec<u64>,
+        /// Existing element ids whose geometry changed.
+        modified: Vec<u64>,
+        solved: bool,
+        residual: f64,
+        dof: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<String>,
+    },
     /// A sketch was turned into a solid (extrude/revolve). `volume` is the
     /// enclosed volume in mm³ — a quick printability sanity check.
     SolidCreated {
@@ -1260,10 +1370,14 @@ pub struct SourceDoc {
 /// Reference to a point (or a whole element) inside a sketch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SketchRef {
-    /// Sketch element id (from add_sketch_line / add_sketch_circle).
+    /// Sketch element id (from add_sketch_line / add_sketch_circle /
+    /// add_sketch_arc / add_sketch_spline).
     pub element: u64,
-    /// `Some(0)` = line start / circle center, `Some(1)` = line end,
-    /// `None` = the whole element (its direction, for line constraints).
+    /// Point index, interpreted per element kind:
+    /// line `0` = start, `1` = end; circle `0` = center;
+    /// arc `0` = center, `1` = start, `2` = end; spline `i` = point `i`.
+    /// `None` = the whole element (its direction/radius, for whole-element
+    /// constraints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point: Option<u8>,
 }
@@ -1280,6 +1394,19 @@ pub enum ConstraintKind {
     Distance,
     Radius,
     Diameter,
+    /// Two lines of equal length, or two circles/arcs of equal radius.
+    Equal,
+    /// Two circles/arcs share a center point.
+    Concentric,
+    /// Two points mirrored about a line (refs: point, point, whole line).
+    Symmetric,
+    /// The angle between two lines, in degrees (`value`).
+    Angle,
+    /// A point lies on the supporting line of a line element.
+    PointOnLine,
+    /// A line is tangent to a circle/arc, or two circles/arcs are externally
+    /// tangent.
+    Tangent,
 }
 
 impl ConstraintKind {
@@ -1293,6 +1420,20 @@ impl ConstraintKind {
             Self::Distance => "distance",
             Self::Radius => "radius",
             Self::Diameter => "diameter",
+            Self::Equal => "equal",
+            Self::Concentric => "concentric",
+            Self::Symmetric => "symmetric",
+            Self::Angle => "angle",
+            Self::PointOnLine => "point_on_line",
+            Self::Tangent => "tangent",
+        }
+    }
+
+    /// How many scalar equations this constraint contributes to the solver.
+    pub fn equations(&self) -> i64 {
+        match self {
+            Self::Coincident | Self::Concentric | Self::Symmetric => 2,
+            _ => 1,
         }
     }
 }
@@ -1404,12 +1545,48 @@ pub struct SketchPlaneFrame {
 }
 
 /// A 2D element of a sketch. Coordinates are sketch-local (mm); the
-/// sketch entity's transform places them in 3D.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// sketch entity's transform places them in 3D. `construction` elements are
+/// solved and displayed but excluded from the extrudable profile.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SketchElement {
-    Line { id: u64, p1: [f64; 2], p2: [f64; 2] },
-    Circle { id: u64, center: [f64; 2], radius: f64 },
+    Line {
+        id: u64,
+        p1: [f64; 2],
+        p2: [f64; 2],
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
+    },
+    Circle {
+        id: u64,
+        center: [f64; 2],
+        radius: f64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
+    },
+    /// Counter-clockwise arc from `start_deg` to `end_deg` (degrees).
+    Arc {
+        id: u64,
+        center: [f64; 2],
+        radius: f64,
+        start_deg: f64,
+        end_deg: f64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
+    },
+    /// Interpolating Catmull-Rom spline through `points`.
+    Spline {
+        id: u64,
+        points: Vec<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        closed: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        construction: bool,
+    },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One constraint as stored in the sketch (value already resolved).
@@ -1433,6 +1610,14 @@ pub struct SketchSnapshot {
     pub residual: f64,
     /// Approximate degrees of freedom left (variables − equations).
     pub dof: i64,
+    /// True when the constraint equations are redundant (rank deficient) even
+    /// if a solution exists. The diagnostics name the constraints to remove.
+    #[serde(default)]
+    pub over_constrained: bool,
+    /// Conflict diagnostics: unsatisfied or redundant constraints named by id,
+    /// with the reason. Empty when the sketch is clean.
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
     /// Resolved world-space plane: origin, outward normal (the extrude
     /// direction) and in-plane X. Derived from the entity transform.
     #[serde(default, skip_serializing_if = "Option::is_none")]

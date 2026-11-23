@@ -112,8 +112,9 @@ Commands, grouped by intent:
   `shell`, `hole`, `sweep`, `loft`, `thread`
 - **Parameters**: `set_parameter`, `remove_parameter`, `get_parameters`
 - **Sketches and solids**: `add_sketch`, `add_sketch_line`,
-  `add_sketch_circle`, `constrain`, `remove_constraint`, `move_sketch_point`,
-  `delete_sketch_element`, `extrude`, `revolve`
+  `add_sketch_circle`, `add_sketch_arc`, `add_sketch_spline`, `constrain`,
+  `remove_constraint`, `move_sketch_point`, `delete_sketch_element`,
+  `trim_sketch`, `extend_sketch`, `offset_sketch`, `extrude`, `revolve`
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `validate`,
   `diff_scene`, `export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
   `open_document`
@@ -256,6 +257,53 @@ top = cad.add_sketch(doc, "pocket", plane={"entity": base, "normal": [0, 0, 1]})
 side = cad.add_sketch(doc, "boss", plane={"entity": base, "normal": [1, 0, 0]})
 cad.add_sketch(doc, "plate_top", plane="xy", offset="wall*2")
 ```
+
+## Sketch completeness: curves, construction and diagnostics
+
+Sketches are no longer just lines and circles. `add_sketch_arc` adds a
+counter-clockwise arc (degrees from the local +X), and `add_sketch_spline`
+adds an interpolating Catmull-Rom curve through every point; both tessellate
+into closed profiles for `extrude` and `revolve`.
+
+```python
+arc = cad.add_sketch_arc(doc, sketch, center=("w-corner", "corner"),
+                         radius="corner", start_deg=-90, end_deg=0)
+curve = cad.add_sketch_spline(doc, sketch,
+                              [(0, 0), (20, -5), (40, 0)], closed=True)
+guide = cad.add_sketch_line(doc, sketch, (0, 0), ("w", "h"), construction=True)
+```
+
+The constraint vocabulary now covers `equal`, `concentric`, `symmetric`,
+`angle`, `point_on_line` and `tangent` alongside the original
+coincident/direction/distance/radius set. Point references follow the element
+kind: line `0`=start, `1`=end; circle `0`=center; arc `0`=center, `1`=start,
+`2`=end; spline `i`=point `i`. `distance` also accepts a point and a whole
+line (perpendicular distance).
+
+**Construction geometry** is solved and displayed at half width but excluded
+from the extrudable profile, so a reference diagonal or centerline can drive
+symmetry without cutting the part.
+
+**Editing.** `trim_sketch{element,at}` removes the piece containing the point,
+bounded by the nearest crossings (a circle needs two cuts and becomes an arc).
+`extend_sketch{element,point}` grows a line endpoint to the closest boundary
+in its path. `offset_sketch{distance,elements?}` creates parallel copies:
+lines, circles and arcs are exact, a single closed loop of lines is mitered
+into a proper offset outline (positive distance moves outward), and splines
+offset their control points.
+
+**Conflict diagnostics.** Every solve reports `over_constrained` and a
+`diagnostics` list. Unsatisfied constraints are named by id with their
+residual; redundant equations are found by rank and named the same way:
+
+```json
+{"constraint_created":{"constraint":15,"solved":true,"residual":0,
+  "over_constrained":true,
+  "diagnostics":["constraint 15 (distance) is redundant: its equation(s) are already implied by the other constraints (hint: remove it to clear the over-constraint)"]}}
+```
+
+`validate` carries the same diagnostics per sketch, and `get_scene` reports
+them with the elements so an agent can repair the drawing without guessing.
 
 ## Shape leverage: fewer profiles, more part
 
@@ -585,13 +633,13 @@ turns, while the script remains the editing surface.
       polyline or helix, `loft` morphs between profiles, and `thread` builds a
       helical screw thread — union it for a screw, subtract it for a threaded
       hole.
-
-### Next
-
-- [ ] **M17 — Sketch completeness**: arcs and splines; tangent, equal,
+- [x] **M17 — Sketch completeness**: arcs and splines; tangent, equal,
       concentric, symmetric, angle and point-on-line constraints; construction
       geometry; trim/extend/offset; conflict diagnostics that name the
       over-constrained equations.
+
+### Next
+
 - [ ] **M18 — Interoperability**: mesh import (STL/OBJ/3MF), DXF/SVG for 2D
       output, and a STEP path (with an explicit B-rep vs tessellation
       decision). An agent handed a real CAD file should be able to participate.
@@ -604,16 +652,20 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 16 is complete: patterns, mirror, shell, holes, sweep, loft and
-threads are program features, so they replay parametrically like everything
-else. The suite is **170 tests** (162 engine + 8 viewer).
+Milestone 17 is complete: sketches cover arcs, splines, a wider constraint
+vocabulary, construction geometry, destructive trim/extend/offset edits and
+conflict diagnostics that name redundant equations. The suite is **182
+tests** (174 engine + 8 viewer).
 
 What it covers:
 
 - **Solver and sketches** — rectangles from messy input, radius/diameter,
   parallel/perpendicular, over-constraint reporting, bit-identical
   determinism, parametric re-solve, undo/redo, cascade delete, STL sketch
-  filtering.
+  filtering; arcs and interpolating splines in profiles, tangent/equal/
+  concentric/symmetric/angle/point-on-line constraints, construction geometry
+  excluded from extrusion, trim/extend/mitered offset, and diagnostics that
+  name unsatisfied and redundant constraints by id.
 - **Solids, booleans and edges** — extrude volumes, nested holes, negative
   extrusion, revolve around X/Y, partial sweeps, profile validation,
   dependent rebuilds, cross-engine determinism; sharp-edge extraction on
@@ -653,15 +705,19 @@ What it covers:
   right- and left-hand threads, in-place replay, save/open and cold-replay
   determinism.
 
-The next milestone is sketch completeness (M17): arcs, splines, a wider
-constraint vocabulary and conflict diagnostics. Then interoperability. A GUI
-feature tree is not on the list — the agent edits the script and replays.
+The next milestone is interoperability (M18): mesh import, DXF/SVG output and
+a STEP path with an explicit representation decision. A GUI feature tree is not
+on the list — the agent edits the script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
 `examples/revolve_bushing.py`, `examples/face_sketch.py` (a top-face pocket
 cut with a negative extrude and a +X-face boss grown with a positive one,
-both following the parametric block), `examples/pick.py` (face and edge
+both following the parametric block), `examples/sketch_complete.py` (a
+rounded rectangle built from tangent lines and arcs, a closed spline hole,
+construction geometry, deliberate over-constraint diagnostics and
+trim/extend/offset — then extrude and render),
+`examples/pick.py` (face and edge
 selectors from rays, with the edge click surviving a height change before it
 drives a fillet), `examples/validate.py` (validate a plate, fail it with a
 thin-wall knob, then diff the rebuild against the saved baseline),

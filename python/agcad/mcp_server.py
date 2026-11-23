@@ -42,8 +42,11 @@ verify -> validate to prove watertightness/printability and diff_scene to see
 exactly what a knob changed -> agcad_render to SEE the result -> export_stl/
 export_3mf for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
-add_sketch_line/add_sketch_circle -> constrain(...) re-solves after every change ->
-extrude/revolve turns a closed profile into a printable solid. Sketch planes can
+add_sketch_line/add_sketch_circle/add_sketch_arc/add_sketch_spline ->
+constrain(...) re-solves after every change -> trim_sketch/extend_sketch/
+offset_sketch edit the drawing -> extrude/revolve turns a closed profile into a
+printable solid. Construction elements guide constraints and display but are
+excluded from the profile. Sketch planes can
 be the XY/XZ/YZ datum planes, an explicit origin/normal, or a planar face of an
 existing solid; a face sketch's normal is the outward face normal, so a positive
 extrude adds a boss and a negative extrude cuts into the body (boolean difference
@@ -117,18 +120,37 @@ add_sketch{doc,name,plane?} (empty 2D sketch; plane may be omitted for the XY
       extrude adds material in front of the face, negative cuts into the body
       (then boolean{difference} to remove it). The resolved frame is reported
       as sketch.plane in get_scene.),
-add_sketch_line{doc,sketch,p1:[x,y],p2:[x,y]},
-add_sketch_circle{doc,sketch,center:[x,y],radius},
+add_sketch_line{doc,sketch,p1:[x,y],p2:[x,y],construction?},
+add_sketch_circle{doc,sketch,center:[x,y],radius,construction?},
+add_sketch_arc{doc,sketch,center:[x,y],radius,start_deg,end_deg,construction?}
+  (counter-clockwise from start to end; angles in degrees from local +X),
+add_sketch_spline{doc,sketch,points:[[x,y],...],closed?,construction?}
+  (interpolating Catmull-Rom through every point; open 2+ points, closed 3+),
 constrain{doc,sketch,kind,refs,value?} (re-solves; kind is coincident,
-  horizontal, vertical, parallel, perpendicular, distance, radius or diameter;
-  refs are {"element":id,"point":0|1} for points or {"element":id} for whole
-  elements — coincident/distance take 2 point refs, horizontal/vertical 1 line,
-  parallel/perpendicular 2 lines, radius/diameter 1 circle + value;
-  result reports solved/residual/dof),
+  horizontal, vertical, parallel, perpendicular, distance, radius, diameter,
+  equal, concentric, symmetric, angle, point_on_line or tangent; refs are
+  {"element":id,"point":0|1|...} for points or {"element":id} for whole
+  elements. Points: line 0=start,1=end; circle 0=center; arc 0=center,
+  1=start,2=end; spline i=point i. coincident/distance take 2 points (distance
+  also takes point+line), horizontal/vertical 1 line, parallel/perpendicular/
+  angle 2 lines, radius/diameter 1 circle/arc + value, equal 2 lines or 2
+  curves, concentric 2 curves, symmetric [point,point,whole line], point_on_line
+  [point,whole line], tangent [line,curve] or [curve,curve]. The result reports
+  solved/residual/dof plus diagnostics naming unsatisfied or redundant
+  constraints by id; over_constrained flags rank-deficient equations),
 remove_constraint{doc,sketch,constraint},
-move_sketch_point{doc,sketch,element,point,to:[x,y]} (0 = line start / circle
-  center, 1 = line end; steers the solver, then re-solves),
+move_sketch_point{doc,sketch,element,point,to:[x,y]} (point refs as above;
+  steers the solver, then re-solves),
 delete_sketch_element{doc,sketch,element} (constraints on it cascade away),
+trim_sketch{doc,sketch,element,at:[x,y]} (remove the piece containing `at`,
+  bounded by the nearest intersections; a circle needs two cuts and becomes an
+  arc; returns created/removed/modified ids),
+extend_sketch{doc,sketch,element,point:0|1} (extend a line endpoint to the
+  nearest boundary in its path; errors if nothing is in the way),
+offset_sketch{doc,sketch,distance,elements?,construction?} (new elements;
+  positive distance is left of each element's direction, except one closed loop
+  of lines is mitered with positive = outward; lines/circles/arcs exact,
+  splines offset their control points),
 extrude{doc,sketch,distance,name?,color?} (closed profile → watertight solid along
   the sketch normal; negative distance extrudes the other way; nested loops become
   holes; the solid follows later sketch edits; returns volume + tris),
@@ -180,7 +202,8 @@ validate{doc,entities?,min_wall_mm?} (trust check, changes no state). For every
   solid: watertight/open/non-manifold edges, degenerate triangles,
   self-intersections, signed world volume, world bbox and an approximate
   thinnest wall (inward rays; sub-0.05 mm contact is treated as numerical
-  noise); for every sketch: solver status and whether the profile is closed.
+  noise); for every sketch: solver status, over-constrained/diagnostics and
+  whether the profile is closed.
   Returns ok + per-entity reports + totals + warnings. entities restricts the
   check; min_wall_mm sets the thin-wall pass/fail threshold (omit to report
   the estimate without failing),
@@ -451,6 +474,8 @@ class McpServer:
                     "solved": sketch.get("solved"),
                     "residual": sketch.get("residual"),
                     "dof": sketch.get("dof"),
+                    "over_constrained": sketch.get("over_constrained", False),
+                    "diagnostics": sketch.get("diagnostics", []),
                     "elements": len(sketch.get("elements", [])),
                     "constraints": len(sketch.get("constraints", [])),
                     "plane": sketch.get("plane"),

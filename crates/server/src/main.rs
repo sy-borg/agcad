@@ -102,6 +102,11 @@ fn is_mutating(command: &Command) -> bool {
             | Command::AddSketch { .. }
             | Command::AddSketchLine { .. }
             | Command::AddSketchCircle { .. }
+            | Command::AddSketchArc { .. }
+            | Command::AddSketchSpline { .. }
+            | Command::TrimSketch { .. }
+            | Command::ExtendSketch { .. }
+            | Command::OffsetSketch { .. }
             | Command::Constrain { .. }
             | Command::RemoveConstraint { .. }
             | Command::MoveSketchPoint { .. }
@@ -140,6 +145,11 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::AddSketch { doc, .. }
         | Command::AddSketchLine { doc, .. }
         | Command::AddSketchCircle { doc, .. }
+        | Command::AddSketchArc { doc, .. }
+        | Command::AddSketchSpline { doc, .. }
+        | Command::TrimSketch { doc, .. }
+        | Command::ExtendSketch { doc, .. }
+        | Command::OffsetSketch { doc, .. }
         | Command::Constrain { doc, .. }
         | Command::RemoveConstraint { doc, .. }
         | Command::MoveSketchPoint { doc, .. }
