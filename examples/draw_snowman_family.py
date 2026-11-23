@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 SNOW = [0.95, 0.96, 0.98, 1.0]
 DARK = [0.12, 0.12, 0.15, 1.0]
@@ -54,7 +54,7 @@ def snowman_solid_params(p: str, ox, base, mid, head, scarf) -> list[dict]:
 def main() -> None:
     args = sys.argv[1:]
     port = int(args[args.index("--port") + 1]) if "--port" in args else None
-    cad = Agcad.connect(port=port) if port is not None else Agcad.spawn()
+    cad = Wright.connect(port=port) if port is not None else Wright.spawn()
     print(f"{'connected to server on :' + str(port) if port else 'spawned private server'}")
 
     doc = cad.create_document("snowman_family")["doc"]

@@ -5,7 +5,7 @@
 //! detected that way), `u32` triangle count, then per triangle a face
 //! normal, three vertices, and a `u16` attribute — all little-endian `f32`.
 
-use agcad_protocol::{Mat4, Mesh};
+use wright_protocol::{Mat4, Mesh};
 
 use crate::mat4;
 use crate::Error;
@@ -31,7 +31,7 @@ pub fn stl_bytes(entries: &[(Mesh, Mat4)]) -> (Vec<u8>, usize) {
 
     let mut out = Vec::with_capacity(84 + tris.len() * 50);
     let mut header = [0u8; 80];
-    let label = b"agcad binary STL - parametric solids, units mm";
+    let label = b"wright binary STL - parametric solids, units mm";
     header[..label.len()].copy_from_slice(label);
     out.extend_from_slice(&header);
     out.extend_from_slice(&(tris.len() as u32).to_le_bytes());

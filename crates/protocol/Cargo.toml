@@ -1,6 +1,6 @@
 [package]
-name = "agcad-protocol"
-description = "Wire types for the agcad command bus (line-delimited JSON-RPC)"
+name = "wright-protocol"
+description = "Wire types for the wright command bus (line-delimited JSON-RPC)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

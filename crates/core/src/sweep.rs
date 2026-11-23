@@ -14,7 +14,7 @@
 use manifold_rust::linalg::{Mat3x4, Vec2, Vec3 as MVec3};
 use manifold_rust::manifold::Manifold;
 
-use agcad_protocol::{Hand, Mesh, Scalar, SweepPath, Vec3};
+use wright_protocol::{Hand, Mesh, Scalar, SweepPath, Vec3};
 
 use crate::boolean::from_manifold;
 use crate::{solid, Error};

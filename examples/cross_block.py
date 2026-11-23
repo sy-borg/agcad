@@ -15,9 +15,9 @@ plan corners are sharp — so the vertical edges are deliberately left alone.
 
 Writes the committed showcase into ``examples/cross_block/``: ``iso.png``,
 ``front.png``, ``cross_block.stl``, ``cross_block.3mf``,
-``cross_block.agcad`` (the sharp baseline), plus ``rounded.png``,
+``cross_block.wcad`` (the sharp baseline), plus ``rounded.png``,
 ``cross_block_rounded.stl``, ``cross_block_rounded.3mf`` and
-``cross_block_rounded.agcad`` (the edge-treated part), and (when ImageMagick
+``cross_block_rounded.wcad`` (the edge-treated part), and (when ImageMagick
 is installed) the stacked ``compare.png`` used in the README — the drawing
 above the finished part.
 
@@ -33,7 +33,7 @@ import tempfile
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 # Close to the reference's light green; the lit faces come out near it.
 GREEN = (0.85, 1.0, 0.83, 1.0)
@@ -61,7 +61,7 @@ def compose_showcase(reference: str, model_png: str, out_path: str) -> None:
     if not magick or not os.path.exists(reference):
         print("showcase: ImageMagick or the reference drawing missing, skipping compare.png")
         return
-    tmp = tempfile.mkdtemp(prefix="agcad_showcase_")
+    tmp = tempfile.mkdtemp(prefix="wright_showcase_")
     ref = os.path.join(tmp, "ref.png")
     model = os.path.join(tmp, "model.png")
     ref_l = os.path.join(tmp, "ref_l.png")
@@ -78,7 +78,7 @@ def compose_showcase(reference: str, model_png: str, out_path: str) -> None:
     )
     for src, dst, text in [
         (ref, ref_l, "the drawing (examples/example_body.png)"),
-        (model, model_l, "the finished model agcad rebuilt from it (examples/cross_block.py)"),
+        (model, model_l, "the finished model Wright CAD rebuilt from it (examples/cross_block.py)"),
     ]:
         run(
             src, "-background", "white", "-gravity", "north", "-splice", "0x46",
@@ -105,7 +105,7 @@ def main() -> None:
     rounded_stl = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.stl"))
     rounded_mf = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.3mf"))
 
-    cad = Agcad.spawn()
+    cad = Wright.spawn()
     doc = cad.create_document("cross_block")["doc"]
 
     for name, value, desc in [
@@ -182,7 +182,7 @@ def main() -> None:
     # the knobs as they stand, and an embedded copy of the recipe as provenance.
     with open(__file__, encoding="utf-8") as f:
         source = {"language": "python", "text": f.read()}
-    doc_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block.agcad"))
+    doc_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block.wcad"))
     saved = cad.save_document(doc, doc_path, source=source)
     print(f"saved -> {saved['path']} ({saved['bytes']} bytes, {saved['params']} params)")
 
@@ -217,7 +217,7 @@ def main() -> None:
     exp = cad.export_3mf(doc, rounded_mf)
     print(f"3mf: {exp['path']} ({exp['objects']} objects, {exp['tris']} tris, {exp['bytes']} bytes)")
 
-    rounded_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.agcad"))
+    rounded_path = os.path.abspath(os.path.join(OUT_DIR, "cross_block_rounded.wcad"))
     saved = cad.save_document(doc, rounded_path, source=source)
     print(f"saved -> {saved['path']} ({saved['bytes']} bytes, {saved['params']} params)")
 

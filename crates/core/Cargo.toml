@@ -1,12 +1,12 @@
 [package]
-name = "agcad-core"
-description = "Headless agcad engine: documents, entities, history, tessellation"
+name = "wright-core"
+description = "Headless wright engine: documents, entities, history, tessellation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-agcad-protocol.workspace = true
+wright-protocol.workspace = true
 serde_json.workspace = true
 manifold-rust = "0.19.2"
 clipper2-rust = "1.2.0"

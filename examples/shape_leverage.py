@@ -12,7 +12,7 @@ One document, several printable demonstrations laid out side by side:
 
 Every feature is a normal program step, so the script is still the source and
 `set_parameter` replays the lot. The script renders the scene, validates it and
-saves a `.agcad` with its own source embedded.
+saves a `.wcad` with its own source embedded.
 
 Usage: .venv/bin/python examples/shape_leverage.py
 """
@@ -22,14 +22,14 @@ import sys
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 OUT = "exports"
 
 
 def main() -> None:
     os.makedirs(OUT, exist_ok=True)
-    with Agcad.spawn() as cad:
+    with Wright.spawn() as cad:
         cad.initialize()
         doc = cad.create_document("shape_leverage")["doc"]
 
@@ -142,10 +142,10 @@ def main() -> None:
         )
         cad.save_document(
             doc,
-            os.path.join(OUT, "shape_leverage.agcad"),
+            os.path.join(OUT, "shape_leverage.wcad"),
             source={"language": "python", "text": open(__file__, encoding="utf-8").read()},
         )
-        print(f"wrote {OUT}/shape_leverage.png and {OUT}/shape_leverage.agcad")
+        print(f"wrote {OUT}/shape_leverage.png and {OUT}/shape_leverage.wcad")
 
 
 if __name__ == "__main__":

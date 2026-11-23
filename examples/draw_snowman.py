@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw the agcad snowman — the same parametric program an MCP agent runs,
+"""Draw the wright snowman — the same parametric program an MCP agent runs,
 replayed against a running server so the viewer can show it.
 
 Usage:
@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 SNOW = [0.95, 0.96, 0.98, 1.0]
 DARK = [0.12, 0.12, 0.15, 1.0]
@@ -47,7 +47,7 @@ COMMANDS = [
 ]
 
 
-def build(cad: Agcad, doc: int) -> None:
+def build(cad: Wright, doc: int) -> None:
     for cmd in COMMANDS:
         method = cmd["method"]
         params = {k: v for k, v in cmd.items() if k != "method"}
@@ -63,10 +63,10 @@ def main() -> None:
         port = int(args[args.index("--port") + 1])
 
     if port is not None:
-        cad = Agcad.connect(port=port)
+        cad = Wright.connect(port=port)
         print(f"connected to server on :{port}")
     else:
-        cad = Agcad.spawn()
+        cad = Wright.spawn()
 
     doc = cad.create_document("snowman")["doc"]
     build(cad, doc)

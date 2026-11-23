@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def pt(element: int, point: int) -> dict:
@@ -36,7 +36,7 @@ def whole(element: int) -> dict:
 def main() -> None:
     out = sys.argv[1] if len(sys.argv) > 1 else "exports/sketch_complete.png"
 
-    cad = Agcad.spawn()
+    cad = Wright.spawn()
     doc = cad.create_document("rounded plate")["doc"]
     for name, value, desc in [
         ("width", 64.0, "overall width"),

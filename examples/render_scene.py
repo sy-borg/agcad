@@ -2,7 +2,7 @@
 
 Usage: .venv/bin/python examples/render_scene.py [document_name] [out.png]
 
-Connects to a running engine (AGCAD_SERVER or target/debug/agcad --tcp 7860),
+Connects to a running engine (WRIGHT_SERVER or target/debug/wright --tcp 7860),
 renders the named document with an auto-framed 3/4 camera, and writes the PNG.
 Same scene + camera -> bit-identical bytes, every time.
 """
@@ -12,14 +12,14 @@ import sys
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else None
     out = sys.argv[2] if len(sys.argv) > 2 else "render.png"
 
-    cad = Agcad.connect()
+    cad = Wright.connect()
     docs = {d["name"]: d["doc"] for d in cad.list_documents()}
     if name is None:
         name, doc = next(iter(docs.items())) if docs else ("", None)

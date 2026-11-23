@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def mesh_volume(mesh: dict) -> float:
@@ -41,7 +41,7 @@ def main() -> None:
     stl = os.path.abspath("exports/face_sketch.stl")
     os.makedirs(os.path.dirname(stl), exist_ok=True)
 
-    cad = Agcad.spawn()
+    cad = Wright.spawn()
     doc = cad.create_document("face sketch")["doc"]
 
     for name, value, desc in [
@@ -143,16 +143,16 @@ def main() -> None:
     exp = cad.export_stl(doc, stl)
     print(f"stl re-exported: {exp['tris']} tris, {exp['bytes']} bytes")
 
-    # The script is the source of truth; the .agcad is a replayable instance
+    # The script is the source of truth; the .wcad is a replayable instance
     # carrying the current knob values and a copy of this script.
     source_text = Path(__file__).read_text(encoding="utf-8")
-    agcad = os.path.abspath("exports/face_sketch.agcad")
+    wright = os.path.abspath("exports/face_sketch.wcad")
     saved = cad.save_document(
-        doc, agcad, source={"language": "python", "text": source_text}
+        doc, wright, source={"language": "python", "text": source_text}
     )
     assert cad.get_script(doc) == source_text, "the embedded source must round-trip"
     print(
-        f"agcad: {saved['path']} ({saved['bytes']} bytes, "
+        f"wright: {saved['path']} ({saved['bytes']} bytes, "
         f"{saved['commands']} commands, source embedded)"
     )
 

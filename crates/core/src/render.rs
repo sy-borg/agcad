@@ -9,7 +9,7 @@
 //! winding) → near-plane clip in clip space → perspective-correct depth
 //! (z/w is linear in screen space) → z-buffered barycentric fill.
 
-use agcad_protocol::{Mat4, Mesh, Rgba};
+use wright_protocol::{Mat4, Mesh, Rgba};
 
 use crate::mat4;
 use crate::Error;

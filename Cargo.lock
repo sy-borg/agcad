@@ -25,49 +25,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agcad-core"
-version = "0.1.0"
-dependencies = [
- "agcad-protocol",
- "clipper2-rust",
- "manifold-rust",
- "png",
- "serde_json",
-]
-
-[[package]]
-name = "agcad-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agcad-server"
-version = "0.1.0"
-dependencies = [
- "agcad-core",
- "agcad-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agcad-viewer"
-version = "0.1.0"
-dependencies = [
- "agcad-protocol",
- "bytemuck",
- "font8x8",
- "pollster",
- "serde",
- "serde_json",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2647,6 +2604,49 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wright-core"
+version = "0.1.0"
+dependencies = [
+ "clipper2-rust",
+ "manifold-rust",
+ "png",
+ "serde_json",
+ "wright-protocol",
+]
+
+[[package]]
+name = "wright-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "wright-server"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wright-core",
+ "wright-protocol",
+]
+
+[[package]]
+name = "wright-viewer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "font8x8",
+ "pollster",
+ "serde",
+ "serde_json",
+ "wgpu",
+ "winit",
+ "wright-protocol",
+]
 
 [[package]]
 name = "x11-dl"

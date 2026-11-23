@@ -19,14 +19,14 @@ import sys
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def main() -> None:
     out = sys.argv[1] if len(sys.argv) > 1 else "exports/pick.png"
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 
-    cad = Agcad.spawn()
+    cad = Wright.spawn()
     doc = cad.create_document("pick demo")["doc"]
     for name, value, desc in [
         ("length", 60.0, "block length along X"),

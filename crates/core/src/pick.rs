@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use agcad_protocol::{
+use wright_protocol::{
     EdgeSelector, EntityId, FaceSelector, Mesh, PickHit, Ray, Vec3,
 };
 
@@ -227,7 +227,7 @@ fn world_mesh(entity: &Entity) -> Mesh {
 mod tests {
     use super::*;
     use crate::{geo, Engine};
-    use agcad_protocol::{Command, CommandResult, Scalar};
+    use wright_protocol::{Command, CommandResult, Scalar};
 
     fn num(v: f64) -> Scalar {
         Scalar::Number(v)
@@ -278,7 +278,7 @@ mod tests {
             .execute(Command::AddSketch {
                 doc: 1,
                 name: "on_top".into(),
-                plane: Some(agcad_protocol::SketchPlane::Face {
+                plane: Some(wright_protocol::SketchPlane::Face {
                     entity: hit.face.entity,
                     near: Some([num(hit.face.near[0]), num(hit.face.near[1]), num(hit.face.near[2])]),
                     normal: Some(hit.face.normal),
@@ -302,7 +302,7 @@ mod tests {
         assert!((edge.near[0] - 10.0).abs() < 1e-6, "{:?}", edge.near);
         assert!((edge.near[1]).abs() < 1e-6 && (edge.near[2] - 10.0).abs() < 1e-6);
 
-        let filter = agcad_protocol::EdgeFilter {
+        let filter = wright_protocol::EdgeFilter {
             direction: Some(edge.direction),
             near: Some(edge.near),
             near_radius: Some(edge.near_radius),
@@ -362,7 +362,7 @@ mod tests {
         assert!((hit.point[2] - 30.0).abs() < 1e-9);
 
         // A sketch above the box is display-only; it must not absorb the ray.
-        e.execute(Command::AddSketch { doc: 1, name: "draft".into(), plane: Some(agcad_protocol::SketchPlane::Datum { plane: agcad_protocol::DatumPlane::Xy, offset: Some(num(50.0)) }) })
+        e.execute(Command::AddSketch { doc: 1, name: "draft".into(), plane: Some(wright_protocol::SketchPlane::Datum { plane: wright_protocol::DatumPlane::Xy, offset: Some(num(50.0)) }) })
             .unwrap();
         let hit = pick_cmd(&mut e, [0.0, 0.0, 100.0], [0.0, 0.0, -1.0], None).unwrap();
         assert_eq!(hit.entity, boss);

@@ -10,7 +10,7 @@
 use manifold_rust::linalg::{Mat3x4, Vec3 as MVec3};
 use manifold_rust::manifold::Manifold;
 
-use agcad_protocol::{BooleanOp, Mesh, Vec3};
+use wright_protocol::{BooleanOp, Mesh, Vec3};
 
 use crate::boolean;
 use crate::Error;

@@ -17,7 +17,7 @@
 //! cold replay would have computed. The cache is derived state: it is not
 //! saved, not part of undo snapshots, and clearing it only costs speed.
 
-use agcad_protocol::{BooleanOp, EdgeFilter, Mesh, RevolveAxis, SketchElement, Vec3};
+use wright_protocol::{BooleanOp, EdgeFilter, Mesh, RevolveAxis, SketchElement, Vec3};
 
 use crate::fillet;
 use crate::pattern::CopyKind;
@@ -190,7 +190,7 @@ impl Hasher {
 
 fn start(tag: &str) -> Hasher {
     let mut h = Hasher::new();
-    h.str("agcad/geom/1");
+    h.str("wright/geom/1");
     h.str(tag);
     h
 }

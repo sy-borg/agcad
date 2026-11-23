@@ -10,7 +10,7 @@
 //! `f64` trig, and the copy placement is a pure function of the source
 //! placement plus the pattern arguments.
 
-use agcad_protocol::{Mesh, Vec3};
+use wright_protocol::{Mesh, Vec3};
 
 use crate::{boolean, plane, transform_mesh, Entity, Error};
 

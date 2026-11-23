@@ -19,13 +19,13 @@ import time
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 BRANCHES = 6
 
 
 def main() -> None:
-    with Agcad.spawn() as cad:
+    with Wright.spawn() as cad:
         cad.initialize()
         doc = cad.create_document("incremental")["doc"]
 
@@ -53,8 +53,8 @@ def main() -> None:
         turn("r3", 2.0)          # back to the original shape: one rebuild again
 
         # A cold replay has no memo: all six boxes and six fillets rebuild.
-        tmp = tempfile.mkdtemp(prefix="agcad_incremental_")
-        path = os.path.join(tmp, "branch.agcad")
+        tmp = tempfile.mkdtemp(prefix="wright_incremental_")
+        path = os.path.join(tmp, "branch.wcad")
         cad.save_document(doc, path)
         started = time.perf_counter()
         opened = cad.open_document(path)

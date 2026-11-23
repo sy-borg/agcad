@@ -1,4 +1,4 @@
-//! # agcad-core
+//! # wright-core
 //!
 //! The headless engine. Owns documents and entities, executes
 //! [`Command`]s, and produces [`CommandResult`]s. Knows nothing about
@@ -40,7 +40,7 @@ pub mod validate;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use agcad_protocol::{
+use wright_protocol::{
     Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EdgeFilter,
     EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, MirrorPlane,
     ParamInfo, ParameterChange, Rgba, RevolveAxis, SavedParameter, Scalar, SketchElement,
@@ -134,7 +134,7 @@ pub enum Shape {
     /// holds display ribbons only — sketches are not printable geometry.
     Sketch {
         elements: Vec<SketchElement>,
-        constraints: Vec<agcad_protocol::SketchConstraint>,
+        constraints: Vec<wright_protocol::SketchConstraint>,
         next_element: u64,
         next_constraint: u64,
         solved: bool,
@@ -221,7 +221,7 @@ impl Entity {
                     over_constrained,
                     diagnostics,
                     ..
-                } => Some(agcad_protocol::SketchSnapshot {
+                } => Some(wright_protocol::SketchSnapshot {
                     elements: elements.clone(),
                     constraints: constraints.clone(),
                     solved: *solved,
@@ -455,7 +455,7 @@ impl Document {
     }
 }
 
-/// Read and check a `.agcad` file without opening it into the engine.
+/// Read and check a `.wcad` file without opening it into the engine.
 fn read_snapshot(path: &str) -> Result<DocumentSnapshot> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         Error::Document(format!(
@@ -466,12 +466,12 @@ fn read_snapshot(path: &str) -> Result<DocumentSnapshot> {
     let snap: DocumentSnapshot = serde_json::from_str(&text).map_err(|e| {
         Error::Document(format!(
             "cannot parse document '{path}': {e} \
-             (hint: .agcad files are JSON written by save_document)"
+             (hint: .wcad files are JSON written by save_document)"
         ))
     })?;
     if snap.format != DOCUMENT_FORMAT {
         return Err(Error::Document(format!(
-            "'{path}' is not an agcad document (format: '{}'; \
+            "'{path}' is not an wright document (format: '{}'; \
              hint: the file must start with {{\"format\": \"{DOCUMENT_FORMAT}\"}})",
             snap.format
         )));
@@ -878,7 +878,7 @@ impl Engine {
                 if against.is_some() == path.is_some() {
                     return Err(Error::Invalid(
                         "diff_scene needs exactly one baseline: `against` (an open document id) \
-                         or `path` (a saved .agcad file)"
+                         or `path` (a saved .wcad file)"
                             .into(),
                     ));
                 }
@@ -1785,7 +1785,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 sketch::validate(*kind, elements, refs, resolved).map_err(Error::Invalid)?;
                 let cid = *next_constraint;
                 *next_constraint += 1;
-                constraints.push(agcad_protocol::SketchConstraint {
+                constraints.push(wright_protocol::SketchConstraint {
                     id: cid,
                     kind: *kind,
                     refs: refs.clone(),
@@ -2527,7 +2527,7 @@ fn sketch_parts(
     sketch: EntityId,
 ) -> Result<(
     &mut Vec<SketchElement>,
-    &mut Vec<agcad_protocol::SketchConstraint>,
+    &mut Vec<wright_protocol::SketchConstraint>,
     &mut u64,
     &mut u64,
     &mut bool,
@@ -2952,7 +2952,7 @@ fn add_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agcad_protocol::{Hand, SweepPath};
+    use wright_protocol::{Hand, SweepPath};
 
     fn engine() -> Engine {
         let mut e = Engine::new();
@@ -3274,7 +3274,7 @@ mod tests {
         };
         let u = match e.execute(Command::Boolean {
             doc: 1,
-            op: agcad_protocol::BooleanOp::Union,
+            op: wright_protocol::BooleanOp::Union,
             entities: vec![a, b],
             name: Some("fused".into()),
             color: None,
@@ -3315,7 +3315,7 @@ mod tests {
         };
         match e.execute(Command::Boolean {
             doc: 1,
-            op: agcad_protocol::BooleanOp::Difference,
+            op: wright_protocol::BooleanOp::Difference,
             entities: vec![a, b],
             name: None,
             color: None,
@@ -3355,7 +3355,7 @@ mod tests {
         // Hollow the wall: difference → a tube with wall thickness.
         let uid = match e.execute(Command::Boolean {
             doc: 1,
-            op: agcad_protocol::BooleanOp::Difference,
+            op: wright_protocol::BooleanOp::Difference,
             entities: vec![a, b],
             name: Some("tube".into()),
             color: None,
@@ -3395,7 +3395,7 @@ mod tests {
             .collect();
         let [a, b] = [ids[0], ids[1]];
         let uid = match e.execute(Command::Boolean {
-            doc: 1, op: agcad_protocol::BooleanOp::Union, entities: vec![a, b],
+            doc: 1, op: wright_protocol::BooleanOp::Union, entities: vec![a, b],
             name: None, color: None,
         }).unwrap() {
             CommandResult::EntityCreated { entity, .. } => entity,
@@ -3434,7 +3434,7 @@ mod tests {
                 r => panic!("unexpected result {r:?}"),
             };
             match e.execute(Command::Boolean {
-                doc: 1, op: agcad_protocol::BooleanOp::Union, entities: vec![a, b],
+                doc: 1, op: wright_protocol::BooleanOp::Union, entities: vec![a, b],
                 name: None, color: None,
             }).unwrap() {
                 CommandResult::EntityCreated { mesh, .. } => mesh,
@@ -3479,7 +3479,7 @@ mod tests {
         assert!(!b64_1.is_empty());
 
         // File write: parse the PNG structure straight off disk.
-        let path = std::env::temp_dir().join("agcad_test_render.png");
+        let path = std::env::temp_dir().join("wright_test_render.png");
         let (_, _, _, written) = render(&mut e, Some(path.to_string_lossy().into_owned()));
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(written.as_deref(), Some(path.to_string_lossy().as_ref()));
@@ -3526,13 +3526,13 @@ mod tests {
             rotation_deg: None, scale: None,
         }).unwrap();
 
-        let path = std::env::temp_dir().join("agcad_test_export.stl");
+        let path = std::env::temp_dir().join("wright_test_export.stl");
         let path_str = path.to_string_lossy().into_owned();
         match e.execute(Command::ExportStl { doc: 1, path: path_str.clone(), entities: None }).unwrap() {
             CommandResult::StlExported { tris, bytes, path: resolved, .. } => {
                 assert_eq!(tris, 12);
                 assert_eq!(bytes, 84 + 12 * 50);
-                assert!(resolved.ends_with("agcad_test_export.stl"));
+                assert!(resolved.ends_with("wright_test_export.stl"));
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -3582,7 +3582,7 @@ mod tests {
         })
         .unwrap();
 
-        let path = std::env::temp_dir().join("agcad_test_export.3mf");
+        let path = std::env::temp_dir().join("wright_test_export.3mf");
         let path_str = path.to_string_lossy().into_owned();
         match e
             .execute(Command::Export3mf { doc: 1, path: path_str.clone(), entities: None })
@@ -3591,7 +3591,7 @@ mod tests {
             CommandResult::ThreeMfExported { objects, tris, bytes, path: resolved, .. } => {
                 assert_eq!(objects, 2);
                 assert_eq!(tris, 24);
-                assert!(resolved.ends_with("agcad_test_export.3mf"));
+                assert!(resolved.ends_with("wright_test_export.3mf"));
                 let data = std::fs::read(&path).unwrap();
                 assert_eq!(bytes, data.len());
             },
@@ -3603,7 +3603,7 @@ mod tests {
         let text = String::from_utf8_lossy(&data);
         assert!(text.contains("3D/3dmodel.model"));
         assert!(text.contains("unit=\"millimeter\""));
-        assert!(text.contains("<metadata name=\"Application\">agcad</metadata>"));
+        assert!(text.contains("<metadata name=\"Application\">wright</metadata>"));
         assert_eq!(text.matches("<object ").count(), 2);
         assert_eq!(text.matches("<item ").count(), 2);
         assert!(text.contains("name=\"red base\""));
@@ -3621,7 +3621,7 @@ mod tests {
         let mut e = engine();
         let s = add_sketch(&mut e, "profile");
         add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
-        let path = std::env::temp_dir().join("agcad_sketch_only.3mf");
+        let path = std::env::temp_dir().join("wright_sketch_only.3mf");
         let path_str = path.to_string_lossy().to_string();
         let err = e.execute(Command::Export3mf { doc: 1, path: path_str, entities: None });
         assert!(err.is_err(), "sketch-only export must fail with a hint");
@@ -3634,7 +3634,7 @@ mod tests {
             color: None,
         })
         .unwrap();
-        let path = std::env::temp_dir().join("agcad_sketch_and_box.3mf");
+        let path = std::env::temp_dir().join("wright_sketch_and_box.3mf");
         let path_str = path.to_string_lossy().to_string();
         match e.execute(Command::Export3mf { doc: 1, path: path_str, entities: None }).unwrap() {
             CommandResult::ThreeMfExported { objects, tris, .. } => {
@@ -3648,14 +3648,14 @@ mod tests {
 
     // --- sketches -----------------------------------------------------------
 
-    use agcad_protocol::ConstraintKind as K;
+    use wright_protocol::ConstraintKind as K;
 
-    fn pref(element: u64, point: u8) -> agcad_protocol::SketchRef {
-        agcad_protocol::SketchRef { element, point: Some(point) }
+    fn pref(element: u64, point: u8) -> wright_protocol::SketchRef {
+        wright_protocol::SketchRef { element, point: Some(point) }
     }
 
-    fn wref(element: u64) -> agcad_protocol::SketchRef {
-        agcad_protocol::SketchRef { element, point: None }
+    fn wref(element: u64) -> wright_protocol::SketchRef {
+        wright_protocol::SketchRef { element, point: None }
     }
 
     fn add_line(e: &mut Engine, sketch: EntityId, p1: [f64; 2], p2: [f64; 2]) -> u64 {
@@ -3678,7 +3678,7 @@ mod tests {
         e: &mut Engine,
         sketch: EntityId,
         kind: K,
-        refs: Vec<agcad_protocol::SketchRef>,
+        refs: Vec<wright_protocol::SketchRef>,
         value: Option<Scalar>,
     ) -> (u64, bool, f64, i64) {
         match e
@@ -3692,7 +3692,7 @@ mod tests {
         }
     }
 
-    fn sketch_snapshot(e: &mut Engine, sketch: EntityId) -> agcad_protocol::SketchSnapshot {
+    fn sketch_snapshot(e: &mut Engine, sketch: EntityId) -> wright_protocol::SketchSnapshot {
         match e.execute(Command::GetScene { doc: 1 }).unwrap() {
             CommandResult::Scene { entities, .. } => entities
                 .iter()
@@ -3730,7 +3730,7 @@ mod tests {
         SketchPlane::Face { entity, near: None, normal: Some(normal), angle_tol_deg: None }
     }
 
-    fn sketch_frame(e: &mut Engine, sketch: EntityId) -> agcad_protocol::SketchPlaneFrame {
+    fn sketch_frame(e: &mut Engine, sketch: EntityId) -> wright_protocol::SketchPlaneFrame {
         sketch_snapshot(e, sketch)
             .plane
             .expect("sketch snapshots carry the resolved plane")
@@ -3839,7 +3839,7 @@ mod tests {
 
         // Save → open replays arcs, splines, construction flags and the
         // generated solids byte-for-byte.
-        let path = std::env::temp_dir().join("agcad_m17_sketch.agcad");
+        let path = std::env::temp_dir().join("wright_m17_sketch.wcad");
         let path_str = path.to_string_lossy().to_string();
         e.execute(Command::SaveDocument { doc: 1, path: path_str.clone(), source: None }).unwrap();
         let mut reopened = engine();
@@ -3860,7 +3860,7 @@ mod tests {
 
         // Save → open → save is a no-op: new curve commands round-trip
         // byte-identically through the program.
-        let path2 = std::env::temp_dir().join("agcad_m17_sketch_roundtrip.agcad");
+        let path2 = std::env::temp_dir().join("wright_m17_sketch_roundtrip.wcad");
         let path2_str = path2.to_string_lossy().to_string();
         reopened
             .execute(Command::SaveDocument { doc: new_doc, path: path2_str.clone(), source: None })
@@ -4091,7 +4091,7 @@ mod tests {
         let mut e = engine();
         let s = add_sketch(&mut e, "profile");
         add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
-        let path = std::env::temp_dir().join("agcad_sketch_only.stl");
+        let path = std::env::temp_dir().join("wright_sketch_only.stl");
         let path_str = path.to_string_lossy().to_string();
         let err = e.execute(Command::ExportStl { doc: 1, path: path_str, entities: None });
         assert!(err.is_err(), "sketch-only export must fail with a hint");
@@ -4104,7 +4104,7 @@ mod tests {
             color: None,
         })
         .unwrap();
-        let path = std::env::temp_dir().join("agcad_sketch_and_box.stl");
+        let path = std::env::temp_dir().join("wright_sketch_and_box.stl");
         let path_str = path.to_string_lossy().to_string();
         match e.execute(Command::ExportStl { doc: 1, path: path_str, entities: None }).unwrap() {
             CommandResult::StlExported { tris, .. } => assert_eq!(tris, 12, "only the box's 12 triangles"),
@@ -4350,7 +4350,7 @@ mod tests {
         let mut e = engine();
         let (s, _) = rect_sketch(&mut e, 10.0, 10.0);
         extrude(&mut e, s, num(5.0));
-        let path = std::env::temp_dir().join("agcad_extrude.stl");
+        let path = std::env::temp_dir().join("wright_extrude.stl");
         let path_str = path.to_string_lossy().to_string();
         match e.execute(Command::ExportStl { doc: 1, path: path_str, entities: None }).unwrap() {
             CommandResult::StlExported { tris, bytes, .. } => {
@@ -4421,7 +4421,7 @@ mod tests {
 
     #[test]
     fn datum_planes_place_the_sketch_frame() {
-        use agcad_protocol::DatumPlane;
+        use wright_protocol::DatumPlane;
 
         let mut e = engine();
         // Default: XY at the origin.
@@ -4738,7 +4738,7 @@ mod tests {
 
     #[test]
     fn face_sketch_round_trips_through_save_open() {
-        let (path, path_s) = temp_file("agcad_face_sketch.agcad");
+        let (path, path_s) = temp_file("wright_face_sketch.wcad");
         let mut a = engine();
         a.execute(Command::SetParameter { doc: 1, name: "h".into(), value: num(10.0), description: None })
             .unwrap();
@@ -4770,7 +4770,7 @@ mod tests {
         assert_eq!(before, entities_json(&mut b, 1), "replay must reproduce the face placement");
 
         // A plane reference must round-trip byte-for-byte too.
-        let (path2, path2_s) = temp_file("agcad_face_sketch_2.agcad");
+        let (path2, path2_s) = temp_file("wright_face_sketch_2.wcad");
         b.execute(Command::SaveDocument { doc: 1, path: path2_s, source: None }).unwrap();
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -4854,7 +4854,7 @@ mod tests {
 
     #[test]
     fn save_open_round_trips_a_parametric_document() {
-        let (path, path_s) = temp_file("agcad_roundtrip.agcad");
+        let (path, path_s) = temp_file("wright_roundtrip.wcad");
 
         let mut a = engine();
         a.execute(Command::SetParameter {
@@ -4878,7 +4878,7 @@ mod tests {
                 // add_sketch + 4 lines + 8 constraints + extrude
                 assert_eq!(commands, 14);
                 assert_eq!(params, 1);
-                assert!(path.ends_with("agcad_roundtrip.agcad"), "{path}");
+                assert!(path.ends_with("wright_roundtrip.wcad"), "{path}");
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -4905,8 +4905,8 @@ mod tests {
 
     #[test]
     fn save_is_byte_stable_across_reopen() {
-        let (p1, p1s) = temp_file("agcad_stable_a.agcad");
-        let (p2, p2s) = temp_file("agcad_stable_b.agcad");
+        let (p1, p1s) = temp_file("wright_stable_a.wcad");
+        let (p2, p2s) = temp_file("wright_stable_b.wcad");
 
         let mut a = engine();
         rect_sketch(&mut a, 10.0, 10.0);
@@ -4929,7 +4929,7 @@ mod tests {
         assert_eq!(first, second, "save -> open -> save must be a no-op diff");
 
         let text = String::from_utf8(first).unwrap();
-        assert!(text.contains("\"format\": \"agcad-document\""));
+        assert!(text.contains("\"format\": \"wright-document\""));
         assert!(text.contains("\"version\": 3"));
         assert!(text.contains("print('hi')"), "the embedded source is preserved");
         // The file is the program, not the geometry.
@@ -4942,7 +4942,7 @@ mod tests {
 
     #[test]
     fn open_rejects_bad_files_with_actionable_hints() {
-        let (path, path_s) = temp_file("agcad_bad.agcad");
+        let (path, path_s) = temp_file("wright_bad.wcad");
 
         std::fs::write(&path, "{ not json").unwrap();
         let err = Engine::new()
@@ -4955,9 +4955,9 @@ mod tests {
         let err = Engine::new()
             .execute(Command::OpenDocument { path: path_s.clone(), name: None })
             .unwrap_err();
-        assert!(err.to_string().contains("not an agcad document"), "{err}");
+        assert!(err.to_string().contains("not an wright document"), "{err}");
 
-        std::fs::write(&path, r#"{"format":"agcad-document","version":99,"name":"x"}"#).unwrap();
+        std::fs::write(&path, r#"{"format":"wright-document","version":99,"name":"x"}"#).unwrap();
         let err = Engine::new()
             .execute(Command::OpenDocument { path: path_s.clone(), name: None })
             .unwrap_err();
@@ -4965,7 +4965,7 @@ mod tests {
 
         let err = Engine::new()
             .execute(Command::OpenDocument {
-                path: "/nonexistent/nope.agcad".into(),
+                path: "/nonexistent/nope.wcad".into(),
                 name: None,
             })
             .unwrap_err();
@@ -4979,7 +4979,7 @@ mod tests {
     /// or replay would target a document that does not exist.
     #[test]
     fn open_rebinds_doc_ids_so_the_program_still_replays() {
-        let (path, path_s) = temp_file("agcad_rebind.agcad");
+        let (path, path_s) = temp_file("wright_rebind.wcad");
 
         let mut a = engine();
         a.execute(Command::SetParameter {
@@ -5062,13 +5062,13 @@ mod tests {
         }
     }
 
-    /// The script is the source of truth: a saved `.agcad` carries the
+    /// The script is the source of truth: a saved `.wcad` carries the
     /// recipe, and `get_program` hands it back after a reopen so a handoff
     /// can recover the source without executing it.
     #[test]
     fn get_program_recovers_the_embedded_script() {
-        let (path, path_s) = temp_file("agcad_program_source.agcad");
-        let (path2, path2_s) = temp_file("agcad_program_source_2.agcad");
+        let (path, path_s) = temp_file("wright_program_source.wcad");
+        let (path2, path2_s) = temp_file("wright_program_source_2.wcad");
         let source = SourceDoc {
             language: "python".into(),
             text: "print('the recipe')\n".into(),
@@ -5117,7 +5117,7 @@ mod tests {
 
     #[test]
     fn save_empty_document_round_trips() {
-        let (path, path_s) = temp_file("agcad_empty.agcad");
+        let (path, path_s) = temp_file("wright_empty.wcad");
         let mut a = engine();
         a.execute(Command::SaveDocument { doc: 1, path: path_s.clone(), source: None })
             .unwrap();
@@ -5464,7 +5464,7 @@ mod tests {
 
     #[test]
     fn a_fillet_survives_save_and_open() {
-        let (path, path_s) = temp_file("agcad_fillet.agcad");
+        let (path, path_s) = temp_file("wright_fillet.wcad");
         let mut a = engine();
         let id = add_box(&mut a, [0.0, 0.0, 5.0], [20.0, 20.0, 10.0]);
         a.execute(Command::Fillet {
@@ -5667,7 +5667,7 @@ mod tests {
 
     #[test]
     fn diff_scene_detects_a_parameter_driven_rebuild() {
-        let (path, path_s) = temp_file("agcad_diff_scene.agcad");
+        let (path, path_s) = temp_file("wright_diff_scene.wcad");
         let mut e = engine();
         e.execute(Command::SetParameter {
             doc: 1,
@@ -6357,7 +6357,7 @@ mod tests {
             .unwrap();
         }
         let upper = add_sketch_on(&mut e, "round", SketchPlane::Datum {
-            plane: agcad_protocol::DatumPlane::Xy,
+            plane: wright_protocol::DatumPlane::Xy,
             offset: Some(num(20.0)),
         });
         e.execute(Command::AddSketchCircle {
@@ -6484,8 +6484,8 @@ mod tests {
         })
         .unwrap();
 
-        let (p1, p1s) = temp_file("agcad_shape_leverage.agcad");
-        let (p2, p2s) = temp_file("agcad_shape_leverage_again.agcad");
+        let (p1, p1s) = temp_file("wright_shape_leverage.wcad");
+        let (p2, p2s) = temp_file("wright_shape_leverage_again.wcad");
         e.execute(Command::SaveDocument { doc: 1, path: p1s.clone(), source: None }).unwrap();
         let mut b = Engine::new();
         b.execute(Command::OpenDocument { path: p1s.clone(), name: None }).unwrap();

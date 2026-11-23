@@ -1,6 +1,6 @@
-//! # agcad-protocol
+//! # wright-protocol
 //!
-//! Wire types shared by every agcad component: core, server, viewer and
+//! Wire types shared by every wright component: core, server, viewer and
 //! clients (Python, Rust, anything that can speak JSON).
 //!
 //! ## Transport
@@ -36,10 +36,10 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const SERVER_NAME: &str = "agcad";
+pub const SERVER_NAME: &str = "wright";
 
 /// Magic value in a saved document's `format` field.
-pub const DOCUMENT_FORMAT: &str = "agcad-document";
+pub const DOCUMENT_FORMAT: &str = "wright-document";
 /// File format version written by this build. Bump when the on-disk shape
 /// changes incompatibly; readers reject versions they do not know.
 ///
@@ -314,7 +314,7 @@ pub enum Command {
         entities: Option<Vec<EntityId>>,
     },
 
-    /// Write the document to a `.agcad` file: its program plus the current
+    /// Write the document to a `.wcad` file: its program plus the current
     /// parameter values (see [`DocumentSnapshot`]). Geometry is not stored;
     /// opening replays the program. The file is pretty-printed and
     /// byte-stable, so save → open → save is a no-op diff.
@@ -368,7 +368,7 @@ pub enum Command {
     },
 
     /// Compare two revisions by entity signature. The baseline is either
-    /// another open document (`against`) or a saved `.agcad` file (`path`),
+    /// another open document (`against`) or a saved `.wcad` file (`path`),
     /// which is replayed privately and discarded — exactly one must be given.
     /// The diff classifies entities as added, removed, modified (with the
     /// changed fields and volume/triangle deltas) or unchanged, and includes
@@ -378,7 +378,7 @@ pub enum Command {
         /// Compare against this open document.
         #[serde(default)]
         against: Option<DocId>,
-        /// Compare against this `.agcad` file. Read-only: the document is
+        /// Compare against this `.wcad` file. Read-only: the document is
         /// not opened into the document list.
         #[serde(default)]
         path: Option<String>,
@@ -1197,7 +1197,7 @@ pub enum CommandResult {
         /// The baseline document id, when compared with `against`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         against: Option<DocId>,
-        /// Baseline name (document name or `.agcad` path).
+        /// Baseline name (document name or `.wcad` path).
         against_name: String,
         /// True when anything differs (entities, parameters or program).
         changed: bool,
@@ -1247,7 +1247,7 @@ pub enum CommandResult {
         program: Vec<Command>,
         /// The authoring source embedded in the document, when it was saved
         /// with one. The script on disk is the source of truth; this is the
-        /// copy that rode along in the `.agcad` snapshot, so a handoff can
+        /// copy that rode along in the `.wcad` snapshot, so a handoff can
         /// recover the recipe without executing anything.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<SourceDoc>,
@@ -1317,7 +1317,7 @@ pub struct DocInfo {
     pub entity_count: usize,
 }
 
-/// The on-disk form of a document (`.agcad`, JSON).
+/// The on-disk form of a document (`.wcad`, JSON).
 ///
 /// It stores the *parametric function* — the program and the current
 /// parameter values — and nothing derived. Geometry is rebuilt by replaying
@@ -1359,7 +1359,7 @@ pub struct SavedParameter {
 }
 
 /// The authoring script for a document: the durable source of truth. It rides
-/// along in the saved `.agcad` so a handoff can recover the recipe; opening a
+/// along in the saved `.wcad` so a handoff can recover the recipe; opening a
 /// document never executes it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceDoc {

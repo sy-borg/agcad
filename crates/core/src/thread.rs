@@ -16,7 +16,7 @@
 
 use manifold_rust::manifold::Manifold;
 
-use agcad_protocol::{Hand, Mesh, Vec3};
+use wright_protocol::{Hand, Mesh, Vec3};
 
 use crate::boolean::{from_manifold, to_manifold};
 use crate::fillet::signed_volume;
@@ -241,7 +241,7 @@ mod tests {
         };
         let bolt = thread(&spec).unwrap();
         let cut = crate::boolean::boolean(
-            agcad_protocol::BooleanOp::Difference,
+            wright_protocol::BooleanOp::Difference,
             &[block.clone(), bolt],
         )
         .unwrap();

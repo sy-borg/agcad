@@ -1,7 +1,7 @@
-//! `agcad` — the headless server.
+//! `wright` — the headless server.
 //!
 //! Speaks line-delimited JSON-RPC 2.0 on **stdio** (default) or **TCP**
-//! (`agcad --tcp 7860`). Banner and diagnostics go to stderr, so stdout
+//! (`wright --tcp 7860`). Banner and diagnostics go to stderr, so stdout
 //! stays a clean protocol channel — pipe-friendly for agents.
 //!
 //! Engine sharing:
@@ -17,8 +17,8 @@ use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, mpsc};
 
-use agcad_core::Engine;
-use agcad_protocol::{Command, DocId, RpcError, RpcRequest, RpcResponse};
+use wright_core::Engine;
+use wright_protocol::{Command, DocId, RpcError, RpcRequest, RpcResponse};
 use serde_json::{Map, Value, json};
 
 fn main() -> ExitCode {
@@ -29,12 +29,12 @@ fn main() -> ExitCode {
             "--tcp" => match args.next().and_then(|v| v.parse::<u16>().ok()) {
                 Some(port) => tcp_port = Some(port),
                 None => {
-                    eprintln!("usage: agcad [--tcp PORT]");
+                    eprintln!("usage: wright [--tcp PORT]");
                     return ExitCode::from(2);
                 },
             },
             "--help" | "-h" => {
-                eprintln!("usage: agcad [--tcp PORT]");
+                eprintln!("usage: wright [--tcp PORT]");
                 return ExitCode::SUCCESS;
             },
             other => {
@@ -197,7 +197,7 @@ fn scene_changed(command: &Command) -> String {
 // --- modes ---------------------------------------------------------------------
 
 fn serve_stdio() -> ExitCode {
-    eprintln!("agcad v0.2.0 | protocol: stdio | engine: private to this session");
+    eprintln!("Wright CAD v0.2.0 | protocol: stdio | engine: private to this session");
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
 
@@ -233,7 +233,7 @@ fn serve_tcp(port: u16) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    eprintln!("agcad v0.2.0 | protocol: tcp | listening on 127.0.0.1:{port}");
+    eprintln!("Wright CAD v0.2.0 | protocol: tcp | listening on 127.0.0.1:{port}");
     eprintln!("docs: one shared document space for every connection; mutations broadcast scene_changed");
 
     let engine = Arc::new(Mutex::new(Engine::new()));

@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agcad"
+name = "wright"
 version = "0.1.0"
-description = "Python client for agcad — a CAD built for AI agents"
+description = "Python client for Wright CAD — a CAD built for AI agents"
 requires-python = ">=3.10"
 dependencies = []
 
 [tool.setuptools]
-packages = ["agcad"]
+packages = ["wright"]
 
 [project.scripts]
-agcad-mcp = "agcad.mcp_server:main"
+wright-mcp = "wright.mcp_server:main"

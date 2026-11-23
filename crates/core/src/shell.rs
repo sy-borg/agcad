@@ -16,7 +16,7 @@
 //! thick for a feature makes the offset self-intersect, which is reported as a
 //! clear error instead of producing a broken solid.
 
-use agcad_protocol::{Mesh, Vec3};
+use wright_protocol::{Mesh, Vec3};
 
 use crate::{boolean, edges, Error};
 
@@ -184,7 +184,7 @@ pub fn shell(
         )));
     }
 
-    boolean::boolean(agcad_protocol::BooleanOp::Difference, &[mesh.clone(), inner]).map_err(|e| {
+    boolean::boolean(wright_protocol::BooleanOp::Difference, &[mesh.clone(), inner]).map_err(|e| {
         Error::Invalid(format!(
             "shell failed: {e} (hint: {thickness} mm may be too thick for this shape; try a \
              thinner wall and check validate)"

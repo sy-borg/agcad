@@ -7,7 +7,7 @@ distance constraints, the holes by a `diameter` constraint, and the
 extrusion height by `thickness`. Change a parameter and the sketch re-solves,
 the solid rebuilds and the STL re-exports.
 
-This is the loop agcad exists for: agent authors the program, user turns
+This is the loop wright exists for: agent authors the program, user turns
 the knobs, the slicer gets a watertight part.
 """
 
@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def z_extent(mesh: dict) -> float:
@@ -31,7 +31,7 @@ def main() -> None:
     mf = os.path.abspath("exports/bracket.3mf")
     os.makedirs(os.path.dirname(stl), exist_ok=True)
 
-    cad = Agcad.spawn()
+    cad = Wright.spawn()
     doc = cad.create_document("bracket")["doc"]
 
     for name, value, desc in [

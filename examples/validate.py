@@ -23,14 +23,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def main() -> None:
-    baseline = os.path.abspath("exports/validate_baseline.agcad")
+    baseline = os.path.abspath("exports/validate_baseline.wcad")
     os.makedirs(os.path.dirname(baseline), exist_ok=True)
 
-    with Agcad.spawn() as cad:
+    with Wright.spawn() as cad:
         doc = cad.create_document("validate demo")["doc"]
         cad.set_parameter(doc, "plate", 20.0, "plate side [mm]")
         cad.set_parameter(doc, "thickness", 4.0, "plate thickness [mm]")

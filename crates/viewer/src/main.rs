@@ -1,4 +1,4 @@
-//! `agcad-view` — the dumb renderer.
+//! `wright-view` — the dumb renderer.
 //!
 //! Philosophy (Lite XL style, scaled up to CAD): this process owns **no
 //! document state**. It pulls a scene snapshot from the server over the
@@ -22,7 +22,7 @@ use std::process::{Command as Process, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use agcad_protocol::{DocId, EntitySnapshot, Mat4, PickHit, Ray};
+use wright_protocol::{DocId, EntitySnapshot, Mat4, PickHit, Ray};
 use font8x8::UnicodeFonts;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -200,7 +200,7 @@ impl State {
         .map_err(|e| format!("no suitable GPU adapter: {e}"))?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("agcad-viewer"),
+                label: Some("wright-viewer"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -240,7 +240,7 @@ impl State {
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("agcad shader"),
+            label: Some("wright shader"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
         });
 
@@ -317,7 +317,7 @@ impl State {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("agcad layout"),
+            label: Some("wright layout"),
             bind_group_layouts: &[Some(&bgl0), Some(&bgl1)],
             immediate_size: 0,
         });
@@ -353,11 +353,11 @@ impl State {
             };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(if overlay {
-                    "agcad overlay lines"
+                    "wright overlay lines"
                 } else if topology == wgpu::PrimitiveTopology::TriangleList {
-                    "agcad tri"
+                    "wright tri"
                 } else {
-                    "agcad lines"
+                    "wright lines"
                 }),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -394,7 +394,7 @@ impl State {
 
         // --- screen-space text -------------------------------------------------
         let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("agcad text shader"),
+            label: Some("wright text shader"),
             source: wgpu::ShaderSource::Wgsl(TEXT_WGSL.into()),
         });
         let text_bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -494,7 +494,7 @@ impl State {
             immediate_size: 0,
         });
         let pipeline_text = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("agcad text"),
+            label: Some("wright text"),
             layout: Some(&text_layout),
             vertex: wgpu::VertexState {
                 module: &text_shader,
@@ -1394,7 +1394,7 @@ impl App {
             },
             Err(err) => {
                 eprintln!("scene fetch failed: {err}");
-                eprintln!("tip: start a server (`agcad --tcp {0}`) and create a document via the Python client, then press R", self.port);
+                eprintln!("tip: start a server (`wright --tcp {0}`) and create a document via the Python client, then press R", self.port);
                 self.doc = None;
                 if let Some(state) = self.state.as_mut() {
                     state.set_scene(Vec::new());
@@ -1483,7 +1483,7 @@ impl ApplicationHandler for App {
         if self.state.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("agcad viewer");
+        let attrs = Window::default_attributes().with_title("Wright CAD viewer");
         let window = Arc::new(event_loop.create_window(attrs).expect("cannot create window"));
         match State::new(&window) {
             Ok(state) => {
@@ -1618,7 +1618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--host" => host = args.next().unwrap_or(host),
             "--port" => port = args.next().and_then(|v| v.parse().ok()).unwrap_or(port),
             other => {
-                eprintln!("usage: agcad-view [--host HOST] [--port PORT]");
+                eprintln!("usage: wright-view [--host HOST] [--port PORT]");
                 if other != "--help" && other != "-h" {
                     return Err(format!("unknown argument: {other}").into());
                 }
@@ -1627,7 +1627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    eprintln!("agcad-view | scene source: tcp://{host}:{port}");
+    eprintln!("wright-view | scene source: tcp://{host}:{port}");
     let event_loop = EventLoop::new()?;
     let mut app = App::new(host, port);
     event_loop.run_app(&mut app)?;
@@ -1637,7 +1637,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agcad_protocol::{Bbox, EdgeSelector, FaceSelector, Mesh};
+    use wright_protocol::{Bbox, EdgeSelector, FaceSelector, Mesh};
 
     fn one_triangle() -> EntitySnapshot {
         EntitySnapshot {

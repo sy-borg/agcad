@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use agcad_protocol::{ConstraintKind, Mesh, SketchConstraint, SketchElement, SketchRef};
+use wright_protocol::{ConstraintKind, Mesh, SketchConstraint, SketchElement, SketchRef};
 
 /// Solve until the worst residual is below this (mm). 1e-7 mm is far
 /// below any manufacturing tolerance; the regularizer below sets the

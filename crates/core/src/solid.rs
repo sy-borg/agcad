@@ -19,7 +19,7 @@ use manifold_rust::linalg::Vec2;
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{Error as KernelError, Polygons};
 
-use agcad_protocol::{Mesh, RevolveAxis};
+use wright_protocol::{Mesh, RevolveAxis};
 
 use crate::boolean::from_manifold;
 use crate::Error;

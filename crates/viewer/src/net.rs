@@ -4,7 +4,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 
-use agcad_protocol::{CommandResult, DocId, EntitySnapshot, PickHit, Ray, RpcRequest, RpcResponse};
+use wright_protocol::{CommandResult, DocId, EntitySnapshot, PickHit, Ray, RpcRequest, RpcResponse};
 
 pub fn fetch_scene(host: &str, port: u16) -> Result<(DocId, Vec<EntitySnapshot>), String> {
     let mut conn = Connection::open(host, port)?;

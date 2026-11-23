@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use crate::{Entity, Shape, edges};
-use agcad_protocol::{Bbox, EntityId, Mesh, SketchElement, Vec3};
+use wright_protocol::{Bbox, EntityId, Mesh, SketchElement, Vec3};
 
 /// Cap on the number of reported self-intersection locations.
 const MAX_INTERSECTION_POINTS: usize = 8;
@@ -124,7 +124,7 @@ pub fn check_solid(mesh: &Mesh) -> MeshCheck {
 /// out; they are a pure function of positions and indices.
 pub fn entity_signature(entity: &Entity) -> String {
     let mut h = Hasher::new();
-    h.str("agcad/entity/1");
+    h.str("wright/entity/1");
     h.str(&entity.name);
     h.vec3(entity.translation);
     h.vec3(entity.rotation_deg);
@@ -221,7 +221,7 @@ pub fn entity_signature(entity: &Entity) -> String {
 /// A fingerprint over every entity id + signature, in id order.
 pub fn scene_signature(entities: &BTreeMap<EntityId, Entity>) -> String {
     let mut h = Hasher::new();
-    h.str("agcad/scene/1");
+    h.str("wright/scene/1");
     h.u64(entities.len() as u64);
     for (id, entity) in entities {
         h.u64(*id);

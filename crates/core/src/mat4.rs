@@ -3,7 +3,7 @@
 //! Storage is `m[col][row]` (OpenGL/WGSL style); points transform as
 //! `p' = M · p`.
 
-use agcad_protocol::Mat4;
+use wright_protocol::Mat4;
 
 pub fn identity() -> Mat4 {
     [

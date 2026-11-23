@@ -1,7 +1,7 @@
-# agcad
+# Wright CAD
 
 <p align="center">
-  <img src="logo.svg" width="160" alt="agcad logo — a snowman assembled from primitives"/>
+  <img src="logo.svg" width="160" alt="Wright CAD logo — a snowman assembled from primitives"/>
 </p>
 
 A CAD whose primary user is an **AI agent**.
@@ -17,13 +17,13 @@ client — as is the Python client an agent drives.
 
 ```
 ┌───────────────┐   JSON-RPC (stdio/TCP)   ┌───────────────┐   ┌──────────────────┐
-│ agent /       │ ───────────────────────► │ agcad server  │ ─►│ agcad-core       │
+│ agent /       │ ───────────────────────► │ wright server │ ─►│ wright-core      │
 │ python /      │ ◄─────────────────────── │ (transport)   │   │ documents        │
 │ any language  │                          └───────────────┘   │ entities         │
 └───────────────┘                                              │ history / undo   │
                                                                │ tessellation     │
 ┌───────────────┐          same bus (TCP)                      │ booleans         │
-│ agcad-view    │ ───────────────────────────► get_scene ─────►│ fillet / chamfer │
+│ wright-view   │ ───────────────────────────► get_scene ─────►│ fillet / chamfer │
 │ (wgpu, dumb)  │  pulls snapshots; owns no document state     └──────────────────┘
 └───────────────┘
 ```
@@ -34,7 +34,7 @@ The agent is handed a picture — here `examples/example_body.png`, a front and
 a 3/4 view of a cross block — and writes `examples/cross_block.py`, which
 rebuilds the part as a parametric program:
 
-![the drawing and the finished model agcad rebuilt from it](examples/cross_block/compare.png)
+![the drawing and the finished model Wright CAD rebuilt from it](examples/cross_block/compare.png)
 
 The dimensions are read off the drawing rather than guessed: its 9 mm scale
 bar gives ~12.4 px/mm, and its front panel is 553 × 614 px, so the body is
@@ -59,12 +59,12 @@ silhouette with `render_offscreen` from the drawing's camera → **finish** the
 rims with `fillet` and a normals filter (`{normals:[[0,0,1]]}` top,
 `{normals:[[0,0,-1]]}` bottom; `chamfer` shares the machinery, but this
 drawing has rounds, not bevels) → **deliver** STL/3MF for the slicer and the
-matching `.agcad` so the part reopens with its knobs intact.
+matching `.wcad` so the part reopens with its knobs intact.
 
 The artifacts live in `examples/cross_block/`: `iso.png`, `front.png`,
-`cross_block.stl`, `cross_block.3mf` and `cross_block.agcad` (the sharp
+`cross_block.stl`, `cross_block.3mf` and `cross_block.wcad` (the sharp
 baseline), plus `rounded.png`, `cross_block_rounded.stl`,
-`cross_block_rounded.3mf` and `cross_block_rounded.agcad` (the finished part),
+`cross_block_rounded.3mf` and `cross_block_rounded.wcad` (the finished part),
 and `compare.png` (the drawing above that part).
 `.venv/bin/python examples/cross_block.py` regenerates them.
 
@@ -74,9 +74,9 @@ and `compare.png` (the drawing above that part).
 |---|---|
 | `crates/protocol` | Wire types: commands, results, meshes (serde/JSON) |
 | `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, deterministic rendering |
-| `crates/server` | `agcad` binary — line-delimited JSON-RPC on stdio or TCP |
-| `crates/viewer` | `agcad-view` — wgpu renderer, talks only the bus |
-| `python/agcad` | Dependency-free sync Python client (the agent API) and MCP server |
+| `crates/server` | `wright` binary — line-delimited JSON-RPC on stdio or TCP |
+| `crates/viewer` | `wright-view` — wgpu renderer, talks only the bus |
+| `python/wright` | Dependency-free sync Python client (the agent API) and MCP server |
 | `examples/` | Agent-facing demos; `examples/cross_block/` is the committed showcase |
 | `index.html`, `fonts/`, `logo.svg` | Static project page (GitHub Pages), with self-hosted fonts |
 
@@ -194,13 +194,13 @@ compares, and iterates — the user never touches a function.
 
 ## The script is the source of truth
 
-agcad is a compiler target for an agent-authored script, not a GUI document
-that gets edited in place. The durable artifact is the script; the `.agcad`
+Wright CAD is a compiler target for an agent-authored script, not a GUI document
+that gets edited in place. The durable artifact is the script; the `.wcad`
 file is a replayable snapshot of an instance — the program, the current
 parameter values, and a copy of the script.
 
 ```
-part.py ──run──► agcad bus ──save_document──► part.agcad
+part.py ──run──► wright bus ──save_document──► part.wcad
    ▲                                             │
    └──── get_script / export_python ◄────────────┘
 ```
@@ -219,7 +219,7 @@ part.py ──run──► agcad bus ──save_document──► part.agcad
 - **MCP-only documents** with no script are scratch state. For durable work,
   write a script and save it with the instance.
 
-This is why agcad intentionally has no GUI-style feature tree: the agent does
+This is why Wright CAD intentionally has no GUI-style feature tree: the agent does
 not edit features in place, it edits the script and replays. The program is
 the intermediate representation; the script is the editing surface.
 `set_parameter` covers the common “turn a knob” change without re-authoring,
@@ -391,15 +391,15 @@ closed, so `ok` also catches an open loop before `extrude` fails.
 
 `diff_scene{doc, against|path}` compares two revisions by entity signature
 (name, placement, color and geometry, hashed with FNV-1a). `against` is
-another open document; `path` is a saved `.agcad` baseline, replayed
+another open document; `path` is a saved `.wcad` baseline, replayed
 privately and never added to the document list. The result names added,
 removed and modified entities, the changed fields, volume/triangle deltas,
 parameter changes, program changes and stable scene fingerprints:
 
 ```json
-{"method":"diff_scene","params":{"doc":1,"path":"/tmp/baseline.agcad"}}
+{"method":"diff_scene","params":{"doc":1,"path":"/tmp/baseline.wcad"}}
 {"result":{"scene_diff":{
-  "doc":1,"against_name":"/tmp/baseline.agcad","changed":true,
+  "doc":1,"against_name":"/tmp/baseline.wcad","changed":true,
   "scene_signature":"b106a1410b271387","against_signature":"ca8b1e033525cd94",
   "modified":[{"entity":1,"changed":["translation","mesh"],
     "from":{"volume":1600.0,"signature":"ca8b…"},
@@ -421,30 +421,30 @@ The viewer listens and re-fetches by itself — no refresh key needed.
 
 ```sh
 # 1. the shared backend
-./target/debug/agcad --tcp 7860
+./target/debug/wright --tcp 7860
 
 # 2. point the MCP server at it
-AGCAD_CONNECT=127.0.0.1:7860 .venv/bin/agcad-mcp
+WRIGHT_CONNECT=127.0.0.1:7860 .venv/bin/wright-mcp
 
 # 3. the viewer — it auto-refreshes when the agent draws
-./target/debug/agcad-view --port 7860
+./target/debug/wright-view --port 7860
 ```
 
 Then ask the agent to draw; what it builds through MCP appears in the
-viewer immediately. Without `AGCAD_CONNECT`, the MCP server spawns a
+viewer immediately. Without `WRIGHT_CONNECT`, the MCP server spawns a
 private engine (isolated, invisible to viewers) — attach mode is opt-in.
 
 The script side is the same contract:
 
 ```python
-from agcad import Agcad
+from wright import Wright
 
-with Agcad.connect("127.0.0.1", 7860) as cad:   # the shared engine
+with Wright.connect("127.0.0.1", 7860) as cad:   # the shared engine
     ...                                          # the viewer follows along
 ```
 
-`Agcad.spawn()` starts a private stdio engine: perfect for CI and one-shot
-examples, but no viewer can see it. Use `Agcad.connect` whenever a human
+`Wright.spawn()` starts a private stdio engine: perfect for CI and one-shot
+examples, but no viewer can see it. Use `Wright.connect` whenever a human
 should watch; `R` is only a manual refresh fallback.
 
 Two limits worth knowing:
@@ -466,7 +466,7 @@ The bus is the API; the MCP server is just another adapter over it
 dependency drift — wrapping the Python client:
 
 ```sh
-.venv/bin/agcad-mcp        # or: python -m agcad.mcp_server
+.venv/bin/wright-mcp        # or: python -m wright.mcp_server
 ```
 
 Three tools (one per *intent*, not per command — MCP round-trips are
@@ -474,9 +474,9 @@ expensive):
 
 | Tool | What it does |
 |---|---|
-| `agcad_execute` | Batch of bus commands in one call; stops at the first error with a recovery hint |
-| `agcad_scene` | Compact state: parameters + entities with placement and mesh stats (no raw meshes — token economy) |
-| `agcad_render` | Headless PNG render, returned inline so the agent can see what it built |
+| `wright_execute` | Batch of bus commands in one call; stops at the first error with a recovery hint |
+| `wright_scene` | Compact state: parameters + entities with placement and mesh stats (no raw meshes — token economy) |
+| `wright_render` | Headless PNG render, returned inline so the agent can see what it built |
 
 The initialize handshake returns **server instructions** that MCP hosts
 inject into the agent's system prompt — the agent learns the command
@@ -485,7 +485,7 @@ language from the server itself, no README required.
 ### opencode
 
 ```sh
-opencode mcp add agcad -- /home/sa/src/agcad/.venv/bin/agcad-mcp
+opencode mcp add wright -- /home/sa/src/wright-cad/.venv/bin/wright-mcp
 ```
 
 or in `opencode.json(c)`:
@@ -495,22 +495,22 @@ or in `opencode.json(c)`:
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
-      "agcad": { "type": "local", "command": ["/home/sa/src/agcad/.venv/bin/agcad-mcp"] }
+      "wright": { "type": "local", "command": ["/home/sa/src/wright-cad/.venv/bin/wright-mcp"] }
     }
   }
 }
 ```
 
-Add `"environment": { "AGCAD_CONNECT": "127.0.0.1:7860" }` to attach to a
+Add `"environment": { "WRIGHT_CONNECT": "127.0.0.1:7860" }` to attach to a
 shared backend and let the viewer follow along. Tools then appear as
-`agcad_agcad_execute` (direct) or `tools.agcad.agcad_execute(...)` in Code
+`wright_wright_execute` (direct) or `tools.wright.wright_execute(...)` in Code
 Mode. The engine lives in the server process, so documents persist across
 tool calls within a session.
 
 ### Claude Desktop and other hosts
 
 ```json
-{ "mcpServers": { "agcad": { "command": "/home/sa/src/agcad/.venv/bin/agcad-mcp" } } }
+{ "mcpServers": { "wright": { "command": "/home/sa/src/wright-cad/.venv/bin/wright-mcp" } } }
 ```
 
 ## Quickstart
@@ -520,19 +520,19 @@ cargo build
 
 # Agent seat: Python
 python3 -m venv .venv && .venv/bin/pip install -e ./python
-.venv/bin/python examples/hello_agcad.py
+.venv/bin/python examples/hello_wright.py
 
 # Human seat: viewer (needs a server with an open document)
-./target/debug/agcad --tcp 7860 &
-./target/debug/agcad-view --port 7860     # drag = orbit, wheel = zoom, L = labels, click = pick, R = refresh
+./target/debug/wright --tcp 7860 &
+./target/debug/wright-view --port 7860     # drag = orbit, wheel = zoom, L = labels, click = pick, R = refresh
 ```
 
 Minimal agent session:
 
 ```python
-from agcad import Agcad
+from wright import Wright
 
-with Agcad.spawn() as cad:
+with Wright.spawn() as cad:
     cad.initialize()
     doc = cad.create_document("bracket")["doc"]
     base = cad.add_box(doc, name="base", center=(0, 0, 5), size=(80, 40, 10))
@@ -541,8 +541,8 @@ with Agcad.spawn() as cad:
 ```
 
 This session is private. For the human/agent loop, start
-`agcad --tcp 7860` plus `agcad-view --port 7860`, and use
-`Agcad.connect("127.0.0.1", 7860)` so both see the same scene.
+`wright --tcp 7860` plus `wright-view --port 7860`, and use
+`Wright.connect("127.0.0.1", 7860)` so both see the same scene.
 
 ## Roadmap
 
@@ -567,7 +567,7 @@ turns, while the script remains the editing surface.
 - [x] **M5 — Headless rendering**: deterministic software rasterizer in core
       (no GPU; works over SSH/CI), auto-framed 3/4 camera by default, explicit
       `eye`/`target`/`up`/`fov`, `ortho` for parallel views, and the
-      `agcad_render` MCP tool that returns the image inline.
+      `wright_render` MCP tool that returns the image inline.
 - [x] **M6 — Sketches and constraints**: sketch entities placed by the normal
       transform; `coincident`, `horizontal`, `vertical`, `parallel`,
       `perpendicular`, `distance`, `radius` and `diameter` re-solved after
@@ -580,10 +580,10 @@ turns, while the script remains the editing surface.
       become holes). Solids inherit the sketch placement, follow later sketch
       edits, replay parametrically, and report volume + tris; a negative
       extrude goes below the sketch plane.
-- [x] **M8 — Persistence**: `save_document` writes a `.agcad` file — program +
+- [x] **M8 — Persistence**: `save_document` writes a `.wcad` file — program +
       current parameter values, no geometry — and `open_document` replays it
       with bit-identical ids and meshes. Saves are byte-stable; the embedded
-      script is never executed. The `.py` is the source of truth; the `.agcad`
+      script is never executed. The `.py` is the source of truth; the `.wcad`
       is the instance.
 - [x] **M9 — Fillets and chamfers**: `fillet{entity,radius,edges?}` /
       `chamfer{entity,distance,edges?}` reshape a solid in place. Geometric
@@ -601,7 +601,7 @@ turns, while the script remains the editing surface.
       normal and optional `near`. Positive extrude grows a boss, negative cuts
       into the body.
 - [x] **M12 — Script as source**: the Python script is the durable artifact;
-      `.agcad` carries the program, current knob values and an embedded copy.
+      `.wcad` carries the program, current knob values and an embedded copy.
       `get_program` returns it, `get_script` recovers it, `export_python`
       reconstructs a runnable script when there is none.
 - [x] **M13 — Human reference: labels + `pick`**: `name #id` labels, a
@@ -615,7 +615,7 @@ turns, while the script remains the editing surface.
       volume, world bbox and an approximate thinnest wall (with an optional
       `min_wall_mm` threshold); per sketch, solver status and a closed
       profile. `diff_scene` compares two revisions by stable entity signature,
-      against another open document or a saved `.agcad`, and reports added,
+      against another open document or a saved `.wcad`, and reports added,
       removed and modified entities with field-level changes plus parameter
       and program diffs. Both are session commands — no program entries, no
       state change.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parametric agcad: the agent authors the function, the user tunes it.
+"""Parametric wright: the agent authors the function, the user tunes it.
 
 The document keeps a program (every modeling command, with dimensions as
 expressions over named parameters). Changing a parameter replays the
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 STEEL = (0.75, 0.76, 0.80, 1.0)
 RED = (0.85, 0.25, 0.20, 1.0)
@@ -26,7 +26,7 @@ def bbox_z(mesh: dict) -> float:
 
 
 def main() -> None:
-    with Agcad.spawn() as cad:
+    with Wright.spawn() as cad:
         cad.initialize()
         doc = cad.create_document("parametric-bracket")["doc"]
 

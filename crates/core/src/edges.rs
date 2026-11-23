@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use agcad_protocol::{EdgeFilter, Mesh};
+use wright_protocol::{EdgeFilter, Mesh};
 
 use crate::Error;
 
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn concave_edges_are_detected() {
-        use agcad_protocol::BooleanOp;
+        use wright_protocol::BooleanOp;
         let outer = geo::box_mesh([10.0, 10.0, 10.0]);
         let mut inner = geo::box_mesh([4.0, 4.0, 12.0]);
         // Shift the cutter to a corner so the difference leaves an L-shaped

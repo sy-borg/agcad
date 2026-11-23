@@ -36,7 +36,7 @@
 //! order and the kernel is bit-reproducible, so a replay re-cuts the same
 //! bytes.
 
-use agcad_protocol::{BooleanOp, EdgeFilter, Mesh};
+use wright_protocol::{BooleanOp, EdgeFilter, Mesh};
 
 use crate::edges::{self, SharpEdge};
 use crate::{boolean, solid, Error};
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn concave_edges_are_filled() {
-        use agcad_protocol::BooleanOp;
+        use wright_protocol::BooleanOp;
         let outer = geo::box_mesh([10.0, 10.0, 10.0]);
         let mut inner = geo::box_mesh([4.0, 4.0, 12.0]);
         for p in &mut inner.positions {
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn a_reflex_rim_corner_is_mitered_not_left_as_a_spike() {
-        use agcad_protocol::BooleanOp;
+        use wright_protocol::BooleanOp;
         // An L-shaped plan: a square with one corner cut away, leaving one
         // reflex vertical edge and one reflex corner where two top rim edges
         // meet. Chamfering the rim without mitering leaves a 1.5 mm spike
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn a_fillet_stops_at_a_perpendicular_face_instead_of_grooving_it() {
-        use agcad_protocol::BooleanOp;
+        use wright_protocol::BooleanOp;
         // A boss on a plate: the boss's vertical edge ends on the plate's top
         // face. Extending the fillet into the plate would cut a groove, so
         // the volume removed must be just the finite fillet over the boss.
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn an_all_edge_fillet_keeps_reflex_corners_clean() {
-        use agcad_protocol::BooleanOp;
+        use wright_protocol::BooleanOp;
         // An L-shaped plan as in the miter test: one reflex vertical edge,
         // rounded together with every other edge in a single pass. The
         // additive tool reaches the top plane in the notch, where the rim's
@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn an_all_edge_fillet_with_a_through_hole_stays_sound() {
-        use agcad_protocol::BooleanOp;
+        use wright_protocol::BooleanOp;
         // A plate with a square hole: convex outer and hole rims, concave
         // hole corners. The mirrored rim trim must not gouge the plate.
         let plate = geo::box_mesh([40.0, 40.0, 10.0]);

@@ -16,13 +16,13 @@ import sys
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def main() -> None:
     out = sys.argv[1] if len(sys.argv) > 1 else "exports/sketch_bracket.png"
 
-    cad = Agcad.spawn()
+    cad = Wright.spawn()
     doc = cad.create_document("bracket profile")["doc"]
 
     for name, value, desc in [

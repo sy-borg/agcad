@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use agcad_protocol::{Mat4, Mesh, Rgba};
+use wright_protocol::{Mat4, Mesh, Rgba};
 
 use crate::mat4;
 use crate::Error;
@@ -99,7 +99,7 @@ fn model_xml(parts: &[Part<'_>], title: &str) -> (String, usize) {
         "<model unit=\"millimeter\" xml:lang=\"en-US\" \
          xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n",
     );
-    xml.push_str("  <metadata name=\"Application\">agcad</metadata>\n");
+    xml.push_str("  <metadata name=\"Application\">wright</metadata>\n");
     xml.push_str("  <metadata name=\"Title\">");
     push_escaped(&mut xml, title);
     xml.push_str("</metadata>\n");

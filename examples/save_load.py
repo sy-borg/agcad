@@ -3,9 +3,9 @@
 Two layers, one document, one source of truth:
 
 - ``.py`` is the *source of truth*: the script an agent edits and re-runs.
-  A copy is embedded in the ``.agcad`` as provenance (never executed), and
+  A copy is embedded in the ``.wcad`` as provenance (never executed), and
   ``get_program`` / ``get_script`` hand it back on a later open.
-- ``.agcad`` is the *instance*: the program plus the current parameter
+- ``.wcad`` is the *instance*: the program plus the current parameter
   values, as JSON. Geometry is not stored; opening replays the program
   deterministically, so the file stays small and diffable, and a user's
   knob turns survive.
@@ -25,12 +25,12 @@ from pathlib import Path
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 PLATE = (0.72, 0.80, 0.72, 1.0)
 
 
-def build(cad: Agcad) -> tuple[int, int]:
+def build(cad: Wright) -> tuple[int, int]:
     """A plate with a bore, driven by four parameters."""
     doc = cad.create_document("plate")["doc"]
     for name, value, desc in [
@@ -64,14 +64,14 @@ def build(cad: Agcad) -> tuple[int, int]:
     return doc, part
 
 
-def scene_signature(cad: Agcad, doc: int) -> str:
+def scene_signature(cad: Wright, doc: int) -> str:
     """Ids, placement and every mesh bit — the replay contract."""
     keep = ("id", "name", "translation", "rotation_deg", "scale", "transform", "color", "mesh")
     ents = cad.get_scene(doc)["entities"]
     return json.dumps([{k: e[k] for k in keep} for e in ents], sort_keys=True)
 
 
-def world_extents(cad: Agcad, doc: int) -> list[float]:
+def world_extents(cad: Wright, doc: int) -> list[float]:
     """Axis-aligned size of the whole scene, in world space."""
     lo = [float("inf")] * 3
     hi = [float("-inf")] * 3
@@ -88,12 +88,12 @@ def world_extents(cad: Agcad, doc: int) -> list[float]:
 def main() -> None:
     out_dir = "exports"
     os.makedirs(out_dir, exist_ok=True)
-    doc_path = os.path.abspath(os.path.join(out_dir, "plate.agcad"))
+    doc_path = os.path.abspath(os.path.join(out_dir, "plate.wcad"))
     py_path = os.path.abspath(os.path.join(out_dir, "plate.py"))
     png_path = os.path.join(out_dir, "plate_reopened.png")
 
     # --- author ------------------------------------------------------------
-    cad_a = Agcad.spawn()
+    cad_a = Wright.spawn()
     doc_a, _ = build(cad_a)
     signature = scene_signature(cad_a, doc_a)
     print(f"built: {world_extents(cad_a, doc_a)} mm")
@@ -112,7 +112,7 @@ def main() -> None:
     cad_a.close()
 
     # --- open in a *fresh* engine: geometry must come back bit-identical ---
-    cad_b = Agcad.spawn()
+    cad_b = Wright.spawn()
     opened = cad_b.open_document(doc_path)
     print(
         f"opened: doc {opened['doc']} '{opened['name']}' — "

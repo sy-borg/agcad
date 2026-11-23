@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <!-- agcad logo: a snowman assembled from primitives, like the tool itself.
+  <!-- wright logo: a snowman assembled from primitives, like the tool itself.
        Geometry mirrors the parametric program: 3 spheres + cylinder nose +
        box hat, standing on a CAD grid line. -->
   <defs>

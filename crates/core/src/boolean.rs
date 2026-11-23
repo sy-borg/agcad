@@ -5,14 +5,14 @@
 //! needs), and **bit-identical determinism** — which the parametric replay
 //! story depends on (same program → same geometry, every time).
 //!
-//! All conversions are `f32` (agcad) ↔ `f64` (Manifold). Precision loss on
+//! All conversions are `f32` (wright) ↔ `f64` (Manifold). Precision loss on
 //! the way in is irrelevant for millimeter-scale print geometry; the
 //! kernel itself works in f64 internally.
 
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::MeshGL64;
 
-use agcad_protocol::{BooleanOp, Mesh};
+use wright_protocol::{BooleanOp, Mesh};
 
 use crate::Error;
 
@@ -48,7 +48,7 @@ fn is_empty(m: &Manifold) -> bool {
     m.num_tri() == 0
 }
 
-/// agcad `Mesh` (f32, indexed) → Manifold solid, via strict import.
+/// wright `Mesh` (f32, indexed) → Manifold solid, via strict import.
 ///
 /// Strict import requires every edge to be shared by exactly two
 /// triangles, so duplicated vertices are welded by exact position first
@@ -108,7 +108,7 @@ pub(crate) fn to_manifold(mesh: &Mesh) -> Result<Manifold, Error> {
     Ok(solid)
 }
 
-/// Manifold solid → agcad `Mesh` (f32, indexed).
+/// Manifold solid → wright `Mesh` (f32, indexed).
 ///
 /// Normals are crease-aware: faces that meet at more than [`CREASE_DEG`] keep
 /// a hard edge, while gentle facets (a fillet's arc, a tessellated cylinder)

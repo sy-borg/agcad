@@ -1,7 +1,7 @@
 //! Tiny column-major mat4 helpers for the viewer's camera.
-//! (The core engine has its own copy in `agcad-core::mat4`; sharing a
+//! (The core engine has its own copy in `wright-core::mat4`; sharing a
 //! crate would couple the viewer to the engine — not worth it for ~60
-//! lines. If this grows, promote it to `agcad-math`.)
+//! lines. If this grows, promote it to `wright-math`.)
 
 pub type Mat4 = [[f32; 4]; 4]; // m[col][row]
 

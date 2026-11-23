@@ -13,13 +13,13 @@ import sys
 
 sys.path.insert(0, "python")  # noqa: E402
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 
 def main() -> None:
     out = sys.argv[1] if len(sys.argv) > 1 else "exports/bushing.png"
 
-    cad = Agcad.spawn()
+    cad = Wright.spawn()
     doc = cad.create_document("bushing")["doc"]
     for name, value, desc in [
         ("length", 24.0, "overall length along the axis"),

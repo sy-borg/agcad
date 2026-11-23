@@ -1,17 +1,17 @@
-"""agcad — Python client for the agcad CAD command bus.
+"""Wright CAD — Python client for the wright command bus.
 
 The primary interface for AI agents. Plain, dependency-free, synchronous:
 
->>> from agcad import Agcad
->>> cad = Agcad.spawn()
+>>> from wright import Wright
+>>> cad = Wright.spawn()
 >>> _ = cad.initialize()
 >>> doc = cad.create_document("bracket")["doc"]
 >>> box = cad.add_box(doc, name="base", center=(0, 0, 5), size=(10, 10, 10))
 >>> box["entity"]
 1
 
-The server binary is found via ``$AGCAD_SERVER``, ``$PATH`` (``agcad``), or
-the local cargo build (``target/debug/agcad`` / ``target/release/agcad``).
+The server binary is found via ``$WRIGHT_SERVER``, ``$PATH`` (``wright``), or
+the local cargo build (``target/debug/wright`` / ``target/release/wright``).
 """
 from __future__ import annotations
 
@@ -25,11 +25,11 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable
 
-__all__ = ["Agcad", "AgcadError", "AgcadStdioTransport", "AgcadTcpTransport"]
+__all__ = ["Wright", "WrightError", "WrightStdioTransport", "WrightTcpTransport"]
 __version__ = "0.1.0"
 
 
-class AgcadError(RuntimeError):
+class WrightError(RuntimeError):
     """The server rejected a command. ``message`` is agent-readable and
     usually contains a hint on how to recover."""
 
@@ -179,9 +179,9 @@ class _LineTransport:
         with self._cond:
             while rid not in self._responses:
                 if self._closed:
-                    raise AgcadError("server connection closed")
+                    raise WrightError("server connection closed")
                 if not self._cond.wait(timeout):
-                    raise AgcadError(f"timed out waiting for response to request {rid}")
+                    raise WrightError(f"timed out waiting for response to request {rid}")
             return self._responses.pop(rid)
 
     def mark_closed(self) -> None:
@@ -190,7 +190,7 @@ class _LineTransport:
             self._cond.notify_all()
 
 
-class AgcadStdioTransport(_LineTransport):
+class WrightStdioTransport(_LineTransport):
     """Runs the server as a subprocess, speaking over its stdio."""
 
     def __init__(self, argv: Iterable[str]) -> None:
@@ -215,7 +215,7 @@ class AgcadStdioTransport(_LineTransport):
             self._stdin.flush()
         except (BrokenPipeError, ValueError):
             self.mark_closed()
-            raise AgcadError("server process is not running") from None
+            raise WrightError("server process is not running") from None
 
     def close(self) -> None:
         if self._proc.poll() is None:
@@ -230,8 +230,8 @@ class AgcadStdioTransport(_LineTransport):
         self.mark_closed()
 
 
-class AgcadTcpTransport(_LineTransport):
-    """Connects to a running ``agcad --tcp PORT`` server."""
+class WrightTcpTransport(_LineTransport):
+    """Connects to a running ``wright --tcp PORT`` server."""
 
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
@@ -249,7 +249,7 @@ class AgcadTcpTransport(_LineTransport):
             self._sock.sendall((line + "\n").encode())
         except OSError:
             self.mark_closed()
-            raise AgcadError("tcp connection to server lost") from None
+            raise WrightError("tcp connection to server lost") from None
 
     def close(self) -> None:
         try:
@@ -260,30 +260,30 @@ class AgcadTcpTransport(_LineTransport):
 
 
 def _find_server() -> list[str]:
-    """Locate the agcad server binary."""
-    env = os.environ.get("AGCAD_SERVER")
+    """Locate the wright server binary."""
+    env = os.environ.get("WRIGHT_SERVER")
     if env:
         return env.split()
-    which = shutil.which("agcad")
+    which = shutil.which("wright")
     if which:
         return [which]
-    # Local cargo build, relative to this file: python/agcad/client.py
+    # Local cargo build, relative to this file: python/wright/client.py
     root = Path(__file__).resolve().parents[2]
     for profile in ("debug", "release"):
-        candidate = root / "target" / profile / "agcad"
+        candidate = root / "target" / profile / "wright"
         if candidate.is_file():
             return [str(candidate)]
-    raise AgcadError(
-        "agcad server not found. Build it (cargo build) or set AGCAD_SERVER."
+    raise WrightError(
+        "wright server not found. Build it (cargo build) or set WRIGHT_SERVER."
     )
 
 
 # ---------------------------------------------------------------------------
 
 
-class Agcad:
+class Wright:
     """Synchronous, agent-friendly client. Every method maps 1:1 to a
-    command on the bus and raises :class:`AgcadError` on rejection.
+    command on the bus and raises :class:`WrightError` on rejection.
 
     If the connection dies (server restart, network blip) the client
     reconnects transparently on the next call. Note: documents live in
@@ -300,24 +300,24 @@ class Agcad:
     # -- constructors -------------------------------------------------------
 
     @classmethod
-    def spawn(cls, argv: Iterable[str] | None = None) -> "Agcad":
+    def spawn(cls, argv: Iterable[str] | None = None) -> "Wright":
         """Start a fresh server subprocess (stdio transport)."""
         args = list(argv) if argv is not None else _find_server()
-        return cls(AgcadStdioTransport(args), reconnect=("spawn", args))
+        return cls(WrightStdioTransport(args), reconnect=("spawn", args))
 
     @classmethod
-    def connect(cls, host: str = "127.0.0.1", port: int = 7860) -> "Agcad":
+    def connect(cls, host: str = "127.0.0.1", port: int = 7860) -> "Wright":
         """Attach to a running server. TCP mode shares one document space
         across all connections; mutations are broadcast to the others."""
-        return cls(AgcadTcpTransport(host, port), reconnect=("tcp", host, port))
+        return cls(WrightTcpTransport(host, port), reconnect=("tcp", host, port))
 
     def _fresh_transport(self) -> _LineTransport:
         if self._reconnect is None:
-            raise AgcadError("connection lost (no reconnect info available)")
+            raise WrightError("connection lost (no reconnect info available)")
         kind = self._reconnect
         if kind[0] == "tcp":
-            return AgcadTcpTransport(kind[1], kind[2])
-        return AgcadStdioTransport(kind[1])
+            return WrightTcpTransport(kind[1], kind[2])
+        return WrightStdioTransport(kind[1])
 
     # -- plumbing -----------------------------------------------------------
 
@@ -327,7 +327,7 @@ class Agcad:
         return self._request(method, **(params or {}))
 
     @staticmethod
-    def _is_connection_error(e: AgcadError) -> bool:
+    def _is_connection_error(e: WrightError) -> bool:
         text = str(e)
         return any(
             marker in text
@@ -337,7 +337,7 @@ class Agcad:
     def _request(self, method: str, **params: Any) -> dict[str, Any]:
         try:
             return self._do_request(method, **params)
-        except AgcadError as e:
+        except WrightError as e:
             if self._is_connection_error(e):
                 # Transport died (server restart, network blip): rebuild it
                 # once and retry, so the client stays usable. A restarted
@@ -353,7 +353,7 @@ class Agcad:
         self._t.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
         response = self._t.recv(rid)
         if "error" in response:
-            raise AgcadError(response["error"]["message"])
+            raise WrightError(response["error"]["message"])
         result = response["result"]
         # Results are externally tagged: {"entity_created": {...}}. Unwrap
         # the single key so callers work with plain dicts.
@@ -363,7 +363,7 @@ class Agcad:
     def close(self) -> None:
         self._t.close()
 
-    def __enter__(self) -> "Agcad":
+    def __enter__(self) -> "Wright":
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -1061,7 +1061,7 @@ class Agcad:
         """Compare two revisions by entity signature.
 
         The baseline is either another open document (``against``) or a saved
-        ``.agcad`` file (``path``); pass exactly one. The result classifies
+        ``.wcad`` file (``path``); pass exactly one. The result classifies
         entities as added, removed, modified (with the changed fields and
         volume/triangle deltas) or unchanged, and reports parameter and
         program changes. ``scene_signature``/``against_signature`` are stable
@@ -1081,7 +1081,7 @@ class Agcad:
         path: str,
         source: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Write the document to a ``.agcad`` file.
+        """Write the document to a ``.wcad`` file.
 
         The file is JSON holding the program and the current parameter
         values — not the geometry, which is rebuilt deterministically by
@@ -1093,7 +1093,7 @@ class Agcad:
         return self._request("save_document", doc=doc, path=path, source=source)
 
     def open_document(self, path: str, name: str | None = None) -> dict[str, Any]:
-        """Open a ``.agcad`` file as a new document and replay its program.
+        """Open a ``.wcad`` file as a new document and replay its program.
 
         Returns ``doc`` (the new id), ``name``, and command/parameter/entity
         counts. The stored name is used unless ``name`` overrides it. Any
@@ -1108,7 +1108,7 @@ class Agcad:
         Returns ``name``, ``params``, ``program`` (the modeling commands with
         expression arguments intact) and, when the document was saved with
         one, ``source`` — the authoring script that rode along in the
-        ``.agcad`` snapshot. This is exactly what :meth:`save_document`
+        ``.wcad`` snapshot. This is exactly what :meth:`save_document`
         writes, available to any client.
 
         The script on disk is the source of truth. ``source`` is how a
@@ -1156,17 +1156,17 @@ class Agcad:
         program = snap.get("program", [])
 
         out = [
-            f'"""Generated from the agcad document {name!r}.',
+            f'"""Generated from the wright document {name!r}.',
             "",
             "Re-running this script rebuilds the model: it is an ordinary",
             "client, so edit it freely or keep it as the project's source.",
             '"""',
             "",
-            "from agcad import Agcad",
+            "from wright import Wright",
             "",
             "",
             "def main() -> None:",
-            "    cad = Agcad.spawn()",
+            "    cad = Wright.spawn()",
             f'    doc = cad.create_document({name!r})["doc"]',
             "",
         ]

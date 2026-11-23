@@ -10,7 +10,7 @@
 //! turns a malformed connection (a self-crossing morph) into an actionable
 //! error instead of a broken solid.
 
-use agcad_protocol::{Mesh, Vec3};
+use wright_protocol::{Mesh, Vec3};
 
 use crate::{boolean, fillet, Error};
 

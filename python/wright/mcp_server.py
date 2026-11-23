@@ -1,13 +1,13 @@
-"""Minimal Model Context Protocol (MCP) server for agcad — stdlib only.
+"""Minimal Model Context Protocol (MCP) server for Wright CAD — stdlib only.
 
 Speaks newline-delimited JSON-RPC 2.0 on stdio (the MCP stdio transport)
-and forwards tool calls to the agcad command bus. Deliberately depends on
-nothing but the `agcad` client package: the protocol surface we need
+and forwards tool calls to the wright command bus. Deliberately depends on
+nothing but the `wright` client package: the protocol surface we need
 (initialize, tools/list, tools/call, ping) is small, and zero deps beats
 SDK version drift.
 
 Design rules:
-- One tool per *intent*, not per command: `agcad_execute` runs a batch of
+- One tool per *intent*, not per command: `wright_execute` runs a batch of
   bus commands in one call (MCP round-trips are expensive).
 - Token economy: mesh payloads are summarized to stats (bbox, tri count).
   Full meshes are available via the Python client, not the model.
@@ -21,13 +21,13 @@ import os
 import sys
 from typing import Any
 
-from .client import Agcad, AgcadError
+from .client import Wright, WrightError
 
-SERVER_INFO = {"name": "agcad", "version": "0.2.0"}
+SERVER_INFO = {"name": "wright", "version": "0.2.0"}
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 MAX_BATCH = 500
 
-INSTRUCTIONS = """agcad is a headless parametric CAD for 3D printing.
+INSTRUCTIONS = """Wright CAD is a headless parametric CAD for 3D printing.
 A document holds a program: every modeling command is recorded, dimensions may be
 expressions over named parameters ("wall*2"). set_parameter replays the program
 deterministically (entity ids stay stable) and regenerates only the geometry
@@ -37,9 +37,9 @@ Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
 Cylinders extrude along +Z. Document ids start at 1; create_document takes an
 optional explicit `doc` id, so create-then-populate fits in one batch.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
-dimensions -> transform -> boolean ops for printable solids -> agcad_scene to
+dimensions -> transform -> boolean ops for printable solids -> wright_scene to
 verify -> validate to prove watertightness/printability and diff_scene to see
-exactly what a knob changed -> agcad_render to SEE the result -> export_stl/
+exactly what a knob changed -> wright_render to SEE the result -> export_stl/
 export_3mf for slicing. Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle/add_sketch_arc/add_sketch_spline ->
@@ -55,7 +55,7 @@ chamfers reshape a solid in place (same entity id): fillet{doc,entity,radius,edg
 or chamfer{doc,entity,distance,edges?}, where `edges` is a geometric filter
 ({direction}, {near,near_radius}, {normals}, {convex}) instead of an index — omit
 it to take every sharp edge. The Python script is the source of truth;
-save_document -> .agcad is a replayable snapshot (program + current parameter
+save_document -> .wcad is a replayable snapshot (program + current parameter
 values + the embedded script). get_program exposes all three, so a handoff can
 recover the recipe without executing it. For durable work keep the script and
 pass it as save_document{source:{language:"python",text:...}}; an MCP-only
@@ -70,7 +70,7 @@ loft morphs between two or more profiles, and thread builds a real screw thread
 (union it for a screw, subtract it for a threaded hole).
 Failed commands report a hint; fix the named issue and retry."""
 
-EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
+EXECUTE_DESCRIPTION = """Batch-execute wright commands. Each command is an object:
 {"method": "<name>", ...params} or {"method": "<name>", "params": {...}}.
 Commands: initialize{}, list_documents{}, create_document{name,doc?}
   (doc is an unused id >= 1; omit it to allocate the next one — pass it to
@@ -179,13 +179,13 @@ thread{doc,major_diameter,minor_diameter?,pitch,length,hand?:"right"|"left",
   flank_angle_deg?=60,segments_per_turn?,origin?,name?,color?} (a real threaded
   solid along +Z from origin; union for a screw, boolean difference for a
   threaded hole),
-save_document{doc,path,source?} (writes a .agcad JSON file: the program plus
+save_document{doc,path,source?} (writes a .wcad JSON file: the program plus
   the current parameter values; geometry is rebuilt by replay, so the file stays
   small and diffable. source={language,text} embeds the authoring script as the
   canonical recipe copy; it is never executed. save -> open -> save is a no-op
   diff; session command, changes no model state. A provided source is
   remembered on the document, so get_program returns it immediately too),
-open_document{path,name?} (loads a .agcad file as a NEW document and replays it;
+open_document{path,name?} (loads a .wcad file as a NEW document and replays it;
   returns doc, name, counts; the stored name is used unless name overrides),
 get_program{doc} (read-only program + parameters + embedded source — the
   complete handoff: the source is the canonical script; the program is the
@@ -207,7 +207,7 @@ validate{doc,entities?,min_wall_mm?} (trust check, changes no state). For every
   Returns ok + per-entity reports + totals + warnings. entities restricts the
   check; min_wall_mm sets the thin-wall pass/fail threshold (omit to report
   the estimate without failing),
-diff_scene{doc,against?:doc_id,path?:".agcad"} (compare two revisions by
+diff_scene{doc,against?:doc_id,path?:".wcad"} (compare two revisions by
   entity signature; pass exactly one baseline: another open document or a
   saved file, which is replayed read-only and not added to the document list.
   Returns changed + added/removed/modified with the changed fields and
@@ -220,12 +220,12 @@ export_3mf{doc,path,entities?} (3MF package, world space, absolute path — one
   named object per solid with its display color, millimeter unit; prefer it
   over STL when the build has several parts or colors; session command),
 render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,ortho?,background?,path?}
-  (headless PNG; prefer the agcad_render tool, which returns the image inline.
+  (headless PNG; prefer the wright_render tool, which returns the image inline.
   ortho:true gives a parallel projection for front/top/side views).
 Numeric arguments accept expression strings over parameters. Commands run in order;
 execution stops at the first error (reported with a recovery hint)."""
 
-SCENE_DESCRIPTION = """Inspect an agcad document: parameters and entities with
+SCENE_DESCRIPTION = """Inspect an wright document: parameters and entities with
 placement, a world-space bounding box per entity (meshes are entity-local;
 world_bbox already includes translation/rotation/scale), vertex/triangle
 counts, and for sketches a compact solver + resolved plane summary (origin,
@@ -240,7 +240,7 @@ Headless software render, deterministic; changes no state."""
 
 TOOLS = [
     {
-        "name": "agcad_execute",
+        "name": "wright_execute",
         "description": EXECUTE_DESCRIPTION,
         "inputSchema": {
             "type": "object",
@@ -255,7 +255,7 @@ TOOLS = [
         },
     },
     {
-        "name": "agcad_scene",
+        "name": "wright_scene",
         "description": SCENE_DESCRIPTION,
         "inputSchema": {
             "type": "object",
@@ -266,7 +266,7 @@ TOOLS = [
         },
     },
     {
-        "name": "agcad_render",
+        "name": "wright_render",
         "description": RENDER_DESCRIPTION,
         "inputSchema": {
             "type": "object",
@@ -309,7 +309,7 @@ def mesh_stats(mesh: dict) -> dict:
 
 def summarize(obj: Any) -> Any:
     """Replace every `mesh` payload with its stats, recursively. Inline PNG
-    payloads are replaced with a pointer to `agcad_render` (images belong
+    payloads are replaced with a pointer to `wright_render` (images belong
     in the vision loop, not in a text dump)."""
     if isinstance(obj, dict):
         out = {}
@@ -317,7 +317,7 @@ def summarize(obj: Any) -> Any:
             if k == "mesh" and isinstance(v, dict):
                 out[k] = mesh_stats(v)
             elif k == "png_base64" and isinstance(v, str):
-                out[k] = f"<{len(v)} base64 chars — call agcad_render to get this as an image>"
+                out[k] = f"<{len(v)} base64 chars — call wright_render to get this as an image>"
             else:
                 out[k] = summarize(v)
         return out
@@ -331,23 +331,23 @@ def summarize(obj: Any) -> Any:
 
 class McpServer:
     def __init__(self) -> None:
-        self._cad: Agcad | None = None
+        self._cad: Wright | None = None
 
     @property
-    def cad(self) -> Agcad:
+    def cad(self) -> Wright:
         # Spawn the engine lazily so `tools/list` works even without a binary.
         if self._cad is None:
-            attach = os.environ.get("AGCAD_CONNECT")
+            attach = os.environ.get("WRIGHT_CONNECT")
             if attach:
                 # Live mode: draw into a shared backend (e.g. the one a
                 # viewer is watching) instead of a private engine.
                 host, sep, port = attach.rpartition(":")
                 if not sep:
                     host, port = "127.0.0.1", attach
-                self._cad = Agcad.connect(host, int(port))
-                print(f"agcad-mcp: attached to shared backend {host}:{port} (live preview)", file=sys.stderr)
+                self._cad = Wright.connect(host, int(port))
+                print(f"wright-mcp: attached to shared backend {host}:{port} (live preview)", file=sys.stderr)
             else:
-                self._cad = Agcad.spawn()
+                self._cad = Wright.spawn()
         return self._cad
 
     # -- MCP methods ---------------------------------------------------------
@@ -388,11 +388,11 @@ class McpServer:
     # -- tools -----------------------------------------------------------------
 
     def _dispatch_tool(self, name: Any, args: dict) -> dict:
-        if name == "agcad_execute":
+        if name == "wright_execute":
             return self._tool_execute(args)
-        if name == "agcad_scene":
+        if name == "wright_scene":
             return self._tool_scene(args)
-        if name == "agcad_render":
+        if name == "wright_render":
             return self._tool_render(args)
         return {
             "content": [{"type": "text", "text": f"unknown tool: {name}"}],
@@ -422,7 +422,7 @@ class McpServer:
             try:
                 res = self.cad.call(method, params)
                 results.append({"step": i, "method": method, "result": summarize(res)})
-            except AgcadError as e:
+            except WrightError as e:
                 results.append({"step": i, "method": method, "error": str(e)})
                 error = str(e)
                 break
@@ -446,7 +446,7 @@ class McpServer:
         try:
             scene = self.cad.call("get_scene", {"doc": doc})
             params = self.cad.call("get_parameters", {"doc": doc})
-        except AgcadError as e:
+        except WrightError as e:
             return {"content": [{"type": "text", "text": str(e)}], "isError": True}
 
         entities = []
@@ -488,7 +488,7 @@ class McpServer:
         params = {k: v for k, v in args.items() if v is not None}
         try:
             r = self.cad.call("render_offscreen", params)
-        except AgcadError as e:
+        except WrightError as e:
             return {"content": [{"type": "text", "text": str(e)}], "isError": True}
         meta = {"doc": r["doc"], "width": r["width"], "height": r["height"], "bytes": len(r["png_base64"])}
         if "path" in r:

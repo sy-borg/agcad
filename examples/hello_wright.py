@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""First smoke test of the agcad command bus, from the agent's seat."""
+"""First smoke test of the wright command bus, from the agent's seat."""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from agcad import Agcad  # noqa: E402
+from wright import Wright  # noqa: E402
 
 STEEL = (0.75, 0.76, 0.80, 1.0)
 RED = (0.85, 0.25, 0.20, 1.0)
 
 
 def main() -> None:
-    with Agcad.spawn() as cad:
+    with Wright.spawn() as cad:
         handshake = cad.initialize()
         print("handshake:", handshake)
 

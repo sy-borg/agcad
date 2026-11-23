@@ -5,7 +5,7 @@
 //! Every function produces the same output for the same input: agents may
 //! rely on vertex counts and index layout being stable.
 
-use agcad_protocol::Mesh;
+use wright_protocol::Mesh;
 
 const TAU: f64 = std::f64::consts::TAU;
 

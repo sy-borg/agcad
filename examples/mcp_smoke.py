@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the agcad MCP server exactly like an MCP host would:
+"""Drive the wright MCP server exactly like an MCP host would:
 initialize handshake, notifications/initialized, tools/list, tools/call."""
 import json
 import os
@@ -10,7 +10,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 env = {**os.environ, "PYTHONPATH": str(root / "python")}
 proc = subprocess.Popen(
-    [sys.executable, "-m", "agcad.mcp_server"],
+    [sys.executable, "-m", "wright.mcp_server"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=None,  # banners visible in the terminal
@@ -36,7 +36,7 @@ try:
         "protocolVersion": "2025-06-18", "capabilities": {},
         "clientInfo": {"name": "smoke", "version": "0"}}})
     init = recv()["result"]
-    assert init["serverInfo"]["name"] == "agcad"
+    assert init["serverInfo"]["name"] == "wright"
     assert "instructions" in init and "parametric" in init["instructions"]
     print("initialize: ok | protocol", init["protocolVersion"])
 
@@ -48,10 +48,10 @@ try:
     send({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     tools = recv()["result"]["tools"]
     names = [t["name"] for t in tools]
-    assert names == ["agcad_execute", "agcad_scene", "agcad_render"], names
+    assert names == ["wright_execute", "wright_scene", "wright_render"], names
     print("tools/list: ok", names)
 
-    # --- batch modeling through agcad_execute ------------------------------
+    # --- batch modeling through wright_execute ------------------------------
     batch = [
         {"method": "create_document", "name": "mcp-bracket", "doc": 1},
         {"method": "set_parameter", "params": {"doc": 1, "name": "wall", "value": 2.0}},
@@ -61,7 +61,7 @@ try:
             "center": [10, 0, "wall + 5"], "radius": "wall*2.5", "height": 10}},
     ]
     send({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-          "params": {"name": "agcad_execute", "arguments": {"commands": batch}}})
+          "params": {"name": "wright_execute", "arguments": {"commands": batch}}})
     call = recv()["result"]
     assert not call.get("isError", False), call
     payload = json.loads(call["content"][0]["text"])
@@ -70,11 +70,11 @@ try:
     assert plate["result"] == "entity_created" and plate["entity"] == 1, plate
     assert plate["mesh"]["local_bbox"][1][2] == 1.0, plate  # local mesh z max
     assert "positions" not in json.dumps(plate), "meshes must be summarized, not shipped"
-    print("agcad_execute: ok |", payload["executed"], "commands, meshes summarized")
+    print("wright_execute: ok |", payload["executed"], "commands, meshes summarized")
 
     # --- scene inspection ---------------------------------------------------
     send({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-          "params": {"name": "agcad_scene", "arguments": {"doc": 1}}})
+          "params": {"name": "wright_scene", "arguments": {"doc": 1}}})
     scene = json.loads(recv()["result"]["content"][0]["text"])
     assert len(scene["entities"]) == 2
     assert scene["parameters"][0]["name"] == "wall" and scene["parameters"][0]["value"] == 2.0
@@ -82,17 +82,17 @@ try:
     # The mesh is entity-local; the reported world bbox includes the transform.
     assert plate["local_bbox"][1][2] == 1.0, plate
     assert plate["world_bbox"]["max"][2] == 2.0, plate
-    print("agcad_scene: ok |", len(scene["entities"]), "entities, wall =", scene["parameters"][0]["value"],
+    print("wright_scene: ok |", len(scene["entities"]), "entities, wall =", scene["parameters"][0]["value"],
           "| world z_max =", plate["world_bbox"]["max"][2])
 
     # --- parameter change through MCP --------------------------------------
     send({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-          "params": {"name": "agcad_execute",
+          "params": {"name": "wright_execute",
                      "arguments": {"commands": [{"method": "set_parameter",
                                                  "params": {"doc": 1, "name": "wall", "value": 4.0}}]}}})
     recv()
     send({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
-          "params": {"name": "agcad_scene", "arguments": {"doc": 1}}})
+          "params": {"name": "wright_scene", "arguments": {"doc": 1}}})
     scene = json.loads(recv()["result"]["content"][0]["text"])
     plate = next(e for e in scene["entities"] if e["name"] == "plate")
     assert plate["id"] == 1, plate
@@ -101,7 +101,7 @@ try:
 
     # --- agent-shaped error --------------------------------------------------
     send({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
-          "params": {"name": "agcad_execute", "arguments": {"commands": [
+          "params": {"name": "wright_execute", "arguments": {"commands": [
               {"method": "add_box", "params": {"doc": 1, "name": "x", "center": [0, 0, 0],
                                                "size": ["walll", 1, 1]}}]}}})
     err_payload = json.loads(recv()["result"]["content"][0]["text"])

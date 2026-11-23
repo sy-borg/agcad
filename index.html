@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agcad – a CAD whose primary user is an AI agent</title>
-<meta name="description" content="agcad is a headless, scriptable parametric CAD. An AI agent drives it over a JSON-RPC command bus or MCP; the viewer is just another client.">
-<meta property="og:title" content="agcad">
+<title>Wright CAD – a CAD whose primary user is an AI agent</title>
+<meta name="description" content="Wright CAD is a headless, scriptable parametric CAD. An AI agent drives it over a JSON-RPC command bus or MCP; the viewer is just another client.">
+<meta property="og:title" content="Wright CAD">
 <meta property="og:description" content="A CAD whose primary user is an AI agent.">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <meta name="theme-color" content="#eef0ec">
@@ -159,7 +159,7 @@ footer{padding:0 0 48px}
 
 <nav>
   <div class="wrap">
-    <a class="brand" href="#top"><img src="logo.svg" alt="" width="256" height="256" decoding="async">agcad</a>
+    <a class="brand" href="#top"><img src="logo.svg" alt="" width="256" height="256" decoding="async">Wright CAD</a>
     <div class="links">
       <a href="#knobs">Parametric</a>
       <a href="#architecture">Architecture</a>
@@ -167,7 +167,7 @@ footer{padding:0 0 48px}
       <a href="#protocol">Protocol</a>
       <a href="#mcp">MCP</a>
       <a href="#roadmap">Roadmap</a>
-      <a href="https://github.com/sy-borg/agcad">GitHub</a>
+      <a href="https://github.com/sy-borg/wright-cad">GitHub</a>
     </div>
   </div>
 </nav>
@@ -176,15 +176,15 @@ footer{padding:0 0 48px}
   <div class="wrap">
     <div>
       <h1>A CAD whose primary user is an AI agent.</h1>
-      <p class="lede">agcad is a headless parametric CAD. The agent writes a short script, the engine builds watertight solids, and you get STL and 3MF files ready for the slicer. <strong>The viewer is just another client.</strong></p>
+      <p class="lede">Wright CAD is a headless parametric CAD. The agent writes a short script, the engine builds watertight solids, and you get STL and 3MF files ready for the slicer. <strong>The viewer is just another client.</strong></p>
       <div class="btns">
         <a class="btn primary" href="#quickstart">Get started</a>
-        <a class="btn" href="https://github.com/sy-borg/agcad">View on GitHub</a>
+        <a class="btn" href="https://github.com/sy-borg/wright-cad">View on GitHub</a>
       </div>
       <div class="tags"><span>Rust</span><span>Python client</span><span>MCP server</span><span>MIT</span></div>
     </div>
     <figure>
-      <img src="examples/cross_block/compare.png" alt="A drawing of a cross block next to the 3D model agcad rebuilt from it" width="1200" height="1275" fetchpriority="high" decoding="async">
+      <img src="examples/cross_block/compare.png" alt="A drawing of a cross block next to the 3D model Wright CAD rebuilt from it" width="1200" height="1275" fetchpriority="high" decoding="async">
       <figcaption>A drawing in, a parametric part out. The agent read the dimensions off the picture and rebuilt the part with a script.</figcaption>
     </figure>
   </div>
@@ -219,23 +219,23 @@ footer{padding:0 0 48px}
 <section id="architecture">
   <div class="wrap">
     <h2>The bus is the product</h2>
-    <p class="intro">agcad inverts the usual GUI-first design. A headless core and its command bus do the work. The agent's client and the human's viewer both talk to that bus and nothing else.</p>
+    <p class="intro">Wright CAD inverts the usual GUI-first design. A headless core and its command bus do the work. The agent's client and the human's viewer both talk to that bus and nothing else.</p>
 
     <div class="arch">
       <div class="stack">
         <div class="box"><h3>Agents and scripts</h3><ul><li>Python client, no dependencies</li><li>MCP server for any agent host</li><li>Any language that speaks JSON-RPC</li></ul></div>
-        <div class="box"><h3>agcad-view</h3><ul><li>wgpu viewer for the human</li><li>Pulls snapshots with <code>get_scene</code></li><li>Owns no document state</li></ul></div>
+        <div class="box"><h3>wright-view</h3><ul><li>wgpu viewer for the human</li><li>Pulls snapshots with <code>get_scene</code></li><li>Owns no document state</li></ul></div>
       </div>
       <div class="bus">JSON-RPC · stdio / TCP</div>
       <div class="box">
-        <h3>agcad server and core</h3>
+        <h3>wright server and core</h3>
         <ul>
           <li>Documents, entities, parameters and the program</li>
           <li>Booleans, sketches with constraints, extrude, revolve</li>
           <li>Fillet and chamfer with geometric edge filters</li>
           <li>Undo and redo for everything on the bus</li>
           <li>Deterministic tessellation and a software renderer</li>
-          <li>STL, 3MF and <code>.agcad</code> export</li>
+          <li>STL, 3MF and <code>.wcad</code> export</li>
         </ul>
       </div>
     </div>
@@ -259,7 +259,7 @@ footer{padding:0 0 48px}
       <li><strong>Author</strong>Write a parametric program: <code>span</code>, <code>arm</code>, <code>height</code>, twelve sketch lines, <code>extrude</code>.</li>
       <li><strong>Check</strong>Call <code>render_offscreen</code> from the drawing's camera and compare silhouettes.</li>
       <li><strong>Finish</strong>Round the top and bottom rims with <code>fillet</code> and a normals filter. Leave the sharp plan corners alone.</li>
-      <li><strong>Deliver</strong>Export STL and 3MF for the slicer, plus a <code>.agcad</code> that reopens with its knobs.</li>
+      <li><strong>Deliver</strong>Export STL and 3MF for the slicer, plus a <code>.wcad</code> that reopens with its knobs.</li>
     </ol>
 
     <div class="pair twoone">
@@ -278,14 +278,14 @@ footer{padding:0 0 48px}
 <section id="showcase-prompt" class="alt">
   <div class="wrap">
     <h2>From a sentence to a printable part</h2>
-    <p class="intro">The brief was one line: <code>Use the agcad tool to create me a M10 screw with 20mm length.</code> No drawing, no dimension table. The agent chose ISO 4762 socket-head proportions, drove the MCP server, and watched the part appear in the live viewer.</p>
+    <p class="intro">The brief was one line: <code>Use the Wright CAD tool to create me a M10 screw with 20mm length.</code> No drawing, no dimension table. The agent chose ISO 4762 socket-head proportions, drove the MCP server, and watched the part appear in the live viewer.</p>
 
     <ol class="loop">
       <li><strong>Ask</strong>M10 and 20 mm are the only hard facts. Head, drive, pitch and chamfer are choices the agent makes and can justify.</li>
       <li><strong>Model</strong><code>thread</code> sweeps a real helical thread with a 60° included angle at the M10 coarse pitch; a Ø16 × 10 mm head is unioned on top.</li>
       <li><strong>Verify</strong><code>validate</code> comes back watertight: 0 open edges, 0 non-manifold edges, 0 self-intersections, 2949.9 mm³.</li>
       <li><strong>Look</strong><code>render_offscreen</code> returns a PNG inline, so the agent reviews its own work instead of guessing at it.</li>
-      <li><strong>Deliver</strong>A 10,578-triangle STL and a replayable <code>.agcad</code> with seven named parameters.</li>
+      <li><strong>Deliver</strong>A 10,578-triangle STL and a replayable <code>.wcad</code> with seven named parameters.</li>
     </ol>
 
     <div class="pair">
@@ -294,7 +294,7 @@ footer{padding:0 0 48px}
         <figcaption>The whole session: one sentence in, then thread, head, chamfer, validation and file list out. About 22k tokens.</figcaption>
       </figure>
       <figure>
-        <img src="examples/m10x20_screw/m10screw_result.png" alt="The M10x20 screw in the agcad viewer, labelled M10x20_screw #5" width="2061" height="2324" loading="lazy" decoding="async">
+        <img src="examples/m10x20_screw/m10screw_result.png" alt="The M10x20 screw in the Wright CAD viewer, labelled M10x20_screw #5" width="2061" height="2324" loading="lazy" decoding="async">
         <figcaption>The part in the live viewer while the agent worked. The viewer is another bus client: no document state, no hidden modelling code.</figcaption>
       </figure>
     </div>
@@ -314,7 +314,7 @@ footer{padding:0 0 48px}
       </figure>
     </div>
 
-    <p class="intro" style="margin-top:24px">Both files live in <code>examples/m10x20_screw/</code>. The <a href="examples/m10x20_screw/m10x20_screw.stl">STL</a> goes to the slicer; the <a href="examples/m10x20_screw/m10x20_screw.agcad"><code>.agcad</code></a> is the source of truth: opening it replays the program and restores its seven parameters, so setting <code>length</code> to 30 turns it into an M10 × 30.</p>
+    <p class="intro" style="margin-top:24px">Both files live in <code>examples/m10x20_screw/</code>. The <a href="examples/m10x20_screw/m10x20_screw.stl">STL</a> goes to the slicer; the <a href="examples/m10x20_screw/m10x20_screw.wcad"><code>.wcad</code></a> is the source of truth: opening it replays the program and restores its seven parameters, so setting <code>length</code> to 30 turns it into an M10 × 30.</p>
   </div>
 </section>
 
@@ -340,9 +340,9 @@ footer{padding:0 0 48px}
       </div>
       <div>
         <h3>From Python</h3>
-<pre><span class="k">from</span> agcad <span class="k">import</span> Agcad
+<pre><span class="k">from</span> wright <span class="k">import</span> Wright
 
-<span class="k">with</span> Agcad.spawn() <span class="k">as</span> cad:
+<span class="k">with</span> Wright.spawn() <span class="k">as</span> cad:
     cad.initialize()
     doc = cad.create_document(<span class="s">"bracket"</span>)[<span class="s">"doc"</span>]
 
@@ -362,7 +362,7 @@ footer{padding:0 0 48px}
 
     <p><b>Sketch completeness.</b> Sketches now draw arcs and interpolating splines, close profiles with tangent joints, and use equal, concentric, symmetric, angle and point-on-line constraints. Construction geometry guides the solve without joining the extrusion; <code>trim_sketch</code>, <code>extend_sketch</code> and <code>offset_sketch</code> edit the drawing, and every solve names an unsatisfied or redundant constraint by id instead of quietly compromising.</p>
 
-    <p><b>Trust loop.</b> <code>validate</code> checks every solid for watertightness, non-manifold edges, self-intersections, volume and an approximate thinnest wall (optionally against <code>min_wall_mm</code>), and every sketch for solver status, conflict diagnostics and a closed profile. <code>diff_scene</code> compares two revisions by entity signature — against another open document or a saved <code>.agcad</code> — and names what changed: added, removed and modified entities with field-level detail, parameter values and the program. Both are queries: no program entry, no state change. A rebuild is proven correct, not assumed.</p>
+    <p><b>Trust loop.</b> <code>validate</code> checks every solid for watertightness, non-manifold edges, self-intersections, volume and an approximate thinnest wall (optionally against <code>min_wall_mm</code>), and every sketch for solver status, conflict diagnostics and a closed profile. <code>diff_scene</code> compares two revisions by entity signature — against another open document or a saved <code>.wcad</code> — and names what changed: added, removed and modified entities with field-level detail, parameter values and the program. Both are queries: no program entry, no state change. A rebuild is proven correct, not assumed.</p>
 
     <p><b>Shape leverage.</b> <code>linear_pattern</code> and <code>circular_pattern</code> repeat solids, <code>mirror</code> reflects them, <code>shell</code> hollows in place (open faces by outward normal), and <code>hole</code> cuts a real through, blind, counterbore or countersink hole. <code>sweep</code> carries a profile along a polyline or helix, <code>loft</code> morphs between profiles, and <code>thread</code> builds a helical screw thread: union it for a screw, subtract it for a threaded hole.</p>
   </div>
@@ -378,25 +378,25 @@ footer{padding:0 0 48px}
         <h3>Claude Desktop and other hosts</h3>
 <pre>{
   "mcpServers": {
-    "agcad": {
-      "command": "/path/to/agcad/.venv/bin/agcad-mcp"
+    "wright": {
+      "command": "/path/to/wright-cad/.venv/bin/wright-mcp"
     }
   }
 }</pre>
-        <p><code>agcad_execute</code> runs a batch of bus commands and stops at the first error with a recovery hint. <code>agcad_scene</code> returns a compact state without raw meshes. <code>agcad_render</code> returns a deterministic PNG inline so the agent can see what it built.</p>
+        <p><code>wright_execute</code> runs a batch of bus commands and stops at the first error with a recovery hint. <code>wright_scene</code> returns a compact state without raw meshes. <code>wright_render</code> returns a deterministic PNG inline so the agent can see what it built.</p>
       </div>
       <div>
         <h3>Watch the agent draw</h3>
 <pre><span class="c"># 1. shared backend</span>
-./target/debug/agcad --tcp 7860
+./target/debug/wright --tcp 7860
 
 <span class="c"># 2. point the MCP server at it</span>
-AGCAD_CONNECT=127.0.0.1:7860 agcad-mcp
+WRIGHT_CONNECT=127.0.0.1:7860 wright-mcp
 
 <span class="c"># 3. the viewer refreshes on every change</span>
-./target/debug/agcad-view --port 7860
+./target/debug/wright-view --port 7860
 <span class="c"># labels: name #id · click: pick a face or edge · C: copy selector</span></pre>
-        <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation. Without <code>AGCAD_CONNECT</code>, the MCP server runs a private engine. A click sends a ray through <code>pick</code>; the HUD shows the exact <code>{entity,normal,near}</code> face or <code>{direction,near,near_radius}</code> edge selector to hand to the agent, who passes it straight to <code>add_sketch</code>, <code>fillet</code> or <code>chamfer</code>.</p>
+        <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation. Without <code>WRIGHT_CONNECT</code>, the MCP server runs a private engine. A click sends a ray through <code>pick</code>; the HUD shows the exact <code>{entity,normal,near}</code> face or <code>{direction,near,near_radius}</code> edge selector to hand to the agent, who passes it straight to <code>add_sketch</code>, <code>fillet</code> or <code>chamfer</code>.</p>
       </div>
     </div>
   </div>
@@ -412,17 +412,17 @@ AGCAD_CONNECT=127.0.0.1:7860 agcad-mcp
 
 python3 -m venv .venv
 .venv/bin/pip install -e ./python
-.venv/bin/python examples/hello_agcad.py</pre>
+.venv/bin/python examples/hello_wright.py</pre>
       </div>
       <div>
         <h3>Add the human seat</h3>
-<pre>./target/debug/agcad --tcp 7860 &amp;
-./target/debug/agcad-view --port 7860
+<pre>./target/debug/wright --tcp 7860 &amp;
+./target/debug/wright-view --port 7860
 
 <span class="c"># drag = orbit, wheel = zoom, L = labels, click = pick, R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/agcad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a validate-and-diff trust loop, and a save and load round trip.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a validate-and-diff trust loop, and a save and load round trip.</p>
   </div>
 </section>
 
@@ -442,7 +442,7 @@ python3 -m venv .venv
           <li><b>Headless rendering</b> <span>software rasterizer, ortho cameras</span></li>
           <li><b>Sketches and constraints</b> <span>deterministic solver</span></li>
           <li><b>Extrude and revolve</b> <span>watertight, printable solids</span></li>
-          <li><b>Persistence</b> <span>byte-stable <code>.agcad</code> files</span></li>
+          <li><b>Persistence</b> <span>byte-stable <code>.wcad</code> files</span></li>
           <li><b>Fillet and chamfer</b> <span>geometric edge filters</span></li>
           <li><b>3MF export</b> <span>named, colored objects</span></li>
           <li><b>Face and datum sketch planes</b></li>
@@ -468,9 +468,9 @@ python3 -m venv .venv
 <footer>
   <div class="wrap">
     <div class="titleblock">
-      <div><small>Project</small><span class="big">agcad</span></div>
-      <div><small>Licence</small><a href="https://github.com/sy-borg/agcad/blob/master/LICENSE">MIT</a></div>
-      <div><small>Source</small><a href="https://github.com/sy-borg/agcad">sy-borg/agcad</a></div>
+      <div><small>Project</small><span class="big">Wright CAD</span></div>
+      <div><small>Licence</small><a href="https://github.com/sy-borg/wright-cad/blob/master/LICENSE">MIT</a></div>
+      <div><small>Source</small><a href="https://github.com/sy-borg/wright-cad">sy-borg/wright-cad</a></div>
       <div><small>Status</small>Milestone 17</div>
     </div>
   </div>

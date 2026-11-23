@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use agcad_protocol::{DatumPlane, EntityId, Mesh, Vec3};
+use wright_protocol::{DatumPlane, EntityId, Mesh, Vec3};
 
 use crate::{edges, mat4, Error};
 
@@ -373,11 +373,11 @@ pub fn placement(frame: &Frame) -> (Vec3, Vec3) {
 }
 
 /// World-space plane frame of an entity transform, if it is a sketch.
-pub fn frame_from_transform(transform: &agcad_protocol::Mat4) -> agcad_protocol::SketchPlaneFrame {
+pub fn frame_from_transform(transform: &wright_protocol::Mat4) -> wright_protocol::SketchPlaneFrame {
     let origin = mat4::transform_point(transform, [0.0, 0.0, 0.0]);
     let x = normalize(mat4::transform_direction(transform, [1.0, 0.0, 0.0]));
     let n = normalize(mat4::transform_direction(transform, [0.0, 0.0, 1.0]));
-    agcad_protocol::SketchPlaneFrame {
+    wright_protocol::SketchPlaneFrame {
         origin: [origin[0] as f64, origin[1] as f64, origin[2] as f64],
         normal: n,
         x_axis: x,
@@ -389,7 +389,7 @@ mod tests {
     use super::*;
     use crate::geo;
 
-    fn transformed(frame: &Frame) -> agcad_protocol::Mat4 {
+    fn transformed(frame: &Frame) -> wright_protocol::Mat4 {
         let (t, r) = placement(frame);
         mat4::compose(t, r, [1.0; 3])
     }

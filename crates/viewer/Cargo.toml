@@ -1,16 +1,16 @@
 [package]
-name = "agcad-viewer"
-description = "agcad viewer: a deliberately dumb wgpu renderer fed by the command bus"
+name = "wright-viewer"
+description = "wright viewer: a deliberately dumb wgpu renderer fed by the command bus"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "agcad-view"
+name = "wright-view"
 path = "src/main.rs"
 
 [dependencies]
-agcad-protocol.workspace = true
+wright-protocol.workspace = true
 bytemuck = "1.25.2"
 font8x8 = "0.3.1"
 pollster = "1.0.1"
