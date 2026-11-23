@@ -290,7 +290,7 @@ footer{padding:0 0 48px}
 {"jsonrpc":"2.0","id":1,
  "result":{"entity_created":
   {"doc":1,"entity":1,"mesh":{...}}}}</pre>
-        <p>Commands cover documents, primitives, booleans, sketches and constraints, extrude, revolve, fillet, chamfer, picking, validation, scene diff, export, undo and redo, and rendering.</p>
+        <p>Commands cover documents, primitives, booleans, sketches and constraints, extrude, revolve, patterns and mirror, shell, holes, sweep, loft, threads, fillet, chamfer, picking, validation, scene diff, export, undo and redo, and rendering.</p>
       </div>
       <div>
         <h3>From Python</h3>
@@ -315,6 +315,8 @@ footer{padding:0 0 48px}
     </div>
 
     <p><b>Trust loop.</b> <code>validate</code> checks every solid for watertightness, non-manifold edges, self-intersections, volume and an approximate thinnest wall (optionally against <code>min_wall_mm</code>), and every sketch for solver status and a closed profile. <code>diff_scene</code> compares two revisions by entity signature — against another open document or a saved <code>.agcad</code> — and names what changed: added, removed and modified entities with field-level detail, parameter values and the program. Both are queries: no program entry, no state change. A rebuild is proven correct, not assumed.</p>
+
+    <p><b>Shape leverage.</b> <code>linear_pattern</code> and <code>circular_pattern</code> repeat solids, <code>mirror</code> reflects them, <code>shell</code> hollows in place (open faces by outward normal), and <code>hole</code> cuts a real through, blind, counterbore or countersink hole. <code>sweep</code> carries a profile along a polyline or helix, <code>loft</code> morphs between profiles, and <code>thread</code> builds a helical screw thread: union it for a screw, subtract it for a threaded hole.</p>
   </div>
 </section>
 
@@ -400,12 +402,12 @@ python3 -m venv .venv
           <li><b>Labels and pick</b> <span>click a face, copy a real selector</span></li>
           <li><b>M14 Validate and scene diff</b> <span>prove the rebuild is correct</span></li>
           <li><b>M15 Incremental rebuild</b> <span>regenerate only what a knob affects</span></li>
+          <li><b>M16 Shape leverage</b> <span>patterns, mirror, shell, holes, sweep, loft, threads</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M16 Shape leverage</b> <span>patterns, mirror, shell, sweep, loft, holes, threads</span></li>
           <li><b>M17 Sketch completeness</b> <span>arcs, splines, more constraints</span></li>
           <li><b>M18 Interoperability</b> <span>mesh import, DXF/SVG, STEP</span></li>
           <li><b>M19 Assemblies and drawings</b></li>
@@ -421,7 +423,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">agcad</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/agcad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/agcad">sy-borg/agcad</a></div>
-      <div><small>Status</small>Milestone 15</div>
+      <div><small>Status</small>Milestone 16</div>
     </div>
   </div>
 </footer>

@@ -30,7 +30,7 @@ use crate::Error;
 const PRECISION: i32 = 8;
 
 /// Merge raw loops into non-overlapping contours using the even-odd rule.
-fn normalize(loops: &[Vec<[f64; 2]>]) -> Result<Polygons, Error> {
+pub(crate) fn normalize(loops: &[Vec<[f64; 2]>]) -> Result<Polygons, Error> {
     let paths: PathsD = loops
         .iter()
         .map(|lp| lp.iter().map(|p| Point::new(p[0], p[1])).collect::<PathD>())

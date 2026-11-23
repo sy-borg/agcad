@@ -45,7 +45,11 @@ pub const DOCUMENT_FORMAT: &str = "agcad-document";
 ///
 /// 2: `add_sketch` may carry a `plane` (a reader that ignores it would
 /// silently place the sketch on XY, so the change is not downgrade-safe).
-pub const DOCUMENT_VERSION: u32 = 2;
+///
+/// 3: M16 shape-leverage commands (`linear_pattern`, `circular_pattern`,
+/// `mirror`, `shell`, `hole`, `sweep`, `loft`, `thread`). Older readers fail
+/// to parse them, so the change is not downgrade-safe either.
+pub const DOCUMENT_VERSION: u32 = 3;
 
 pub type DocId = u64;
 pub type EntityId = u64;
@@ -521,6 +525,190 @@ pub enum Command {
         #[serde(default)]
         color: Option<Rgba>,
     },
+
+    /// Repeat solids along a straight line, in world space. `count` includes
+    /// the originals, so `count: 4` creates three copies per source. Copies
+    /// are new entities with the source's mesh and color (unless overridden)
+    /// and are kept in sync with the source while the program replays.
+    LinearPattern {
+        doc: DocId,
+        /// Source solids to repeat. Sketches are display-only: extrude first.
+        entities: Vec<EntityId>,
+        /// Direction of the repetition (non-zero). May be expressions.
+        direction: SVec3,
+        /// Distance between adjacent copies (mm). May be an expression.
+        spacing: Scalar,
+        /// Number of instances including the original (≥ 2).
+        count: u32,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
+    /// Repeat solids around an axis, in world space. `count` includes the
+    /// originals, and the copies are spread evenly over `angle_deg` (default
+    /// 360): step = angle / count. Copies rotate with the pattern.
+    CircularPattern {
+        doc: DocId,
+        entities: Vec<EntityId>,
+        /// A point on the axis (default: the world origin). May be expressions.
+        #[serde(default)]
+        center: Option<SVec3>,
+        /// Axis direction (default: +Z). Non-zero.
+        #[serde(default)]
+        axis: Option<[f64; 3]>,
+        /// Total angle covered by the pattern (default 360). May be an
+        /// expression.
+        #[serde(default)]
+        angle_deg: Option<Scalar>,
+        count: u32,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
+    /// Mirror solids across a plane, in world space. Creates one reflected
+    /// copy per source (the originals are kept).
+    Mirror {
+        doc: DocId,
+        entities: Vec<EntityId>,
+        plane: MirrorPlane,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
+    /// Hollow a solid in place, leaving a wall of `thickness` around every
+    /// face. `open` lists outward face normals (world space) to leave open,
+    /// so `[[0,0,1]]` turns a closed hollow box into a cup. The entity keeps
+    /// its id, name, color and transform; only the mesh changes. Replays
+    /// parametrically.
+    Shell {
+        doc: DocId,
+        entity: EntityId,
+        /// Wall thickness (mm). May be an expression; must be > 0.
+        thickness: Scalar,
+        /// Outward normals of faces to remove (e.g. `[[0,0,1]]` for the top).
+        /// Omit for a closed hollow body.
+        #[serde(default)]
+        open: Vec<[f64; 3]>,
+        /// Angular tolerance when matching `open` normals, in degrees
+        /// (default 1).
+        #[serde(default)]
+        angle_tol_deg: Option<f64>,
+    },
+
+    /// Drill a hole into a solid, in place. `center` is a point on the entry
+    /// surface and `normal` points out of the material; the hole runs along
+    /// `-normal`. `counterbore_*` adds a larger cylindrical recess and
+    /// `countersink_angle_deg` turns the recess into a cone, so the usual
+    /// screw seats are one command. The entity keeps its id; only the mesh
+    /// changes.
+    Hole {
+        doc: DocId,
+        entity: EntityId,
+        /// A point on the entry surface (world space). May be expressions.
+        center: SVec3,
+        /// Outward surface normal at the entry point (default +Z).
+        #[serde(default = "default_up")]
+        normal: [f64; 3],
+        /// Hole diameter (mm). May be an expression.
+        diameter: Scalar,
+        /// Depth into the material (mm). Omit or use a negative value for a
+        /// through-hole (it cuts past the far side).
+        #[serde(default)]
+        depth: Option<Scalar>,
+        /// Counterbore / countersink outer diameter (mm).
+        #[serde(default)]
+        counterbore_diameter: Option<Scalar>,
+        /// Counterbore depth (mm). Required for a cylindrical recess.
+        #[serde(default)]
+        counterbore_depth: Option<Scalar>,
+        /// Included countersink angle in degrees (e.g. 82 or 90). When set,
+        /// `counterbore_diameter` becomes the cone's surface diameter.
+        #[serde(default)]
+        countersink_angle_deg: Option<Scalar>,
+        /// Segments around the hole; omit for an automatic count.
+        #[serde(default)]
+        segments: Option<u32>,
+    },
+
+    /// Sweep a closed sketch profile along a 3D path into a printable solid.
+    /// The profile plane is re-oriented at every path station, so a sketch on
+    /// XY works for a path that runs in any direction. A helix path turns the
+    /// same command into a spring, a worm or a screw thread.
+    Sweep {
+        doc: DocId,
+        sketch: EntityId,
+        path: SweepPath,
+        /// Optional override for the number of stations along a helix. Ignored
+        /// for a polyline (its points are the stations).
+        #[serde(default)]
+        segments: Option<u32>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
+    /// Loft between two or more closed sketch profiles: a solid whose
+    /// cross-section morphs from one profile to the next. Each sketch must
+    /// have a single closed outer loop (holes are not lofted yet). Profiles
+    /// are resampled to a common vertex count and rotated to the best
+    /// correspondence, so a square can loft smoothly into a circle.
+    Loft {
+        doc: DocId,
+        /// At least two sketches, in order.
+        sketches: Vec<EntityId>,
+        /// Resampled vertices per profile (default 64, minimum 8).
+        #[serde(default)]
+        segments: Option<u32>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
+    /// A real screw thread as a standalone solid: a core cylinder with a
+    /// helical V-shaped ridge swept around it (axis +Z, base at `origin`).
+    /// Union it with a boss for a screw, or subtract it from a body for a
+    /// threaded hole. `flank_angle_deg` is the included angle between the two
+    /// flanks (default 60, the ISO metric value).
+    Thread {
+        doc: DocId,
+        /// Major (crest) diameter (mm). May be an expression.
+        major_diameter: Scalar,
+        /// Minor (root) diameter (mm); default is the ISO metric
+        /// `major - 1.0825 * pitch`.
+        #[serde(default)]
+        minor_diameter: Option<Scalar>,
+        /// Distance between adjacent threads (mm).
+        pitch: Scalar,
+        /// Threaded length along +Z (mm).
+        length: Scalar,
+        #[serde(default)]
+        hand: Hand,
+        /// Included angle between the flanks (degrees, default 60).
+        #[serde(default)]
+        flank_angle_deg: Option<Scalar>,
+        /// Stations around one full turn (default 48).
+        #[serde(default)]
+        segments_per_turn: Option<u32>,
+        /// Base point of the thread axis (default: the world origin).
+        #[serde(default)]
+        origin: Option<SVec3>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+}
+
+fn default_up() -> [f64; 3] {
+    [0.0, 0.0, 1.0]
 }
 
 /// Which sharp edges a fillet/chamfer applies to, in **world space**.
@@ -613,7 +801,8 @@ pub struct EdgeSelector {
 pub struct SolidValidation {
     pub entity: EntityId,
     pub name: String,
-    /// `box`, `sphere`, `cylinder`, `boolean`, `extrude` or `revolve`.
+    /// `box`, `sphere`, `cylinder`, `boolean`, `extrude`, `revolve`, `sweep`,
+    /// `loft`, `thread`, `pattern` or `mirror`.
     pub kind: String,
     /// Watertight, manifold, no self-intersections, positive volume and (when
     /// a threshold was requested) not thinner than it.
@@ -701,7 +890,8 @@ pub struct ValidationTotals {
 pub struct EntitySummary {
     pub entity: EntityId,
     pub name: String,
-    /// `box`, `sphere`, `cylinder`, `boolean`, `sketch`, `extrude` or `revolve`.
+    /// `box`, `sphere`, `cylinder`, `boolean`, `sketch`, `extrude`, `revolve`,
+    /// `sweep`, `loft`, `thread`, `pattern` or `mirror`.
     pub kind: String,
     pub signature: String,
     /// Signed world volume (mm³); `None` for sketches.
@@ -761,6 +951,79 @@ impl std::fmt::Display for BooleanOp {
     }
 }
 
+/// Which way a helix or thread winds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Hand {
+    #[default]
+    Right,
+    Left,
+}
+
+impl Hand {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Left => "left",
+        }
+    }
+
+    /// +1 for a right-hand helix, -1 for a left-hand one.
+    pub fn sign(&self) -> f64 {
+        match self {
+            Self::Right => 1.0,
+            Self::Left => -1.0,
+        }
+    }
+}
+
+/// The plane a [`Command::Mirror`] reflects across, in world space.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorPlane {
+    /// A standard datum plane, optionally offset along its normal. The
+    /// `xy` plane is Z = offset, `xz` is Y = -offset, `yz` is X = offset
+    /// (the same frames sketches use).
+    Datum {
+        plane: DatumPlane,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<Scalar>,
+    },
+    /// Any plane given by an origin and a non-zero normal.
+    Custom { origin: SVec3, normal: [f64; 3] },
+}
+
+/// The path a [`Command::Sweep`] follows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SweepPath {
+    /// A polyline through world-space points. `closed` joins the last point
+    /// back to the first.
+    Polyline {
+        points: Vec<SVec3>,
+        #[serde(default)]
+        closed: bool,
+    },
+    /// A helix around `axis` through `origin`. The path starts at angle 0
+    /// (on the frame's in-plane X axis) and advances `pitch` along the axis
+    /// per turn.
+    Helix {
+        #[serde(default)]
+        origin: Option<SVec3>,
+        /// Axis direction (default +Z). Non-zero.
+        #[serde(default)]
+        axis: Option<[f64; 3]>,
+        radius: Scalar,
+        pitch: Scalar,
+        turns: Scalar,
+        #[serde(default)]
+        hand: Hand,
+        /// Stations per full turn. Omit for an automatic count.
+        #[serde(default)]
+        segments_per_turn: Option<u32>,
+    },
+}
+
 /// Result of a successfully executed [`Command`]. Externally tagged:
 /// `{"entity_created":{"doc":1,"entity":2,"mesh":{...}}}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -780,6 +1043,27 @@ pub enum CommandResult {
         edges: u32,
         volume: f64,
         mesh: Mesh,
+    },
+    /// Several entities created at once (linear/circular patterns and
+    /// mirrors). `entities` lists the copies in creation order.
+    EntitiesCreated { doc: DocId, entities: Vec<EntityId>, tris: usize },
+    /// A solid was reshaped in place without an edge count (shell, hole).
+    /// `volume` is the new world-space volume and `mesh` the new local mesh.
+    EntityReshaped {
+        doc: DocId,
+        entity: EntityId,
+        volume: f64,
+        tris: usize,
+        mesh: Mesh,
+    },
+    /// A solid was built from profiles or a path (sweep, loft, thread).
+    /// `kind` is `sweep`, `loft` or `thread`.
+    SolidBuilt {
+        doc: DocId,
+        entity: EntityId,
+        kind: String,
+        volume: f64,
+        tris: usize,
     },
     Transformed { doc: DocId, entity: EntityId },
     Deleted { doc: DocId, entity: EntityId },

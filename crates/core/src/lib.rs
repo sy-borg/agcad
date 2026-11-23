@@ -20,15 +20,21 @@ pub mod edges;
 pub mod expr;
 pub mod fillet;
 pub mod geo;
+pub mod hole;
+pub mod loft;
 pub mod mat4;
+pub mod pattern;
 pub mod pick;
 pub mod plane;
 mod rebuild;
 pub mod render;
+pub mod shell;
 pub mod sketch;
 pub mod solid;
 pub mod stl;
+pub mod sweep;
 pub mod threemf;
+pub mod thread;
 pub mod validate;
 
 use std::collections::BTreeMap;
@@ -36,10 +42,10 @@ use std::fmt;
 
 use agcad_protocol::{
     Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EdgeFilter,
-    EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, ParamInfo, ParameterChange,
-    Rgba, RevolveAxis, SavedParameter, Scalar, SketchElement, SketchPlane, SketchValidation,
-    SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION,
-    PROTOCOL_VERSION, SERVER_NAME,
+    EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, MirrorPlane,
+    ParamInfo, ParameterChange, Rgba, RevolveAxis, SavedParameter, Scalar, SketchElement,
+    SketchPlane, SketchValidation, SolidValidation, SourceDoc, SVec3, ValidationTotals,
+    Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -149,6 +155,21 @@ pub enum Shape {
         axis: RevolveAxis,
         segments: Option<u32>,
     },
+    /// A solid carried along a path (polyline or helix).
+    Sweep {
+        sketch: EntityId,
+    },
+    /// A solid lofted through several sketch profiles.
+    Loft {
+        sketches: Vec<EntityId>,
+    },
+    /// A standalone screw thread (axis +Z from its origin).
+    Thread,
+    /// A linear/circular pattern copy or a mirrored copy of another solid.
+    Copy {
+        source: EntityId,
+        kind: pattern::CopyKind,
+    },
 }
 
 impl Shape {
@@ -162,6 +183,10 @@ impl Shape {
             Self::Sketch { .. } => "sketch",
             Self::Extrude { .. } => "extrude",
             Self::Revolve { .. } => "revolve",
+            Self::Sweep { .. } => "sweep",
+            Self::Loft { .. } => "loft",
+            Self::Thread => "thread",
+            Self::Copy { kind, .. } => kind.label(),
         }
     }
 }
@@ -472,6 +497,14 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::DeleteSketchElement { doc: d, .. }
         | Command::Extrude { doc: d, .. }
         | Command::Revolve { doc: d, .. }
+        | Command::LinearPattern { doc: d, .. }
+        | Command::CircularPattern { doc: d, .. }
+        | Command::Mirror { doc: d, .. }
+        | Command::Shell { doc: d, .. }
+        | Command::Hole { doc: d, .. }
+        | Command::Sweep { doc: d, .. }
+        | Command::Loft { doc: d, .. }
+        | Command::Thread { doc: d, .. }
         | Command::SetParameter { doc: d, .. }
         | Command::RemoveParameter { doc: d, .. }
         | Command::GetParameters { doc: d }
@@ -585,7 +618,15 @@ impl Engine {
             | Command::MoveSketchPoint { .. }
             | Command::DeleteSketchElement { .. }
             | Command::Extrude { .. }
-            | Command::Revolve { .. } => {
+            | Command::Revolve { .. }
+            | Command::LinearPattern { .. }
+            | Command::CircularPattern { .. }
+            | Command::Mirror { .. }
+            | Command::Shell { .. }
+            | Command::Hole { .. }
+            | Command::Sweep { .. }
+            | Command::Loft { .. }
+            | Command::Thread { .. } => {
                 let doc = doc_of(&command).expect("modeling commands always carry a doc");
                 let d = self.doc_mut(doc)?;
                 d.checkpoint();
@@ -1377,6 +1418,14 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::DeleteSketchElement { doc, .. }
         | Command::Extrude { doc, .. }
         | Command::Revolve { doc, .. }
+        | Command::LinearPattern { doc, .. }
+        | Command::CircularPattern { doc, .. }
+        | Command::Mirror { doc, .. }
+        | Command::Shell { doc, .. }
+        | Command::Hole { doc, .. }
+        | Command::Sweep { doc, .. }
+        | Command::Loft { doc, .. }
+        | Command::Thread { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::GetParameters { doc }
@@ -1780,17 +1829,322 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             Ok(CommandResult::SolidCreated { doc: *doc, entity: id, sketch: *sketch, volume, tris })
         },
 
+        // --- shape leverage ------------------------------------------------
+
+        Command::LinearPattern { doc, entities, direction, spacing, count, name, color } => {
+            let direction = d.resolve3(direction)?;
+            let spacing = d.resolve(spacing)?;
+            let count = validate_count(*count)?;
+            if direction.iter().all(|v| v.abs() < 1e-12) {
+                return Err(Error::Invalid(
+                    "linear_pattern direction must be a non-zero vector (e.g. [1,0,0])".into(),
+                ));
+            }
+            if !spacing.is_finite() {
+                return Err(Error::Invalid("linear_pattern spacing must be finite".into()));
+            }
+            let dir = normalize3(direction);
+            let mut created = Vec::new();
+            for &source in entities {
+                let e = d.entities.get(&source).ok_or(Error::UnknownEntity { doc: *doc, entity: source })?;
+                ensure_solid(e, "linear_pattern")?;
+                for i in 1..count {
+                    let kind = pattern::CopyKind::Linear { direction: dir, spacing, index: i };
+                    let id = create_copy(d, *doc, source, kind, name.clone(), *color)?;
+                    created.push(id);
+                }
+            }
+            Ok(pattern_result(*doc, d, created))
+        },
+
+        Command::CircularPattern { doc, entities, center, axis, angle_deg, count, name, color } => {
+            let center = match center {
+                Some(c) => d.resolve3(c)?,
+                None => [0.0; 3],
+            };
+            let axis = axis.map(normalize3).unwrap_or([0.0, 0.0, 1.0]);
+            if axis.iter().all(|v| v.abs() < 1e-12) {
+                return Err(Error::Invalid(
+                    "circular_pattern axis must be a non-zero vector (e.g. [0,0,1])".into(),
+                ));
+            }
+            let angle = match angle_deg {
+                Some(v) => d.resolve(v)?,
+                None => 360.0,
+            };
+            if !angle.is_finite() || angle == 0.0 {
+                return Err(Error::Invalid(
+                    "circular_pattern angle_deg must be a finite non-zero angle".into(),
+                ));
+            }
+            let count = validate_count(*count)?;
+            let step = angle / count as f64;
+            let mut created = Vec::new();
+            for &source in entities {
+                let e = d.entities.get(&source).ok_or(Error::UnknownEntity { doc: *doc, entity: source })?;
+                ensure_solid(e, "circular_pattern")?;
+                for i in 1..count {
+                    let kind = pattern::CopyKind::Circular { center, axis, step_deg: step, index: i };
+                    let id = create_copy(d, *doc, source, kind, name.clone(), *color)?;
+                    created.push(id);
+                }
+            }
+            Ok(pattern_result(*doc, d, created))
+        },
+
+        Command::Mirror { doc, entities, plane, name, color } => {
+            let (origin, normal) = resolve_mirror_plane(d, plane)?;
+            let mut created = Vec::new();
+            for &source in entities {
+                let e = d.entities.get(&source).ok_or(Error::UnknownEntity { doc: *doc, entity: source })?;
+                ensure_solid(e, "mirror")?;
+                let kind = pattern::CopyKind::Mirror { origin, normal };
+                let id = create_copy(d, *doc, source, kind, name.clone(), *color)?;
+                created.push(id);
+            }
+            Ok(pattern_result(*doc, d, created))
+        },
+
+        Command::Shell { doc, entity, thickness, open, angle_tol_deg } => {
+            let thickness = d.resolve(thickness)?;
+            shell_solid(d, *doc, *entity, thickness, open, angle_tol_deg.unwrap_or(1.0))
+        },
+
+        Command::Hole {
+            doc,
+            entity,
+            center,
+            normal,
+            diameter,
+            depth,
+            counterbore_diameter,
+            counterbore_depth,
+            countersink_angle_deg,
+            segments,
+        } => {
+            let spec = hole::HoleSpec {
+                center: d.resolve3(center)?,
+                normal: *normal,
+                diameter: d.resolve(diameter)?,
+                depth: depth.as_ref().map(|v| d.resolve(v)).transpose()?,
+                counterbore_diameter: counterbore_diameter
+                    .as_ref()
+                    .map(|v| d.resolve(v))
+                    .transpose()?,
+                counterbore_depth: counterbore_depth.as_ref().map(|v| d.resolve(v)).transpose()?,
+                countersink_angle_deg: countersink_angle_deg
+                    .as_ref()
+                    .map(|v| d.resolve(v))
+                    .transpose()?,
+                segments: *segments,
+            };
+            hole_solid(d, *doc, *entity, spec)
+        },
+
+        Command::Sweep { doc, sketch, path, segments, name, color } => {
+            let (loops, placement) = sketch_profile(d, *doc, *sketch)?;
+            let (translation, rotation_deg, scale) = placement;
+            // The sketch only supplies the profile and its in-plane X; the
+            // path is world-space and re-orients the profile at every station.
+            let scaled: Vec<Vec<[f64; 2]>> = loops
+                .iter()
+                .map(|lp| lp.iter().map(|p| [p[0] * scale[0], p[1] * scale[1]]).collect())
+                .collect();
+            let path = sweep::path_points(path, *segments, |v| d.resolve(v))?;
+            let sketch_transform = mat4::compose(translation, rotation_deg, [1.0; 3]);
+            let x_ref = mat4::transform_direction(&sketch_transform, [1.0, 0.0, 0.0]);
+            let key = rebuild::sweep_key(&scaled, x_ref, &path);
+            let cached = d.cached_geometry(key, |_| {
+                let world = sweep::sweep(&scaled, x_ref, &path)?;
+                let (mesh, center) = recenter(&world);
+                Ok(rebuild::CachedGeometry {
+                    mesh,
+                    volume: Some(fillet::signed_volume(&world)),
+                    edges: None,
+                    center: Some(center),
+                })
+            })?;
+            let center = cached.center.unwrap_or([0.0; 3]);
+            let volume = cached.volume.unwrap_or(0.0);
+            let tris = cached.mesh.indices.len() / 3;
+            let id = d.next_entity();
+            d.entities.insert(
+                id,
+                Entity {
+                    id,
+                    name: name.clone().unwrap_or_else(|| "sweep".into()),
+                    shape: Shape::Sweep { sketch: *sketch },
+                    mesh: cached.mesh,
+                    translation: center,
+                    rotation_deg: [0.0; 3],
+                    scale: [1.0; 3],
+                    color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                    geom_key: key,
+                },
+            );
+            Ok(CommandResult::SolidBuilt {
+                doc: *doc,
+                entity: id,
+                kind: "sweep".into(),
+                volume,
+                tris,
+            })
+        },
+
+        Command::Loft { doc, sketches, segments, name, color } => {
+            if sketches.len() < 2 {
+                return Err(Error::Invalid(
+                    "loft needs at least 2 sketches (hint: sketches=[a, b])".into(),
+                ));
+            }
+            let mut rings = Vec::with_capacity(sketches.len());
+            for &sketch in sketches {
+                let (loops, (translation, rotation_deg, scale)) = sketch_profile(d, *doc, sketch)?;
+                if loops.len() != 1 {
+                    return Err(Error::Invalid(format!(
+                        "loft sketch {sketch} has {} closed loops; loft supports one outer loop per \
+                         sketch (hint: remove holes or split the sketch)",
+                        loops.len()
+                    )));
+                }
+                let m = mat4::compose(translation, rotation_deg, scale);
+                let ring: Vec<Vec3> = loops[0]
+                    .iter()
+                    .map(|p| {
+                        let w = mat4::transform_point(&m, [p[0] as f32, p[1] as f32, 0.0]);
+                        [w[0] as f64, w[1] as f64, w[2] as f64]
+                    })
+                    .collect();
+                rings.push(ring);
+            }
+            let segments = segments.unwrap_or(64).clamp(8, 512);
+            let key = rebuild::loft_key(&rings, segments);
+            let cached = d.cached_geometry(key, |_| {
+                let world = loft::loft(&rings, segments)?;
+                let (mesh, center) = recenter(&world);
+                Ok(rebuild::CachedGeometry {
+                    mesh,
+                    volume: Some(fillet::signed_volume(&world)),
+                    edges: None,
+                    center: Some(center),
+                })
+            })?;
+            let center = cached.center.unwrap_or([0.0; 3]);
+            let volume = cached.volume.unwrap_or(0.0);
+            let tris = cached.mesh.indices.len() / 3;
+            let id = d.next_entity();
+            d.entities.insert(
+                id,
+                Entity {
+                    id,
+                    name: name.clone().unwrap_or_else(|| "loft".into()),
+                    shape: Shape::Loft { sketches: sketches.clone() },
+                    mesh: cached.mesh,
+                    translation: center,
+                    rotation_deg: [0.0; 3],
+                    scale: [1.0; 3],
+                    color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                    geom_key: key,
+                },
+            );
+            Ok(CommandResult::SolidBuilt {
+                doc: *doc,
+                entity: id,
+                kind: "loft".into(),
+                volume,
+                tris,
+            })
+        },
+
+        Command::Thread {
+            doc,
+            major_diameter,
+            minor_diameter,
+            pitch,
+            length,
+            hand,
+            flank_angle_deg,
+            segments_per_turn,
+            origin,
+            name,
+            color,
+        } => {
+            let major = d.resolve(major_diameter)?;
+            let pitch = d.resolve(pitch)?;
+            let minor = match minor_diameter {
+                Some(v) => d.resolve(v)?,
+                None => thread::default_minor(major, pitch),
+            };
+            let spec = thread::ThreadSpec {
+                major_diameter: major,
+                minor_diameter: minor,
+                pitch,
+                length: d.resolve(length)?,
+                hand: *hand,
+                flank_angle_deg: match flank_angle_deg {
+                    Some(v) => d.resolve(v)?,
+                    None => 60.0,
+                },
+                segments_per_turn: segments_per_turn.unwrap_or(48),
+                origin: match origin {
+                    Some(o) => d.resolve3(o)?,
+                    None => [0.0; 3],
+                },
+            };
+            let key = rebuild::thread_key(&spec);
+            let cached = d.cached_geometry(key, |_| {
+                let world = thread::thread(&spec)?;
+                let (mesh, center) = recenter(&world);
+                Ok(rebuild::CachedGeometry {
+                    mesh,
+                    volume: Some(fillet::signed_volume(&world)),
+                    edges: None,
+                    center: Some(center),
+                })
+            })?;
+            let center = cached.center.unwrap_or([0.0; 3]);
+            let volume = cached.volume.unwrap_or(0.0);
+            let tris = cached.mesh.indices.len() / 3;
+            let id = d.next_entity();
+            d.entities.insert(
+                id,
+                Entity {
+                    id,
+                    name: name.clone().unwrap_or_else(|| "thread".into()),
+                    shape: Shape::Thread,
+                    mesh: cached.mesh,
+                    translation: center,
+                    rotation_deg: [0.0; 3],
+                    scale: [1.0; 3],
+                    color: color.unwrap_or([0.72, 0.74, 0.78, 1.0]),
+                    geom_key: key,
+                },
+            );
+            Ok(CommandResult::SolidBuilt {
+                doc: *doc,
+                entity: id,
+                kind: "thread".into(),
+                volume,
+                tris,
+            })
+        },
+
         Command::Delete { doc, entity } => {
             if d.entities.remove(entity).is_none() {
                 return Err(Error::UnknownEntity { doc: *doc, entity: *entity });
             }
-            // Deleting a sketch also removes the solids built from it —
-            // otherwise replay would hit a dangling sketch reference.
+            // Deleting a sketch also removes the solids built from it, and
+            // deleting a solid removes its pattern/mirror copies — otherwise
+            // replay would hit a dangling reference.
             let dependents: Vec<EntityId> = d
                 .entities
                 .iter()
-                .filter(|(_, e)| match e.shape {
-                    Shape::Extrude { sketch, .. } | Shape::Revolve { sketch, .. } => sketch == *entity,
+                .filter(|(_, e)| match &e.shape {
+                    Shape::Extrude { sketch, .. }
+                    | Shape::Revolve { sketch, .. }
+                    | Shape::Sweep { sketch } => *sketch == *entity,
+                    Shape::Loft { sketches } => sketches.contains(entity),
+                    Shape::Copy { source, .. } => source == entity,
                     _ => false,
                 })
                 .map(|(id, _)| *id)
@@ -2062,9 +2416,223 @@ fn sketch_result(outcome: SketchOutcome) -> CommandResult {
     }
 }
 
+/// Build a pattern/mirror result from the copies just created.
+fn pattern_result(doc: DocId, d: &Document, created: Vec<EntityId>) -> CommandResult {
+    let tris = created
+        .iter()
+        .filter_map(|id| d.entities.get(id))
+        .map(|e| e.mesh.indices.len() / 3)
+        .sum();
+    CommandResult::EntitiesCreated { doc, entities: created, tris }
+}
+
+fn validate_count(count: u32) -> Result<u32> {
+    if !(2..=1000).contains(&count) {
+        return Err(Error::Invalid(format!(
+            "pattern count must be between 2 and 1000, and includes the original (got {count})"
+        )));
+    }
+    Ok(count)
+}
+
+fn normalize3(v: Vec3) -> Vec3 {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len < 1e-12 { [0.0; 3] } else { [v[0] / len, v[1] / len, v[2] / len] }
+}
+
+fn ensure_solid(entity: &Entity, what: &str) -> Result<()> {
+    if matches!(entity.shape, Shape::Sketch { .. }) {
+        return Err(Error::Invalid(format!(
+            "entity {} is a sketch; {what} repeats printable solids (hint: extrude the sketch \
+             first)",
+            entity.id
+        )));
+    }
+    if entity.mesh.indices.is_empty() {
+        return Err(Error::Invalid(format!(
+            "entity {} has no geometry to {what}",
+            entity.id
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_mirror_plane(d: &Document, plane: &MirrorPlane) -> Result<(Vec3, Vec3)> {
+    match plane {
+        MirrorPlane::Datum { plane, offset } => {
+            let offset = match offset {
+                Some(v) => d.resolve(v)?,
+                None => 0.0,
+            };
+            let frame = plane::datum_frame(*plane, offset)?;
+            Ok((frame.origin, frame.normal))
+        },
+        MirrorPlane::Custom { origin, normal } => {
+            let origin = d.resolve3(origin)?;
+            let frame = plane::custom_frame(origin, *normal, None)?;
+            Ok((frame.origin, frame.normal))
+        },
+    }
+}
+
+/// Create one pattern/mirror copy and attach it to the document.
+fn create_copy(
+    d: &mut Document,
+    doc: DocId,
+    source: EntityId,
+    kind: pattern::CopyKind,
+    name: Option<String>,
+    color: Option<Rgba>,
+) -> Result<EntityId> {
+    let (geometry, key, source_name, source_color) = {
+        let e = d.entities.get(&source).ok_or(Error::UnknownEntity { doc, entity: source })?;
+        let geometry = pattern::build(e, &kind)?;
+        let key = rebuild::copy_key(
+            e.geom_key,
+            (e.translation, e.rotation_deg, e.scale),
+            kind,
+        );
+        (geometry, key, e.name.clone(), e.color)
+    };
+    let label = match kind {
+        pattern::CopyKind::Linear { index, .. } | pattern::CopyKind::Circular { index, .. } => index,
+        pattern::CopyKind::Mirror { .. } => 0,
+    };
+    let name = match name {
+        Some(base) if label > 0 => format!("{base} {label}"),
+        Some(base) => base,
+        None if label > 0 => format!("{source_name} {label}"),
+        None => format!("{source_name} {}", kind.label()),
+    };
+    let id = d.next_entity();
+    d.entities.insert(
+        id,
+        Entity {
+            id,
+            name,
+            shape: Shape::Copy { source, kind },
+            mesh: geometry.mesh,
+            translation: geometry.translation,
+            rotation_deg: geometry.rotation_deg,
+            scale: geometry.scale,
+            color: color.unwrap_or(source_color),
+            geom_key: key,
+        },
+    );
+    Ok(id)
+}
+
+/// Map a world-space result back into an entity's local frame.
+fn localize_world(transform: &Mat4, world: &Mesh) -> Result<Mesh> {
+    let inv = mat4::inverse(transform).ok_or_else(|| {
+        Error::Invalid(
+            "the entity has a singular transform (a zero scale component); cannot map the result \
+             back into its local frame"
+                .into(),
+        )
+    })?;
+    let positions: Vec<[f32; 3]> = world
+        .positions
+        .iter()
+        .map(|&p| mat4::transform_point(&inv, p))
+        .collect();
+    Ok(boolean::crease_mesh(&positions, &world.indices))
+}
+
+fn shell_solid(
+    d: &mut Document,
+    doc: DocId,
+    entity: EntityId,
+    thickness: f64,
+    open: &[[f64; 3]],
+    angle_tol_deg: f64,
+) -> Result<CommandResult> {
+    let (input_key, placement, transform) = editable_solid(d, doc, entity, "shell")?;
+    let open: Vec<Vec3> = open.to_vec();
+    let key = rebuild::shell_key(input_key, placement, thickness, &open, angle_tol_deg);
+    let cached = d.cached_geometry(key, |d| {
+        let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
+        let world = transform_mesh(&e.mesh, &transform);
+        let shaped = shell::shell(&world, thickness, &open, angle_tol_deg)?;
+        let volume = fillet::signed_volume(&shaped);
+        let mesh = localize_world(&transform, &shaped)?;
+        Ok(rebuild::CachedGeometry {
+            mesh,
+            volume: Some(volume),
+            edges: None,
+            center: None,
+        })
+    })?;
+    let volume = cached.volume.unwrap_or(0.0);
+    let tris = cached.mesh.indices.len() / 3;
+    let mesh = cached.mesh;
+    {
+        let e = d.entity_mut(entity)?;
+        e.mesh = mesh.clone();
+        e.geom_key = key;
+    }
+    Ok(CommandResult::EntityReshaped { doc, entity, volume, tris, mesh })
+}
+
+fn hole_solid(
+    d: &mut Document,
+    doc: DocId,
+    entity: EntityId,
+    spec: hole::HoleSpec,
+) -> Result<CommandResult> {
+    let (input_key, placement, transform) = editable_solid(d, doc, entity, "hole")?;
+    let key = rebuild::hole_key(input_key, placement, &spec);
+    let cached = d.cached_geometry(key, |d| {
+        let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
+        let world = transform_mesh(&e.mesh, &transform);
+        let shaped = hole::drill(&world, &spec)?;
+        let volume = fillet::signed_volume(&shaped);
+        let mesh = localize_world(&transform, &shaped)?;
+        Ok(rebuild::CachedGeometry {
+            mesh,
+            volume: Some(volume),
+            edges: None,
+            center: None,
+        })
+    })?;
+    let volume = cached.volume.unwrap_or(0.0);
+    let tris = cached.mesh.indices.len() / 3;
+    let mesh = cached.mesh;
+    {
+        let e = d.entity_mut(entity)?;
+        e.mesh = mesh.clone();
+        e.geom_key = key;
+    }
+    Ok(CommandResult::EntityReshaped { doc, entity, volume, tris, mesh })
+}
+
+/// Shared preflight for in-place world-space features.
+fn editable_solid(
+    d: &Document,
+    doc: DocId,
+    entity: EntityId,
+    what: &str,
+) -> Result<(rebuild::GeomKey, (Vec3, Vec3, Vec3), Mat4)> {
+    let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
+    if matches!(e.shape, Shape::Sketch { .. }) {
+        return Err(Error::Invalid(format!(
+            "entity {entity} is a sketch; {what} applies to printable solids (hint: extrude the \
+             sketch first)"
+        )));
+    }
+    if e.mesh.indices.is_empty() {
+        return Err(Error::Invalid(format!("entity {entity} has no geometry to {what}")));
+    }
+    Ok((
+        e.geom_key,
+        (e.translation, e.rotation_deg, e.scale),
+        e.transform(),
+    ))
+}
+
 /// Transform a local mesh into world space (f32 math, matching the
 /// viewer's model matrix convention).
-fn transform_mesh(mesh: &Mesh, m: &Mat4) -> Mesh {
+pub(crate) fn transform_mesh(mesh: &Mesh, m: &Mat4) -> Mesh {
     Mesh {
         positions: mesh.positions.iter().map(|&p| mat4::transform_point(m, p)).collect(),
         normals: mesh.normals.clone(),
@@ -2075,7 +2643,7 @@ fn transform_mesh(mesh: &Mesh, m: &Mat4) -> Mesh {
 /// Compute a mesh's bounding-box center and shift positions so the box is
 /// centered on the origin. Returns `(mesh, center)` where `center` is the
 /// translation that undoes the shift (i.e. the original center).
-fn recenter(mesh: &Mesh) -> (Mesh, Vec3) {
+pub(crate) fn recenter(mesh: &Mesh) -> (Mesh, Vec3) {
     let mut min = [f64::MAX; 3];
     let mut max = [f64::MIN; 3];
     for p in &mesh.positions {
@@ -2152,10 +2720,15 @@ fn add_entity(
         Shape::Boolean { .. } => unreachable!("boolean shapes are not tessellated here"),
         // Sketches are created by AddSketch (with solver state), never here.
         Shape::Sketch { .. } => unreachable!("sketch shapes are not tessellated here"),
-        // Solids are built by Extrude/Revolve, which create their entities
-        // directly with the kernel's mesh.
-        Shape::Extrude { .. } | Shape::Revolve { .. } => {
-            unreachable!("extrude/revolve shapes are not tessellated here")
+        // Solids are built by Extrude/Revolve/Sweep/Loft/Thread, which create
+        // their entities directly with the kernel's mesh.
+        Shape::Extrude { .. }
+        | Shape::Revolve { .. }
+        | Shape::Sweep { .. }
+        | Shape::Loft { .. }
+        | Shape::Thread
+        | Shape::Copy { .. } => {
+            unreachable!("derived solid shapes are not tessellated here")
         },
     };
     let entity = Entity {
@@ -2177,6 +2750,7 @@ fn add_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agcad_protocol::{Hand, SweepPath};
 
     fn engine() -> Engine {
         let mut e = Engine::new();
@@ -3927,7 +4501,7 @@ mod tests {
 
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"format\": \"agcad-document\""));
-        assert!(text.contains("\"version\": 2"));
+        assert!(text.contains("\"version\": 3"));
         assert!(text.contains("print('hi')"), "the embedded source is preserved");
         // The file is the program, not the geometry.
         assert!(!text.contains("\"mesh\""));
@@ -5048,5 +5622,455 @@ mod tests {
         cold_replay(&mut e);
         assert_eq!(scene_sig(&e), sig);
         assert_same_meshes(&meshes, &scene_meshes(&e));
+    }
+
+    // --- shape leverage (M16) -------------------------------------------------
+
+    fn entity_translation(e: &mut Engine, id: EntityId) -> Vec3 {
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                entities.iter().find(|x| x.id == id).unwrap().translation
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn entity_tris(e: &mut Engine, id: EntityId) -> usize {
+        entity_snapshot(e, id).mesh.indices.len() / 3
+    }
+
+    #[test]
+    fn patterns_and_mirror_create_the_expected_copies() {
+        let mut e = engine();
+        let source = add_box(&mut e, [10.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+
+        let mut copies_of = |result: CommandResult| match result {
+            CommandResult::EntitiesCreated { entities, tris, .. } => {
+                assert!(tris > 0);
+                entities
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+
+        // Linear: count includes the original, so 3 instances = 2 copies.
+        let line = copies_of(
+            e.execute(Command::LinearPattern {
+                doc: 1,
+                entities: vec![source],
+                direction: [num(1.0), num(0.0), num(0.0)],
+                spacing: num(20.0),
+                count: 3,
+                name: None,
+                color: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(line.len(), 2);
+        assert!((entity_translation(&mut e, line[0])[0] - 30.0).abs() < 1e-6);
+        assert!((entity_translation(&mut e, line[1])[0] - 50.0).abs() < 1e-6);
+        assert_eq!(entity_tris(&mut e, line[0]), entity_tris(&mut e, source));
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                assert_eq!(entities.iter().find(|x| x.id == line[0]).unwrap().name, "box 1");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Circular: the source sits 10 mm out on +X, so quarter turns land on
+        // +Y, -X and -Y with no change in radius.
+        let circular = copies_of(
+            e.execute(Command::CircularPattern {
+                doc: 1,
+                entities: vec![source],
+                center: Some(vec3(0.0)),
+                axis: Some([0.0, 0.0, 1.0]),
+                angle_deg: Some(num(360.0)),
+                count: 4,
+                name: Some("hole".into()),
+                color: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(circular.len(), 3);
+        let expected = [[0.0, 10.0, 0.0], [-10.0, 0.0, 0.0], [0.0, -10.0, 0.0]];
+        for (id, want) in circular.iter().zip(expected) {
+            let got = entity_translation(&mut e, *id);
+            for k in 0..3 {
+                assert!((got[k] - want[k]).abs() < 1e-4, "{id}: {got:?} vs {want:?}");
+            }
+        }
+
+        // Mirror across the YZ plane: the reflection lands at -10 on X.
+        let mirrored = copies_of(
+            e.execute(Command::Mirror {
+                doc: 1,
+                entities: vec![source],
+                plane: MirrorPlane::Custom {
+                    origin: [num(0.0), num(0.0), num(0.0)],
+                    normal: [1.0, 0.0, 0.0],
+                },
+                name: None,
+                color: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(mirrored.len(), 1);
+        assert!((entity_translation(&mut e, mirrored[0])[0] + 10.0).abs() < 1e-4);
+        assert!(volume_of(&mut e, mirrored[0]) > 0.0, "mirrored winding is outward");
+
+        // The copies are ordinary solids: a union of the pattern is printable.
+        let union_id = union(&mut e, &[source, line[0], line[1]]);
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![union_id]), min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { ok, solids, .. } => {
+                assert!(ok, "{:?}", solids[0]);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn patterns_replay_with_the_program_and_follow_the_source() {
+        let mut e = engine();
+        set_param(&mut e, "w", 10.0);
+        let source = add_box_expr(
+            &mut e,
+            [0.0, 0.0, 0.0],
+            [Scalar::Expression("w".into()), num(10.0), num(10.0)],
+        );
+        e.execute(Command::LinearPattern {
+            doc: 1,
+            entities: vec![source],
+            direction: [num(1.0), num(0.0), num(0.0)],
+            spacing: num(20.0),
+            count: 3,
+            name: None,
+            color: None,
+        })
+        .unwrap();
+        let before = scene_sig(&e);
+
+        // A knob change replays the pattern; the copy at x = 20 grows with its
+        // source, and the ids stay stable.
+        set_param(&mut e, "w", 14.0);
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                let ids: Vec<u64> = entities.iter().map(|x| x.id).collect();
+                assert_eq!(ids, vec![1, 2, 3]);
+                let copy = entities.iter().find(|x| x.id == 2).unwrap();
+                let xs: Vec<f32> = copy.mesh.positions.iter().map(|p| p[0]).collect();
+                let width = xs.iter().cloned().fold(f32::MIN, f32::max)
+                    - xs.iter().cloned().fold(f32::MAX, f32::min);
+                assert!((width - 14.0).abs() < 1e-4, "copy width {width}");
+                assert!((copy.translation[0] - 20.0).abs() < 1e-6);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert_ne!(scene_sig(&e), before);
+
+        // Deleting the source takes its copies with it (no dangling refs on
+        // replay).
+        e.execute(Command::Delete { doc: 1, entity: source }).unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert!(entities.is_empty()),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let meshes = scene_meshes(&e);
+        cold_replay(&mut e);
+        assert_same_meshes(&meshes, &scene_meshes(&e));
+    }
+
+    #[test]
+    fn shell_and_hole_reshape_in_place_and_replay() {
+        let mut e = engine();
+        set_param(&mut e, "wall", 2.0);
+        let body = add_box(&mut e, [0.0, 0.0, 0.0], [40.0, 30.0, 20.0]);
+
+        let shelled = match e
+            .execute(Command::Shell {
+                doc: 1,
+                entity: body,
+                thickness: Scalar::Expression("wall".into()),
+                open: vec![[0.0, 0.0, 1.0]],
+                angle_tol_deg: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityReshaped { entity, volume, tris, .. } => {
+                assert_eq!(entity, body);
+                assert!(tris > 0);
+                volume
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        let expected = 40.0 * 30.0 * 20.0 - 36.0 * 26.0 * 18.0;
+        assert!((shelled - expected).abs() / expected < 0.01, "volume {shelled} vs {expected}");
+        // The entity keeps its id and gains a cavity, not a second entity.
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert_eq!(entities.len(), 1),
+            r => panic!("unexpected result {r:?}"),
+        }
+        match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(1.0) }).unwrap() {
+            CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // A hole in the floor, with a counterbore, cuts in place too.
+        let drilled = match e
+            .execute(Command::Hole {
+                doc: 1,
+                entity: body,
+                center: [num(0.0), num(0.0), num(-10.0)],
+                normal: [0.0, 0.0, -1.0],
+                diameter: num(6.0),
+                depth: Some(num(8.0)),
+                counterbore_diameter: Some(num(11.0)),
+                counterbore_depth: Some(num(2.0)),
+                countersink_angle_deg: None,
+                segments: Some(48),
+            })
+            .unwrap()
+        {
+            CommandResult::EntityReshaped { entity, volume, .. } => {
+                assert_eq!(entity, body);
+                volume
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(drilled < shelled, "the hole must remove material: {drilled} vs {shelled}");
+
+        // The wall knob replays shell, then the hole, in order.
+        set_param(&mut e, "wall", 3.0);
+        let thicker = volume_of(&mut e, body);
+        assert!(thicker > drilled, "a thicker wall leaves more material: {thicker} vs {drilled}");
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert_eq!(entities.len(), 1),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let sig = scene_sig(&e);
+        let meshes = scene_meshes(&e);
+        cold_replay(&mut e);
+        assert_eq!(scene_sig(&e), sig);
+        assert_same_meshes(&meshes, &scene_meshes(&e));
+
+        // A wall that cannot fit is an actionable error, not a broken solid.
+        let err = e
+            .execute(Command::Shell {
+                doc: 1,
+                entity: body,
+                thickness: num(20.0),
+                open: vec![],
+                angle_tol_deg: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("too thick"), "{err}");
+    }
+
+    #[test]
+    fn sweep_loft_and_thread_build_printable_solids() {
+        let mut e = engine();
+        set_param(&mut e, "r", 2.0);
+
+        let spring_profile = add_sketch(&mut e, "wire");
+        e.execute(Command::AddSketchCircle {
+            doc: 1,
+            sketch: spring_profile,
+            center: [num(0.0), num(0.0)],
+            radius: Scalar::Expression("r".into()),
+        })
+        .unwrap();
+        let spring = match e
+            .execute(Command::Sweep {
+                doc: 1,
+                sketch: spring_profile,
+                path: SweepPath::Helix {
+                    origin: None,
+                    axis: None,
+                    radius: num(12.0),
+                    pitch: num(8.0),
+                    turns: num(1.0),
+                    hand: Hand::Right,
+                    segments_per_turn: Some(16),
+                },
+                segments: None,
+                name: Some("spring".into()),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::SolidBuilt { entity, kind, volume, tris, .. } => {
+                assert_eq!(kind, "sweep");
+                assert!(volume > 0.0 && tris > 0);
+                entity
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![spring]), min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Loft a square into a circle 20 mm up.
+        let lower = add_sketch(&mut e, "square");
+        for (p1, p2) in [
+            ([-8.0, -8.0], [8.0, -8.0]),
+            ([8.0, -8.0], [8.0, 8.0]),
+            ([8.0, 8.0], [-8.0, 8.0]),
+            ([-8.0, 8.0], [-8.0, -8.0]),
+        ] {
+            e.execute(Command::AddSketchLine {
+                doc: 1,
+                sketch: lower,
+                p1: [num(p1[0]), num(p1[1])],
+                p2: [num(p2[0]), num(p2[1])],
+            })
+            .unwrap();
+        }
+        let upper = add_sketch_on(&mut e, "round", SketchPlane::Datum {
+            plane: agcad_protocol::DatumPlane::Xy,
+            offset: Some(num(20.0)),
+        });
+        e.execute(Command::AddSketchCircle {
+            doc: 1,
+            sketch: upper,
+            center: [num(0.0), num(0.0)],
+            radius: num(6.0),
+        })
+        .unwrap();
+        let lofted = match e
+            .execute(Command::Loft {
+                doc: 1,
+                sketches: vec![lower, upper],
+                segments: Some(32),
+                name: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::SolidBuilt { entity, kind, volume, .. } => {
+                assert_eq!(kind, "loft");
+                assert!(volume > 0.0);
+                entity
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![lofted]), min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // A real thread, and the radius knob replays the swept spring.
+        let threaded = match e
+            .execute(Command::Thread {
+                doc: 1,
+                major_diameter: num(8.0),
+                minor_diameter: None,
+                pitch: num(1.25),
+                length: num(10.0),
+                hand: Hand::Right,
+                flank_angle_deg: None,
+                segments_per_turn: Some(32),
+                origin: Some([num(0.0), num(0.0), num(0.0)]),
+                name: Some("m8".into()),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::SolidBuilt { entity, kind, volume, .. } => {
+                assert_eq!(kind, "thread");
+                assert!(volume > 0.0);
+                entity
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![threaded]), min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let before = scene_sig(&e);
+        set_param(&mut e, "r", 3.0);
+        assert_ne!(scene_sig(&e), before);
+        let meshes = scene_meshes(&e);
+        cold_replay(&mut e);
+        assert_same_meshes(&meshes, &scene_meshes(&e));
+    }
+
+    #[test]
+    fn shape_leverage_commands_round_trip_through_save_open() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "wall".into(),
+            value: num(2.0),
+            description: Some("case wall".into()),
+        })
+        .unwrap();
+        let body = add_box(&mut e, [0.0, 0.0, 0.0], [40.0, 30.0, 20.0]);
+        e.execute(Command::Shell {
+            doc: 1,
+            entity: body,
+            thickness: Scalar::Expression("wall".into()),
+            open: vec![[0.0, 0.0, 1.0]],
+            angle_tol_deg: None,
+        })
+        .unwrap();
+        e.execute(Command::Hole {
+            doc: 1,
+            entity: body,
+            center: [num(0.0), num(0.0), num(-10.0)],
+            normal: [0.0, 0.0, -1.0],
+            diameter: num(5.0),
+            depth: None,
+            counterbore_diameter: None,
+            counterbore_depth: None,
+            countersink_angle_deg: None,
+            segments: Some(32),
+        })
+        .unwrap();
+        e.execute(Command::LinearPattern {
+            doc: 1,
+            entities: vec![body],
+            direction: [num(1.0), num(0.0), num(0.0)],
+            spacing: num(50.0),
+            count: 2,
+            name: None,
+            color: None,
+        })
+        .unwrap();
+        e.execute(Command::Thread {
+            doc: 1,
+            major_diameter: num(6.0),
+            minor_diameter: None,
+            pitch: num(1.0),
+            length: num(8.0),
+            hand: Hand::Left,
+            flank_angle_deg: None,
+            segments_per_turn: Some(24),
+            origin: Some([num(0.0), num(0.0), num(20.0)]),
+            name: None,
+            color: None,
+        })
+        .unwrap();
+
+        let (p1, p1s) = temp_file("agcad_shape_leverage.agcad");
+        let (p2, p2s) = temp_file("agcad_shape_leverage_again.agcad");
+        e.execute(Command::SaveDocument { doc: 1, path: p1s.clone(), source: None }).unwrap();
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: p1s.clone(), name: None }).unwrap();
+        b.execute(Command::SaveDocument { doc: 1, path: p2s.clone(), source: None }).unwrap();
+        let first = std::fs::read(&p1).unwrap();
+        let second = std::fs::read(&p2).unwrap();
+        assert_eq!(first, second, "save -> open -> save must stay a no-op");
+        let text = String::from_utf8(first).unwrap();
+        for method in ["shell", "hole", "linear_pattern", "thread"] {
+            assert!(text.contains(&format!("\"method\": \"{method}\"")), "missing {method}");
+        }
+        // Geometry is rebuilt on open, so the entities and ids match.
+        let a = scene_sig(&e);
+        let bb = scene_sig(&b);
+        assert_eq!(a, bb);
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
     }
 }

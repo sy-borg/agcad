@@ -54,7 +54,7 @@ fn is_empty(m: &Manifold) -> bool {
 /// triangles, so duplicated vertices are welded by exact position first
 /// (our primitives emit face-local vertices; the generators are
 /// deterministic, so equal positions have equal bits).
-fn to_manifold(mesh: &Mesh) -> Result<Manifold, Error> {
+pub(crate) fn to_manifold(mesh: &Mesh) -> Result<Manifold, Error> {
     use std::collections::BTreeMap;
 
     let mut map: BTreeMap<[u32; 3], u64> = BTreeMap::new();
@@ -129,6 +129,15 @@ pub(crate) fn from_manifold(solid: &Manifold) -> Mesh {
 
 /// Faces meeting at less than this angle are shaded as one smooth surface.
 pub(crate) const CREASE_DEG: f64 = 35.0;
+
+/// Import a triangulated mesh through Manifold's strict mesher and return it
+/// with crease-aware normals. Use this to validate hand-built geometry (a
+/// loft, a thread ridge): a non-manifold or open result is a clear error
+/// instead of a broken scene entity.
+pub(crate) fn validate_mesh(mesh: &Mesh) -> Result<Mesh, Error> {
+    let solid = to_manifold(mesh)?;
+    Ok(from_manifold(&solid))
+}
 
 /// Rebuild a mesh with per-corner normals that only average faces within
 /// [`CREASE_DEG`] of the corner's own triangle. Used after a world-space

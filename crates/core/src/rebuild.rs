@@ -20,6 +20,7 @@
 use agcad_protocol::{BooleanOp, EdgeFilter, Mesh, RevolveAxis, SketchElement, Vec3};
 
 use crate::fillet;
+use crate::pattern::CopyKind;
 
 /// Content key of one geometry result: two independent 64-bit hashes.
 /// Collisions would mean stale geometry, so this is deliberately 128 bits
@@ -300,8 +301,7 @@ pub fn reshape_key(
     kind: fillet::Kind,
     filter: &EdgeFilter,
     min_angle_deg: f64,
-) -> GeomKey {
-    let mut h = start("reshape");
+) -> GeomKey {    let mut h = start("reshape");
     h.key(input);
     h.placement(placement.0, placement.1, placement.2);
     let (name, size) = match kind {
@@ -352,6 +352,124 @@ pub fn reshape_key(
         },
         None => h.str("convex:any"),
     }
+    h.finish()
+}
+
+/// The placement and mesh of a pattern copy, or the reflected copy.
+pub fn copy_key(input: GeomKey, placement: (Vec3, Vec3, Vec3), kind: CopyKind) -> GeomKey {
+    let mut h = start("copy");
+    h.key(input);
+    h.placement(placement.0, placement.1, placement.2);
+    match kind {
+        CopyKind::Linear { direction, spacing, index } => {
+            h.str("linear");
+            h.vec3(direction);
+            h.f64(spacing);
+            h.u32(index);
+        },
+        CopyKind::Circular { center, axis, step_deg, index } => {
+            h.str("circular");
+            h.vec3(center);
+            h.vec3(axis);
+            h.f64(step_deg);
+            h.u32(index);
+        },
+        CopyKind::Mirror { origin, normal } => {
+            h.str("mirror");
+            h.vec3(origin);
+            h.vec3(normal);
+        },
+    }
+    h.finish()
+}
+
+pub fn shell_key(
+    input: GeomKey,
+    placement: (Vec3, Vec3, Vec3),
+    thickness: f64,
+    open: &[Vec3],
+    angle_tol_deg: f64,
+) -> GeomKey {
+    let mut h = start("shell");
+    h.key(input);
+    h.placement(placement.0, placement.1, placement.2);
+    h.f64(thickness);
+    h.f64(angle_tol_deg);
+    h.u64(open.len() as u64);
+    for n in open {
+        h.vec3(*n);
+    }
+    h.finish()
+}
+
+/// Hole inputs: the solid plus every resolved cutter dimension. The center and
+/// normal are world-space, so they belong in the key even though the mesh is
+/// local.
+pub fn hole_key(input: GeomKey, placement: (Vec3, Vec3, Vec3), spec: &crate::hole::HoleSpec) -> GeomKey {
+    let mut h = start("hole");
+    h.key(input);
+    h.placement(placement.0, placement.1, placement.2);
+    h.vec3(spec.center);
+    h.vec3(spec.normal);
+    h.f64(spec.diameter);
+    hole_opt(&mut h, spec.depth);
+    hole_opt(&mut h, spec.counterbore_diameter);
+    hole_opt(&mut h, spec.counterbore_depth);
+    hole_opt(&mut h, spec.countersink_angle_deg);
+    match spec.segments {
+        Some(n) => {
+            h.str("seg");
+            h.u32(n);
+        },
+        None => h.str("seg:auto"),
+    }
+    h.finish()
+}
+
+fn hole_opt(h: &mut Hasher, v: Option<f64>) {
+    match v {
+        Some(v) => {
+            h.str("some");
+            h.f64(v);
+        },
+        None => h.str("none"),
+    }
+}
+
+pub fn sweep_key(profile: &[Vec<[f64; 2]>], x_ref: Vec3, path: &[Vec3]) -> GeomKey {
+    let mut h = start("sweep");
+    loops(&mut h, profile);
+    h.vec3(x_ref);
+    h.u64(path.len() as u64);
+    for p in path {
+        h.vec3(*p);
+    }
+    h.finish()
+}
+
+pub fn loft_key(rings: &[Vec<Vec3>], segments: u32) -> GeomKey {
+    let mut h = start("loft");
+    h.u64(rings.len() as u64);
+    for ring in rings {
+        h.u64(ring.len() as u64);
+        for p in ring {
+            h.vec3(*p);
+        }
+    }
+    h.u32(segments);
+    h.finish()
+}
+
+pub fn thread_key(spec: &crate::thread::ThreadSpec) -> GeomKey {
+    let mut h = start("thread");
+    h.f64(spec.major_diameter);
+    h.f64(spec.minor_diameter);
+    h.f64(spec.pitch);
+    h.f64(spec.length);
+    h.str(spec.hand.as_str());
+    h.f64(spec.flank_angle_deg);
+    h.u32(spec.segments_per_turn);
+    h.vec3(spec.origin);
     h.finish()
 }
 

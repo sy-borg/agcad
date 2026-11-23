@@ -108,6 +108,8 @@ Commands, grouped by intent:
 - **Primitives**: `add_box`, `add_sphere`, `add_cylinder`
 - **Modelling**: `boolean`, `transform`, `set_color`, `delete`, `fillet`,
   `chamfer`
+- **Shape leverage**: `linear_pattern`, `circular_pattern`, `mirror`,
+  `shell`, `hole`, `sweep`, `loft`, `thread`
 - **Parameters**: `set_parameter`, `remove_parameter`, `get_parameters`
 - **Sketches and solids**: `add_sketch`, `add_sketch_line`,
   `add_sketch_circle`, `constrain`, `remove_constraint`, `move_sketch_point`,
@@ -254,6 +256,62 @@ top = cad.add_sketch(doc, "pocket", plane={"entity": base, "normal": [0, 0, 1]})
 side = cad.add_sketch(doc, "boss", plane={"entity": base, "normal": [1, 0, 0]})
 cad.add_sketch(doc, "plate_top", plane="xy", offset="wall*2")
 ```
+
+## Shape leverage: fewer profiles, more part
+
+M16 removes the manual repetition that a printable part otherwise needs. All
+eight commands record into the program like every other modeling step, so a
+knob still replays them.
+
+- **Patterns.** `linear_pattern{entities, direction, spacing, count}` and
+  `circular_pattern{entities, count, center?, axis?, angle_deg?}` repeat solids
+  in world space. `count` includes the original, so `count: 4` creates three
+  copies per source; the new ids come back in `entities`. A circular pattern
+  spaces copies over `angle_deg` (default 360) and rotates them, so bolt circles
+  and gear teeth keep their orientation. `spacing`, `direction` components,
+  `center` and `angle_deg` may be expressions.
+- **Mirror.** `mirror{entities, plane}` creates one reflected copy per source
+  (the originals are kept). `plane` is a datum (`{"datum":{"plane":"xz",
+  "offset":"wall"}}`) or any plane (`{"custom":{"origin":[…],"normal":[…]}}`).
+  The reflection is baked, with winding and normals kept outward.
+- **Shell.** `shell{entity, thickness, open?}` hollows a solid **in place**.
+  `open` lists outward face normals to remove — `[[0,0,1]]` turns a closed box
+  into a cup — and omitting it makes a sealed cavity. The wall is an inward
+  vertex offset (least-squares over the adjacent face planes) differenced from
+  the body, so a wall too thick for the shape is a clear error rather than a
+  broken mesh.
+- **Hole.** `hole{entity, center, normal?, diameter, depth?, counterbore_*?,
+  countersink_angle_deg?}` drills in place. `center` is a point on the entry
+  surface and `normal` points out of the material; the hole runs along
+  `-normal`. Omit `depth` (or pass a negative value) for a through-hole. A
+  counterbore or countersink seat is the same command.
+- **Sweep and helix.** `sweep{sketch, path}` carries a closed profile along a
+  polyline (`{"polyline":{"points":[[x,y,z],…],"closed"?:bool}}`) or a helix
+  (`{"helix":{"radius","pitch","turns","hand"?,"origin"?,"axis"?,
+  "segments_per_turn"?}}`). The profile plane is re-oriented at every station.
+- **Loft.** `loft{sketches, segments?}` morphs between two or more closed
+  profiles. Profiles are resampled to a common vertex count and aligned, so a
+  square lofts smoothly into a circle; each sketch may sit on a different plane.
+  One outer loop per sketch: holes are not lofted yet.
+- **Thread.** `thread{major_diameter, pitch, length, minor_diameter?, hand?,
+  flank_angle_deg?, segments_per_turn?, origin?}` is a real screw thread: a
+  minor-diameter core with a helical V-ridge, axis +Z, ends cut flat. The minor
+  diameter defaults to the ISO metric `major − 1.0825·pitch`. Union it with a
+  boss for a screw, or `boolean{difference}` it from a body for a threaded hole
+  — the same shape is both the external thread and the internal cutter.
+
+```python
+holes = cad.linear_pattern(doc, [hole_cutter], direction=(1, 0, 0),
+                           spacing="pitch_x", count=4)
+cad.boolean(doc, "difference", [plate, *holes["entities"]], name="plate")
+cad.shell(doc, tray, "wall", open=[(0, 0, 1)])
+cad.thread(doc, major_diameter=8, pitch=1.25, length=12, name="m8")
+```
+
+`count` is structural, not a knob: it allocates a fixed number of entities in
+the program. Change it by editing the script and replaying, or turn the
+expressions that position those entities. That is the same rule as any other
+structural edit, and it keeps downstream ids predictable.
 
 ## Trust: prove the rebuild and see what changed
 
@@ -520,17 +578,16 @@ turns, while the script remains the editing surface.
       program still replays in full — the cache is derived state and the cold
       replay is the correctness oracle — and `set_parameter` reports
       `rebuilt`/`reused`/`steps` so the work is visible.
+- [x] **M16 — Shape leverage**: `linear_pattern` and `circular_pattern`
+      repeat solids, `mirror` reflects them, `shell` hollows in place with
+      open faces by outward normal, and `hole` cuts a real through/blind hole
+      with counterbore or countersink seats. `sweep` carries a profile along a
+      polyline or helix, `loft` morphs between profiles, and `thread` builds a
+      helical screw thread — union it for a screw, subtract it for a threaded
+      hole.
 
 ### Next
 
-- [ ] **M16 — Shape leverage**: linear and circular patterns, mirror, shell,
-      sweep/loft, and a real hole feature (counterbore/countersink). These
-      remove the most manual profile work for printable parts. The same
-      machinery adds a helical sweep (axis, radius, pitch, turns, direction)
-      and a `thread` feature on top of it (major/minor diameter, pitch,
-      length, hand, flank profile), so screw threads and threaded holes are
-      one shape instead of hundreds of partial revolves; M17's arcs and
-      splines tighten the flanks afterwards.
 - [ ] **M17 — Sketch completeness**: arcs and splines; tangent, equal,
       concentric, symmetric, angle and point-on-line constraints; construction
       geometry; trim/extend/offset; conflict diagnostics that name the
@@ -547,9 +604,9 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 15 is complete: a knob change rebuilds only the features downstream
-of it, while the cold replay remains the correctness oracle. The suite is
-**144 tests** (136 engine + 8 viewer).
+Milestone 16 is complete: patterns, mirror, shell, holes, sweep, loft and
+threads are program features, so they replay parametrically like everything
+else. The suite is **170 tests** (162 engine + 8 viewer).
 
 What it covers:
 
@@ -589,11 +646,16 @@ What it covers:
   regeneration with independent branches served from cache, no-op knob turns
   rebuilding nothing, `rebuilt`/`reused`/`steps` counts, and cached bytes that
   match a cold replay after parameter changes and undo/redo.
+- **Shape leverage** — linear and circular patterns with the original counted,
+  mirrored copies that keep outward winding, open and closed shells with a
+  least-squares wall offset, through/blind/counterbore/countersink holes,
+  polyline and helical sweeps, square-to-circle and non-convex lofts, real
+  right- and left-hand threads, in-place replay, save/open and cold-replay
+  determinism.
 
-The next milestone is shape leverage (M16): patterns, mirror, shell,
-sweep/loft and a real hole feature, so printable parts need less manual profile
-work. Then the sketch vocabulary widens. A GUI feature tree is not on the
-list — the agent edits the script and replays.
+The next milestone is sketch completeness (M17): arcs, splines, a wider
+constraint vocabulary and conflict diagnostics. Then interoperability. A GUI
+feature tree is not on the list — the agent edits the script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
@@ -603,6 +665,8 @@ both following the parametric block), `examples/pick.py` (face and edge
 selectors from rays, with the edge click surviving a height change before it
 drives a fillet), `examples/validate.py` (validate a plate, fail it with a
 thin-wall knob, then diff the rebuild against the saved baseline),
+`examples/shape_leverage.py` (shelled tray, patterned holes, mirrored ribs, a
+helical spring, a loft and an M8 thread in one validated scene),
 `examples/cross_block.py` (the picture → model reproduction above),
 `examples/save_load.py` (save → open in a fresh engine → recover the embedded
 source, change a knob → export back to Python and run it), and

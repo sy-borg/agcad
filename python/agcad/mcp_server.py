@@ -59,6 +59,12 @@ pass it as save_document{source:{language:"python",text:...}}; an MCP-only
 document with no script is scratch state. A human working in the viewer can
 label entities and click a face or edge; the click arrives as a pick result
 whose face/edge selectors you pass straight to add_sketch/fillet/chamfer.
+Shape leverage: linear_pattern/circular_pattern repeat solids (count includes the
+original), mirror reflects them across a plane, shell hollows a solid in place
+(open faces listed by outward normal), hole cuts a through/blind/counterbore/
+countersink hole in place, sweep carries a profile along a polyline or helix,
+loft morphs between two or more profiles, and thread builds a real screw thread
+(union it for a screw, subtract it for a threaded hole).
 Failed commands report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute agcad commands. Each command is an object:
@@ -129,6 +135,28 @@ extrude{doc,sketch,distance,name?,color?} (closed profile → watertight solid a
 revolve{doc,sketch,angle_deg?,axis?:"x"|"y",segments?,name?,color?} (profile →
   solid of revolution around an in-plane axis, default 360°; profile must stay on
   one side of the axis),
+linear_pattern{doc,entities:[ids],direction:[x,y,z],spacing,count,name?,color?}
+  (count INCLUDES the original, so count:4 creates 3 copies; new solids are
+  returned in `entities`; spacing may be an expression),
+circular_pattern{doc,entities,count,center?=[0,0,0],axis?=[0,0,1],angle_deg?=360,
+  name?,color?} (copies rotate with the pattern and share the angle evenly),
+mirror{doc,entities,plane,name?,color?} (plane is {datum:{plane:"xy"|"xz"|"yz",
+  offset?}} or {custom:{origin,normal}}; one reflected copy per source),
+shell{doc,entity,thickness,open?,angle_tol_deg?} (hollow IN PLACE; `open` is a
+  list of outward face normals to remove, e.g. [[0,0,1]] for a cup; omit for a
+  sealed hollow), hole{doc,entity,center,normal?=[0,0,1],diameter,depth?,
+  counterbore_diameter?,counterbore_depth?,countersink_angle_deg?,segments?}
+  (IN PLACE; center is on the entry surface, the hole runs along -normal; omit
+  depth for through; give counterbore diameter+depth or a countersink included
+  angle), sweep{doc,sketch,path,segments?,name?,color?} (path is
+  {polyline:{points:[[x,y,z],...],closed?}} or {helix:{radius,pitch,turns,
+  hand?:"right"|"left",origin?,axis?,segments_per_turn?}}; the profile plane is
+  re-oriented along the path), loft{doc,sketches:[ids],segments?,name?,color?}
+  (one closed outer loop per sketch; profiles may be on different planes),
+thread{doc,major_diameter,minor_diameter?,pitch,length,hand?:"right"|"left",
+  flank_angle_deg?=60,segments_per_turn?,origin?,name?,color?} (a real threaded
+  solid along +Z from origin; union for a screw, boolean difference for a
+  threaded hole),
 save_document{doc,path,source?} (writes a .agcad JSON file: the program plus
   the current parameter values; geometry is rebuilt by replay, so the file stays
   small and diffable. source={language,text} embeds the authoring script as the

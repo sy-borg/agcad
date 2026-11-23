@@ -37,6 +37,52 @@ class AgcadError(RuntimeError):
 _DATUM_PLANES = ("xy", "xz", "yz")
 
 
+def _mirror_plane_payload(plane: Any) -> dict:
+    """Normalize the client's mirror `plane` sugar into the wire form.
+
+    Accepted forms:
+      * ``"xy" | "xz" | "yz"`` → a datum plane
+      * ``{"plane": "xy", "offset": 5}`` → a datum plane
+      * ``{"origin": [x, y, z], "normal": [x, y, z]}`` → any plane
+      * ``{"datum": {...}}`` / ``{"custom": {...}}`` → wire form, passed through
+    """
+    if isinstance(plane, str):
+        if plane not in _DATUM_PLANES:
+            raise ValueError(f"mirror plane must be one of {_DATUM_PLANES} or a plane dict (got {plane!r})")
+        return {"datum": {"plane": plane}}
+    if not isinstance(plane, dict):
+        raise TypeError("mirror plane must be a string, a dict, or a wire-form dict")
+    if "datum" in plane or "custom" in plane:
+        return dict(plane)
+    if "plane" in plane:
+        return {"datum": dict(plane)}
+    if "origin" in plane:
+        return {"custom": dict(plane)}
+    raise ValueError(
+        "mirror plane dict must contain 'plane' (datum), 'origin' + 'normal' (custom), "
+        "or already be a {'datum': ...} / {'custom': ...} wire form"
+    )
+
+
+def _sweep_path_payload(path: Any) -> dict:
+    """Normalize a sweep path into the wire form.
+
+    * a list of ``[x, y, z]`` points → a polyline;
+    * ``{"points": [...], "closed": false}`` → a polyline;
+    * ``{"radius": ..., "pitch": ..., "turns": ...}`` → a helix around +Z;
+    * ``{"polyline": {...}}`` / ``{"helix": {...}}`` → wire form, passed through.
+    """
+    if isinstance(path, (list, tuple)):
+        return {"polyline": {"points": [list(p) for p in path]}}
+    if not isinstance(path, dict):
+        raise TypeError("sweep path must be a list of points or a dict")
+    if "polyline" in path or "helix" in path:
+        return dict(path)
+    if "points" in path:
+        return {"polyline": dict(path)}
+    return {"helix": dict(path)}
+
+
 def _sketch_plane_payload(plane: Any, offset: float | str | None) -> dict | None:
     """Normalize the client's `plane` sugar into the wire `SketchPlane`.
 
@@ -656,6 +702,196 @@ class Agcad:
         return self._request(
             "revolve", doc=doc, sketch=sketch, angle_deg=angle_deg, axis=axis,
             segments=segments, name=name, color=color,
+        )
+
+    # -- shape leverage -------------------------------------------------------
+
+    def linear_pattern(
+        self,
+        doc: int,
+        entities: list[int],
+        direction: tuple[float | str, float | str, float | str],
+        spacing: float | str,
+        count: int,
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Repeat solids along a line (`count` includes the original).
+
+        Creates ``count - 1`` copies per source and returns their ids in
+        ``entities``. The copies are new solids, so a pattern of hole cutters
+        is one ``boolean("difference", ...)`` away from a perforated part.
+        ``spacing`` may be an expression. Sketches are display-only: extrude
+        first.
+        """
+        return self._request(
+            "linear_pattern", doc=doc, entities=list(entities), direction=direction,
+            spacing=spacing, count=count, name=name, color=color,
+        )
+
+    def circular_pattern(
+        self,
+        doc: int,
+        entities: list[int],
+        count: int,
+        center: tuple[float | str, float | str, float | str] = (0.0, 0.0, 0.0),
+        axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+        angle_deg: float | str | None = 360.0,
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Repeat solids around an axis (`count` includes the original).
+
+        Copies are spread evenly over ``angle_deg`` (step = angle / count) and
+        rotate with the pattern, so gear teeth and bolt circles keep their
+        orientation. ``center`` and ``angle_deg`` may be expressions.
+        """
+        return self._request(
+            "circular_pattern", doc=doc, entities=list(entities), center=center,
+            axis=list(axis), angle_deg=angle_deg, count=count, name=name, color=color,
+        )
+
+    def mirror(
+        self,
+        doc: int,
+        entities: list[int],
+        plane: str | dict[str, Any],
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Mirror solids across a plane, creating one copy per source.
+
+        ``plane`` is ``"xy"``/``"xz"``/``"yz"``, ``{"plane": "xy", "offset":
+        5}`` or ``{"origin": [...], "normal": [...]}``. The originals are
+        kept. The reflection bakes the mesh, so winding and normals stay
+        outward.
+        """
+        return self._request(
+            "mirror", doc=doc, entities=list(entities),
+            plane=_mirror_plane_payload(plane), name=name, color=color,
+        )
+
+    def shell(
+        self,
+        doc: int,
+        entity: int,
+        thickness: float | str,
+        open: list[tuple[float, float, float]] | None = None,
+        angle_tol_deg: float | None = None,
+    ) -> dict[str, Any]:
+        """Hollow a solid in place with a wall of ``thickness``.
+
+        ``open`` lists outward face normals to remove, so ``[(0, 0, 1)]``
+        turns a closed box into a cup; omit it for a sealed hollow body. The
+        thickness may be an expression. Returns the new volume, triangle count
+        and local mesh; the entity keeps its id.
+        """
+        return self._request(
+            "shell", doc=doc, entity=entity, thickness=thickness,
+            open=[list(n) for n in open] if open else [], angle_tol_deg=angle_tol_deg,
+        )
+
+    def hole(
+        self,
+        doc: int,
+        entity: int,
+        center: tuple[float | str, float | str, float | str],
+        diameter: float | str,
+        normal: tuple[float, float, float] = (0.0, 0.0, 1.0),
+        depth: float | str | None = None,
+        counterbore_diameter: float | str | None = None,
+        counterbore_depth: float | str | None = None,
+        countersink_angle_deg: float | str | None = None,
+        segments: int | None = None,
+    ) -> dict[str, Any]:
+        """Drill a hole into a solid in place, with an optional screw seat.
+
+        ``center`` is a point on the entry surface and ``normal`` points out of
+        the material (the hole runs along ``-normal``). Omit ``depth`` for a
+        through-hole (or pass a negative value). Give ``counterbore_diameter``
+        plus ``counterbore_depth`` for a cylindrical recess, or
+        ``countersink_angle_deg`` (included angle, e.g. 90) for a conical one.
+        Returns the new volume, triangle count and local mesh.
+        """
+        return self._request(
+            "hole", doc=doc, entity=entity, center=center, normal=list(normal),
+            diameter=diameter, depth=depth,
+            counterbore_diameter=counterbore_diameter,
+            counterbore_depth=counterbore_depth,
+            countersink_angle_deg=countersink_angle_deg, segments=segments,
+        )
+
+    def sweep(
+        self,
+        doc: int,
+        sketch: int,
+        path: Any,
+        segments: int | None = None,
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Sweep a closed sketch profile along a 3D path.
+
+        ``path`` is a list of world-space points, ``{"points": [...],
+        "closed": false}``, or a helix ``{"radius": 12, "pitch": 8, "turns":
+        3, "hand": "right"}``. The profile is re-oriented at every station,
+        so the sketch supplies the cross-section and its in-plane X, while the
+        path supplies the placement. A helix path makes a spring.
+        """
+        return self._request(
+            "sweep", doc=doc, sketch=sketch, path=_sweep_path_payload(path),
+            segments=segments, name=name, color=color,
+        )
+
+    def loft(
+        self,
+        doc: int,
+        sketches: list[int],
+        segments: int | None = None,
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Loft a solid through two or more closed sketch profiles.
+
+        Each sketch must have one closed outer loop (holes are not lofted).
+        Profiles are resampled to a common vertex count and aligned, so a
+        square lofts smoothly into a circle. Profiles may sit on different
+        planes; place them with ``add_sketch(plane=..., offset=...)``.
+        """
+        return self._request(
+            "loft", doc=doc, sketches=list(sketches), segments=segments,
+            name=name, color=color,
+        )
+
+    def thread(
+        self,
+        doc: int,
+        major_diameter: float | str,
+        pitch: float | str,
+        length: float | str,
+        minor_diameter: float | str | None = None,
+        hand: str = "right",
+        flank_angle_deg: float | str | None = None,
+        segments_per_turn: int | None = None,
+        origin: tuple[float | str, float | str, float | str] | None = None,
+        name: str | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """A real screw thread as a standalone solid (axis +Z).
+
+        The minor diameter defaults to the ISO metric ``major - 1.0825 *
+        pitch``; ``flank_angle_deg`` is the included angle (default 60).
+        ``hand`` is ``"right"`` or ``"left"``. Union the result with a boss
+        for a screw, or subtract it from a body for a threaded hole.
+        """
+        if hand not in ("right", "left"):
+            raise ValueError('hand must be "right" or "left"')
+        return self._request(
+            "thread", doc=doc, major_diameter=major_diameter,
+            minor_diameter=minor_diameter, pitch=pitch, length=length,
+            hand=hand, flank_angle_deg=flank_angle_deg,
+            segments_per_turn=segments_per_turn, origin=origin,
+            name=name, color=color,
         )
 
     def undo(self, doc: int) -> dict[str, Any]:

@@ -108,6 +108,14 @@ fn is_mutating(command: &Command) -> bool {
             | Command::DeleteSketchElement { .. }
             | Command::Extrude { .. }
             | Command::Revolve { .. }
+            | Command::LinearPattern { .. }
+            | Command::CircularPattern { .. }
+            | Command::Mirror { .. }
+            | Command::Shell { .. }
+            | Command::Hole { .. }
+            | Command::Sweep { .. }
+            | Command::Loft { .. }
+            | Command::Thread { .. }
             | Command::SetParameter { .. }
             | Command::RemoveParameter { .. }
             | Command::CreateDocument { .. }
@@ -138,6 +146,14 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::DeleteSketchElement { doc, .. }
         | Command::Extrude { doc, .. }
         | Command::Revolve { doc, .. }
+        | Command::LinearPattern { doc, .. }
+        | Command::CircularPattern { doc, .. }
+        | Command::Mirror { doc, .. }
+        | Command::Shell { doc, .. }
+        | Command::Hole { doc, .. }
+        | Command::Sweep { doc, .. }
+        | Command::Loft { doc, .. }
+        | Command::Thread { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::Undo { doc }
