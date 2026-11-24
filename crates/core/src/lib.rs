@@ -16,6 +16,8 @@
 //! the user only describes intent.
 
 pub mod boolean;
+pub mod drawing;
+pub mod dxf;
 pub mod edges;
 pub mod expr;
 pub mod fillet;
@@ -33,6 +35,7 @@ pub mod shell;
 pub mod sketch;
 pub mod solid;
 pub mod stl;
+pub mod svg;
 pub mod sweep;
 pub mod threemf;
 pub mod thread;
@@ -42,8 +45,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use wright_protocol::{
-    Bbox, BooleanOp, Command, CommandResult, DocId, DocInfo, DocumentSnapshot, EdgeFilter,
-    EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, MirrorPlane,
+    Bbox, BooleanOp, Command, CommandResult, CurveMode, DocId, DocInfo, DocumentSnapshot,
+    EdgeFilter, EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, MirrorPlane,
     ParamInfo, ParameterChange, Rgba, RevolveAxis, SavedParameter, Scalar, SketchElement,
     SketchPlane, SketchValidation, SolidValidation, SourceDoc, SVec3, ValidationTotals,
     Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
@@ -540,6 +543,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::GetProgram { doc: d }
         | Command::ExportStl { doc: d, .. }
         | Command::Export3mf { doc: d, .. }
+        | Command::ExportDxf { doc: d, .. }
+        | Command::ExportSvg { doc: d, .. }
         | Command::SaveDocument { doc: d, .. }
         | Command::RenderOffscreen { doc: d, .. }
         | Command::CloseDocument { doc: d } => *d = doc,
@@ -1046,6 +1051,32 @@ impl Engine {
                 })
             },
 
+            Command::ExportDxf { doc, path, entities, curves } => {
+                let d = self.doc(*doc)?;
+                let (drawing, sources) = collect_drawing(*doc, d, entities.as_deref(), *curves)?;
+                let (resolved, bytes) = dxf::write_dxf(path, &drawing)?;
+                Ok(CommandResult::DxfExported {
+                    doc: *doc,
+                    path: resolved,
+                    entities: sources,
+                    curves: drawing.curves.len(),
+                    bytes,
+                })
+            },
+
+            Command::ExportSvg { doc, path, entities, curves } => {
+                let d = self.doc(*doc)?;
+                let (drawing, sources) = collect_drawing(*doc, d, entities.as_deref(), *curves)?;
+                let (resolved, bytes) = svg::write_svg(path, &drawing)?;
+                Ok(CommandResult::SvgExported {
+                    doc: *doc,
+                    path: resolved,
+                    entities: sources,
+                    curves: drawing.curves.len(),
+                    bytes,
+                })
+            },
+
             Command::SaveDocument { doc, path, source } => {
                 let d = self.doc_mut(*doc)?;
                 // Remember the recipe so `get_program` reflects what a
@@ -1534,6 +1565,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::DiffScene { doc, .. }
         | Command::ExportStl { doc, .. }
         | Command::Export3mf { doc, .. }
+        | Command::ExportDxf { doc, .. }
+        | Command::ExportSvg { doc, .. }
         | Command::RenderOffscreen { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         _ => None,
@@ -2469,6 +2502,208 @@ fn resolve_sketch_plane(
         },
     };
     Ok(plane::placement(&frame))
+}
+
+/// Build the 2D drawing for `export_dxf` / `export_svg`.
+///
+/// Default selection: every sketch. Explicitly selected sketches follow
+/// `curves`; an extrude/revolve/sweep/loft solid exports its source sketch's
+/// closed profile loops (the useful 2D footprint of the part), and anything
+/// else is an actionable error — a box or an imported mesh has no 2D
+/// parametric profile to hand a cutter.
+fn collect_drawing(
+    doc: DocId,
+    d: &Document,
+    entities: Option<&[EntityId]>,
+    mode: CurveMode,
+) -> Result<(drawing::Drawing, usize)> {
+    let ids: Vec<EntityId> = match entities {
+        Some(ids) => ids.to_vec(),
+        None => d
+            .entities
+            .iter()
+            .filter(|(_, e)| matches!(e.shape, Shape::Sketch { .. }))
+            .map(|(id, _)| *id)
+            .collect(),
+    };
+
+    let mut out = drawing::Drawing::new(d.name.clone());
+    let mut sources = 0usize;
+
+    for id in ids {
+        let e = d.entities.get(&id).ok_or(Error::UnknownEntity { doc, entity: id })?;
+        match &e.shape {
+            Shape::Sketch { elements, .. } => {
+                add_sketch_curves(&mut out, &e.name, id, elements, mode)?;
+                sources += 1;
+            },
+            Shape::Extrude { sketch, .. } | Shape::Revolve { sketch, .. } => {
+                add_source_profiles(&mut out, doc, d, &e.name, id, &[*sketch])?;
+                sources += 1;
+            },
+            Shape::Sweep { sketch } => {
+                add_source_profiles(&mut out, doc, d, &e.name, id, &[*sketch])?;
+                sources += 1;
+            },
+            Shape::Loft { sketches } => {
+                add_source_profiles(&mut out, doc, d, &e.name, id, sketches)?;
+                sources += 1;
+            },
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "entity {id} ('{}', {}) has no 2D sketch profile to export (hint: 2D export \
+                     covers sketches and solids built from one — extrude, revolve, sweep or loft; \
+                     use export_stl/export_3mf for tessellated solids)",
+                    e.name,
+                    e.shape.kind()
+                )));
+            },
+        }
+    }
+
+    if out.curves.is_empty() {
+        return Err(Error::Invalid(match entities {
+            Some(_) => {
+                "nothing to export: the selected entities produced no 2D curves (hint: add a \
+                 line, circle, arc or spline to the sketch first)"
+                    .to_string()
+            },
+            None => {
+                "nothing to export: the document has no sketches (hint: add_sketch first, or \
+                 pass `entities` with a solid made by extrude/revolve/sweep/loft)"
+                    .to_string()
+            },
+        }));
+    }
+
+    Ok((out, sources))
+}
+
+/// Add one sketch's raw elements and/or closed profile loops to the drawing.
+fn add_sketch_curves(
+    out: &mut drawing::Drawing,
+    name: &str,
+    id: EntityId,
+    elements: &[SketchElement],
+    mode: CurveMode,
+) -> Result<()> {
+    use drawing::{Curve, CurveKind, Role};
+
+    let base = format!("{name}_{id}");
+    if matches!(mode, CurveMode::Elements | CurveMode::Both) {
+        let drawing_layer = out.layer(&base, Role::Drawing);
+        let construction_layer = out.layer(&format!("{base}_construction"), Role::Construction);
+
+        for element in elements {
+            let (construction, kind) = match element {
+                SketchElement::Line { p1, p2, construction, .. } => {
+                    let len = ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt();
+                    if len <= 1e-12 {
+                        continue;
+                    }
+                    (*construction, CurveKind::Line { a: *p1, b: *p2 })
+                },
+                SketchElement::Circle { center, radius, construction, .. } => {
+                    if *radius <= 0.0 {
+                        continue;
+                    }
+                    (*construction, CurveKind::Circle { center: *center, radius: *radius })
+                },
+                SketchElement::Arc { center, radius, start_deg, end_deg, construction, .. } => {
+                    if *radius <= 0.0 {
+                        continue;
+                    }
+                    let sweep = sketch::arc_sweep(*start_deg, *end_deg);
+                    if sweep >= 359.999 {
+                        (*construction, CurveKind::Circle { center: *center, radius: *radius })
+                    } else {
+                        (
+                            *construction,
+                            CurveKind::Arc {
+                                center: *center,
+                                radius: *radius,
+                                start_deg: *start_deg,
+                                sweep_deg: sweep,
+                            },
+                        )
+                    }
+                },
+                SketchElement::Spline { points, closed, construction, .. } => {
+                    if points.len() < 2 {
+                        continue;
+                    }
+                    let mut pts = sketch::spline_points(points, *closed);
+                    if pts.len() < 2 {
+                        continue;
+                    }
+                    if *closed
+                        && pts.len() > 1
+                        && (pts[0][0] - pts[pts.len() - 1][0]).abs() <= 1e-12
+                        && (pts[0][1] - pts[pts.len() - 1][1]).abs() <= 1e-12
+                    {
+                        pts.pop();
+                    }
+                    (*construction, CurveKind::Polyline { points: pts, closed: *closed })
+                },
+            };
+            let layer = if construction { construction_layer } else { drawing_layer };
+            out.curves.push(Curve { layer, kind });
+        }
+    }
+
+    if matches!(mode, CurveMode::Profiles | CurveMode::Both) {
+        let loops = sketch::profile_loops(elements).map_err(|e| {
+            Error::Invalid(format!(
+                "cannot export the profile of sketch {id} ('{name}'): {e}"
+            ))
+        })?;
+        let layer = out.layer(&format!("{base}_profile"), Role::Profile);
+        for points in loops {
+            out.curves.push(Curve {
+                layer,
+                kind: CurveKind::Polyline { points, closed: true },
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Export the closed profile loops of the sketches that built a solid, on a
+/// layer named after the solid.
+fn add_source_profiles(
+    out: &mut drawing::Drawing,
+    doc: DocId,
+    d: &Document,
+    name: &str,
+    id: EntityId,
+    sketches: &[EntityId],
+) -> Result<()> {
+    use drawing::{Curve, CurveKind, Role};
+
+    let layer = out.layer(&format!("{name}_{id}_profile"), Role::Profile);
+    for &sketch_id in sketches {
+        let e = d.entities.get(&sketch_id).ok_or(Error::UnknownEntity { doc, entity: sketch_id })?;
+        let Shape::Sketch { elements, .. } = &e.shape else {
+            return Err(Error::Invalid(format!(
+                "entity {id} ('{name}') references entity {sketch_id}, which is not a sketch"
+            )));
+        };
+        let sketch_name = e.name.clone();
+        let loops = sketch::profile_loops(elements).map_err(|err| {
+            Error::Invalid(format!(
+                "cannot export the profile of sketch {sketch_id} ('{sketch_name}') used by \
+                 entity {id} ('{name}'): {err}"
+            ))
+        })?;
+        for points in loops {
+            out.curves.push(Curve {
+                layer,
+                kind: CurveKind::Polyline { points, closed: true },
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Closed profile loops of a sketch plus its placement, for extrude/revolve.
@@ -3735,6 +3970,457 @@ mod tests {
             r => panic!("unexpected result {r:?}"),
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- M18b: DXF / SVG 2D drawing export --------------------------------------
+
+    fn add_circle(
+        e: &mut Engine,
+        sketch: EntityId,
+        center: [f64; 2],
+        radius: f64,
+        construction: bool,
+    ) -> u64 {
+        match e
+            .execute(Command::AddSketchCircle {
+                doc: 1,
+                sketch,
+                center: [num(center[0]), num(center[1])],
+                radius: num(radius),
+                construction,
+            })
+            .unwrap()
+        {
+            CommandResult::SketchElementCreated { element, .. } => element,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn add_arc(
+        e: &mut Engine,
+        sketch: EntityId,
+        center: [f64; 2],
+        radius: f64,
+        start_deg: f64,
+        end_deg: f64,
+    ) -> u64 {
+        match e
+            .execute(Command::AddSketchArc {
+                doc: 1,
+                sketch,
+                center: [num(center[0]), num(center[1])],
+                radius: num(radius),
+                start_deg: num(start_deg),
+                end_deg: num(end_deg),
+                construction: false,
+            })
+            .unwrap()
+        {
+            CommandResult::SketchElementCreated { element, .. } => element,
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn add_construction_line(e: &mut Engine, sketch: EntityId, p1: [f64; 2], p2: [f64; 2]) {
+        e.execute(Command::AddSketchLine {
+            doc: 1,
+            sketch,
+            p1: [num(p1[0]), num(p1[1])],
+            p2: [num(p2[0]), num(p2[1])],
+            construction: true,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn dxf_export_writes_layers_and_editable_curves() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "plate");
+        add_line(&mut e, s, [0.0, 0.0], [40.0, 0.0]);
+        add_line(&mut e, s, [40.0, 0.0], [40.0, 20.0]);
+        add_line(&mut e, s, [40.0, 20.0], [0.0, 20.0]);
+        add_line(&mut e, s, [0.0, 20.0], [0.0, 0.0]);
+        add_construction_line(&mut e, s, [0.0, 0.0], [40.0, 20.0]);
+        add_circle(&mut e, s, [10.0, 10.0], 3.0, false);
+        add_arc(&mut e, s, [30.0, 10.0], 5.0, 0.0, 90.0);
+
+        let (path, path_s) = temp_file("wright_dxf_sketch.dxf");
+        match e
+            .execute(Command::ExportDxf {
+                doc: 1,
+                path: path_s.clone(),
+                entities: None,
+                curves: CurveMode::Elements,
+            })
+            .unwrap()
+        {
+            CommandResult::DxfExported { entities, curves, bytes, path: resolved, .. } => {
+                assert_eq!(entities, 1);
+                assert_eq!(curves, 7, "4 lines + construction line + circle + arc");
+                assert!(resolved.ends_with("wright_dxf_sketch.dxf"));
+                assert_eq!(bytes, std::fs::read(&path).unwrap().len());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("0\nSECTION\n2\nHEADER\n"));
+        assert!(text.contains("9\n$ACADVER\n1\nAC1009\n"), "R12 header");
+        assert!(text.contains("9\n$INSUNITS\n70\n4\n"), "millimeter units");
+        assert!(text.contains("2\nplate_1\n"), "sketch layer");
+        assert!(text.contains("2\nplate_1_construction\n"), "construction layer");
+        assert!(text.contains("6\nDASHED\n"), "construction linetype");
+        assert!(text.contains("2\nplate_1\n70\n0\n62\n7\n6\nCONTINUOUS\n"));
+        assert_eq!(text.matches("\nLINE\n").count(), 5);
+        assert_eq!(text.matches("\nARC\n").count(), 1);
+        assert_eq!(text.matches("\nCIRCLE\n").count(), 1);
+        assert_eq!(text.matches("\nPOLYLINE\n").count(), 0);
+        assert!(text.trim_end().ends_with("EOF"));
+
+        // Deterministic: a second export produces the same bytes.
+        let (path2, path2_s) = temp_file("wright_dxf_sketch_2.dxf");
+        e.execute(Command::ExportDxf {
+            doc: 1,
+            path: path2_s,
+            entities: None,
+            curves: CurveMode::Elements,
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(&path2).unwrap());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path2);
+    }
+
+    #[test]
+    fn profiles_export_closed_loops_only() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "plate");
+        add_line(&mut e, s, [0.0, 0.0], [40.0, 0.0]);
+        add_line(&mut e, s, [40.0, 0.0], [40.0, 20.0]);
+        add_line(&mut e, s, [40.0, 20.0], [0.0, 20.0]);
+        add_line(&mut e, s, [0.0, 20.0], [0.0, 0.0]);
+        add_circle(&mut e, s, [20.0, 10.0], 4.0, false);
+        add_construction_line(&mut e, s, [0.0, 0.0], [40.0, 20.0]);
+
+        let (path, path_s) = temp_file("wright_dxf_profile.dxf");
+        match e
+            .execute(Command::ExportDxf {
+                doc: 1,
+                path: path_s,
+                entities: None,
+                curves: CurveMode::Profiles,
+            })
+            .unwrap()
+        {
+            CommandResult::DxfExported { entities, curves, .. } => {
+                assert_eq!(entities, 1);
+                assert_eq!(curves, 2, "outer rectangle plus the hole");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\nPOLYLINE\n").count(), 2);
+        assert_eq!(text.matches("\nLINE\n").count(), 0);
+        assert_eq!(text.matches("\nCIRCLE\n").count(), 0);
+        assert!(text.contains("POLYLINE\n8\nplate_1_profile\n66\n1\n70\n1\n"));
+        assert!(!text.contains("plate_1_construction\n70"), "construction is not a profile");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn svg_export_flips_y_and_marks_construction() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "tile");
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        add_line(&mut e, s, [10.0, 0.0], [10.0, 5.0]);
+        add_line(&mut e, s, [10.0, 5.0], [0.0, 5.0]);
+        add_line(&mut e, s, [0.0, 5.0], [0.0, 0.0]);
+        add_construction_line(&mut e, s, [0.0, 0.0], [10.0, 5.0]);
+
+        let (path, path_s) = temp_file("wright_export.svg");
+        match e
+            .execute(Command::ExportSvg {
+                doc: 1,
+                path: path_s,
+                entities: None,
+                curves: CurveMode::Elements,
+            })
+            .unwrap()
+        {
+            CommandResult::SvgExported { entities, curves, bytes, .. } => {
+                assert_eq!(entities, 1);
+                assert_eq!(curves, 5);
+                assert_eq!(bytes, std::fs::read(&path).unwrap().len());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg "));
+        assert!(text.contains("width=\"12mm\" height=\"7mm\" viewBox=\"-1 -1 12 7\""),
+            "1 mm padding and a millimeter viewBox:\n{text}");
+        assert!(text.contains("<title>test</title>"));
+        // Y is flipped: the bottom edge y=0 sits at the bottom of the viewBox.
+        assert!(text.contains("<line x1=\"0\" y1=\"5\" x2=\"10\" y2=\"5\"/>"));
+        assert!(text.contains("<line x1=\"10\" y1=\"0\" x2=\"0\" y2=\"0\"/>"));
+        assert!(text.contains("data-layer=\"tile_1\" class=\"drawing\""));
+        assert!(text.contains("data-layer=\"tile_1_construction\" class=\"construction\""));
+        assert!(text.contains("stroke-dasharray=\"1 0.6\""));
+        assert!(!text.contains("NaN"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn svg_arc_keeps_its_orientation_after_the_y_flip() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "arc");
+        add_arc(&mut e, s, [0.0, 0.0], 10.0, 0.0, 270.0);
+
+        let (path, path_s) = temp_file("wright_arc.svg");
+        e.execute(Command::ExportSvg {
+            doc: 1,
+            path: path_s,
+            entities: None,
+            curves: CurveMode::Elements,
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // 270° is the large arc; the math-CCW sweep becomes SVG sweep-flag 0.
+        assert!(text.contains("<path d=\"M 10 0 A 10 10 0 1 0 0 10\"/>"), "{text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn selecting_a_solid_exports_its_source_profile() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "outline");
+        add_line(&mut e, s, [0.0, 0.0], [30.0, 0.0]);
+        add_line(&mut e, s, [30.0, 0.0], [30.0, 10.0]);
+        add_line(&mut e, s, [30.0, 10.0], [0.0, 10.0]);
+        add_line(&mut e, s, [0.0, 10.0], [0.0, 0.0]);
+        let solid = match e
+            .execute(Command::Extrude {
+                doc: 1,
+                sketch: s,
+                distance: num(5.0),
+                name: Some("plate solid".into()),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::SolidCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+
+        let (path, path_s) = temp_file("wright_solid_profile.dxf");
+        match e
+            .execute(Command::ExportDxf {
+                doc: 1,
+                path: path_s,
+                entities: Some(vec![solid]),
+                curves: CurveMode::Elements,
+            })
+            .unwrap()
+        {
+            CommandResult::DxfExported { entities, curves, .. } => {
+                assert_eq!(entities, 1);
+                assert_eq!(curves, 1, "the solid's one closed source loop");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("POLYLINE\n8\nplate solid_2_profile\n66\n1\n70\n1\n"));
+        assert_eq!(text.matches("\nLINE\n").count(), 0, "profiles, not raw elements");
+        let _ = std::fs::remove_file(&path);
+
+        // Solids with no sketch ancestry fail with an actionable hint.
+        let box_id = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "block".into(),
+                center: vec3(0.0),
+                size: vec3(10.0),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let err = e
+            .execute(Command::ExportSvg {
+                doc: 1,
+                path: "/tmp/wright_never_written.svg".into(),
+                entities: Some(vec![box_id]),
+                curves: CurveMode::Elements,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("no 2D sketch profile"), "{err}");
+        assert!(!std::path::Path::new("/tmp/wright_never_written.svg").exists());
+    }
+
+    #[test]
+    fn two_d_export_is_a_session_command() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "plate");
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        add_line(&mut e, s, [10.0, 0.0], [10.0, 10.0]);
+        add_line(&mut e, s, [10.0, 10.0], [0.0, 10.0]);
+        add_line(&mut e, s, [0.0, 10.0], [0.0, 0.0]);
+
+        let before = match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { program, params, .. } => (program.len(), params.len()),
+            r => panic!("unexpected result {r:?}"),
+        };
+        let (path, path_s) = temp_file("wright_session.svg");
+        e.execute(Command::ExportSvg {
+            doc: 1,
+            path: path_s,
+            entities: None,
+            curves: CurveMode::Profiles,
+        })
+        .unwrap();
+        let after = match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { program, params, .. } => (program.len(), params.len()),
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(before, after, "export must not enter the program");
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert_eq!(entities.len(), 1),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn two_d_export_defaults_to_elements_and_supports_both() {
+        // The raw bus may omit `curves`; serde defaults it to elements.
+        let cmd: Command = serde_json::from_str(
+            r#"{"method":"export_dxf","doc":1,"path":"/tmp/wright_default.dxf"}"#,
+        )
+        .unwrap();
+        match cmd {
+            Command::ExportDxf { doc, curves, entities, .. } => {
+                assert_eq!(doc, 1);
+                assert_eq!(curves, CurveMode::Elements);
+                assert!(entities.is_none());
+            },
+            other => panic!("unexpected command {other:?}"),
+        }
+
+        let mut e = engine();
+        let s = add_sketch(&mut e, "both");
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        add_line(&mut e, s, [10.0, 0.0], [10.0, 10.0]);
+        add_line(&mut e, s, [10.0, 10.0], [0.0, 10.0]);
+        add_line(&mut e, s, [0.0, 10.0], [0.0, 0.0]);
+        add_construction_line(&mut e, s, [0.0, 0.0], [10.0, 10.0]);
+
+        let (path, path_s) = temp_file("wright_both.dxf");
+        match e
+            .execute(Command::ExportDxf {
+                doc: 1,
+                path: path_s,
+                entities: None,
+                curves: CurveMode::Both,
+            })
+            .unwrap()
+        {
+            CommandResult::DxfExported { curves, .. } => assert_eq!(curves, 6),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("2\nboth_1\n"));
+        assert!(text.contains("2\nboth_1_construction\n"));
+        assert!(text.contains("2\nboth_1_profile\n"));
+        assert_eq!(text.matches("\nLINE\n").count(), 5);
+        assert_eq!(text.matches("\nPOLYLINE\n").count(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn splines_export_as_polylines() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "spline");
+        e.execute(Command::AddSketchSpline {
+            doc: 1,
+            sketch: s,
+            points: vec![
+                [num(0.0), num(0.0)],
+                [num(10.0), num(6.0)],
+                [num(20.0), num(0.0)],
+                [num(10.0), num(-6.0)],
+            ],
+            closed: true,
+            construction: false,
+        })
+        .unwrap();
+
+        let (dxf_path, dxf_s) = temp_file("wright_spline.dxf");
+        let got = e
+            .execute(Command::ExportDxf {
+                doc: 1,
+                path: dxf_s,
+                entities: None,
+                curves: CurveMode::Elements,
+            })
+            .unwrap();
+        assert!(matches!(got, CommandResult::DxfExported { curves: 1, .. }));
+        let text = std::fs::read_to_string(&dxf_path).unwrap();
+        assert_eq!(text.matches("\nPOLYLINE\n").count(), 1);
+        assert!(text.contains("POLYLINE\n8\nspline_1\n66\n1\n70\n1\n"));
+        assert!(text.matches("\nVERTEX\n").count() > 10);
+
+        let (svg_path, svg_s) = temp_file("wright_spline.svg");
+        e.execute(Command::ExportSvg {
+            doc: 1,
+            path: svg_s,
+            entities: None,
+            curves: CurveMode::Profiles,
+        })
+        .unwrap();
+        let svg = std::fs::read_to_string(&svg_path).unwrap();
+        assert_eq!(svg.matches("<path d=").count(), 1);
+        assert!(svg.contains(" Z\"/>"), "{svg}");
+        let _ = std::fs::remove_file(&dxf_path);
+        let _ = std::fs::remove_file(&svg_path);
+    }
+
+    #[test]
+    fn two_d_export_errors_are_actionable() {
+        let mut e = engine();
+        let err = e
+            .execute(Command::ExportDxf {
+                doc: 1,
+                path: "/tmp/wright_empty.dxf".into(),
+                entities: None,
+                curves: CurveMode::Elements,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("no sketches"), "{err}");
+
+        let s = add_sketch(&mut e, "only construction");
+        add_construction_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        let err = e
+            .execute(Command::ExportSvg {
+                doc: 1,
+                path: "/tmp/wright_construction_only.svg".into(),
+                entities: None,
+                curves: CurveMode::Profiles,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("only construction"), "{err}");
+
+        let err = e
+            .execute(Command::ExportDxf {
+                doc: 1,
+                path: "/tmp/wright_unknown.dxf".into(),
+                entities: Some(vec![99]),
+                curves: CurveMode::Elements,
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::UnknownEntity { entity: 99, .. }), "{err:?}");
     }
 
     // --- sketches -----------------------------------------------------------

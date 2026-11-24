@@ -1025,7 +1025,7 @@ fn arc_points(center: [f64; 2], radius: f64, start_deg: f64, end_deg: f64) -> Ve
 
 /// Catmull-Rom interpolation through every control point. Open splines
 /// duplicate their endpoints to define tangents; closed splines wrap.
-fn spline_points(points: &[[f64; 2]], closed: bool) -> Vec<[f64; 2]> {
+pub(crate) fn spline_points(points: &[[f64; 2]], closed: bool) -> Vec<[f64; 2]> {
     let n = points.len();
     if n == 0 {
         return Vec::new();

@@ -15,7 +15,9 @@ The architecture inverts the usual GUI-first design: the headless core and
 its command bus are the product; the human-facing viewer is just another
 client — as is the Python client an agent drives. Mesh import closes the other
 direction: an STL, OBJ or 3MF file becomes an ordinary editable solid, so an
-agent handed an existing part can participate instead of starting over.
+agent handed an existing part can participate instead of starting over. DXF
+and SVG export close the drawing loop: sketches and their closed profiles come
+back out in sketch-local millimeters for CAD, laser cutters and CAM.
 
 ```
 ┌───────────────┐   JSON-RPC (stdio/TCP)   ┌───────────────┐   ┌──────────────────┐
@@ -75,7 +77,7 @@ and `compare.png` (the drawing above that part).
 | Path | What it is |
 |---|---|
 | `crates/protocol` | Wire types: commands, results, meshes (serde/JSON) |
-| `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, deterministic rendering |
+| `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, DXF/SVG drawings, deterministic rendering |
 | `crates/server` | `wright` binary — line-delimited JSON-RPC on stdio or TCP |
 | `crates/viewer` | `wright-view` — wgpu renderer, talks only the bus |
 | `python/wright` | Dependency-free sync Python client (the agent API) and MCP server |
@@ -120,8 +122,8 @@ Commands, grouped by intent:
 - **Interoperability**: `import_mesh` (STL/OBJ/3MF → solid), `add_mesh` (raw
   triangles; the baked program step import records)
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `validate`,
-  `diff_scene`, `export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
-  `open_document`
+  `diff_scene`, `export_stl`, `export_3mf`, `export_dxf`, `export_svg`,
+  `render_offscreen`, `save_document`, `open_document`
 - **History**: `undo`, `redo`
 
 `get_program` returns the program, the parameters and any embedded authoring
@@ -166,6 +168,21 @@ rotations pivot on the part. A 3MF build with several objects merges into one
 solid (per-object splitting waits for the assembly milestone). A
 non-watertight file is imported anyway — `validate` reports it, and booleans
 reject it with an error rather than guessing a repair.
+
+`export_dxf{doc,path,entities?,curves?}` and `export_svg{doc,path,entities?,curves?}`
+write a **2D drawing** of sketches. Coordinates are the sketch's own (u, v)
+millimeters, not world XYZ: a sketch is a 2D frame placed in 3D, and projecting
+it would flatten a sketch on a vertical wall into a line. `entities` defaults to
+every sketch; naming a solid made by `extrude`, `revolve`, `sweep` or `loft`
+exports its source sketch's closed profile loops, so a part's footprint needs
+no sketch id. `curves` is `elements` (the default — native lines, circles and
+arcs, with interpolating splines written as polylines because DXF R12 has no
+spline entity), `profiles` (only the closed loops an extrude consumes — the
+cutter outline) or `both`. DXF is ASCII R12 with millimeter units and separate
+layers for drawing, construction (dashed) and profile geometry; SVG flips Y
+upright, uses a millimeter viewBox and groups the same layers. Construction
+geometry is exported but never part of a profile. Both are session commands,
+never enter the program, and are byte-identical for identical drawings.
 
 Conventions: millimeters, degrees, RGBA floats. Z is up — primitives are
 axis-aligned and `add_cylinder` extrudes along +Z. Document ids start at 1;
@@ -687,7 +704,11 @@ turns, while the script remains the editing surface.
         angle, and the cleaned triangles become an `add_mesh` program step, so
         the `.wcad` is self-contained. Imported solids transform, boolean,
         fillet, validate and export like any other entity.
-  - [ ] **DXF/SVG output** for sketches and profiles.
+  - [x] **DXF/SVG output** for sketches and profiles: `export_dxf` writes ASCII
+        R12 layers (drawing, dashed construction, closed profiles) with native
+        lines/circles/arcs, and `export_svg` writes the same drawing with an
+        upright millimeter viewBox. Sketch-local coordinates, a solid's source
+        profile by id, and `curves=elements|profiles|both`.
   - [ ] **STEP path** with an explicit B-rep vs tessellation decision.
 - [ ] **M19 — Assemblies and drawings**: parts/instances, mates, interference
       and BOM; drawing views with dimensions and annotations. The two pillars
@@ -698,12 +719,13 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 18 is underway: the mesh-import slice is complete. `import_mesh`
-turns an STL, OBJ or 3MF file into an editable wright solid, bakes it into the
-program, and keeps the whole downstream toolchain — booleans, fillets,
-validate, save/open, STL/3MF export — working on it. DXF/SVG output and the
-STEP path are next. The suite is **203 tests** (189 engine + 1 server +
-13 viewer).
+Milestone 18 is underway: mesh import and 2D drawing output are complete.
+`import_mesh` turns an STL, OBJ or 3MF file into an editable wright solid,
+bakes it into the program, and keeps the whole downstream toolchain — booleans,
+fillets, validate, save/open, STL/3MF export — working on it. `export_dxf` and
+`export_svg` take the other direction, handing sketches and their closed
+profiles to drawing and cutting tools in sketch-local millimeters. The STEP
+path is next. The suite is **215 tests** (201 engine + 1 server + 13 viewer).
 
 What it covers:
 
@@ -757,11 +779,14 @@ What it covers:
   imports; welding, degenerate/duplicate handling, outward winding and
   crease-aware normals; self-contained `add_mesh` replay after the source file
   is deleted, imported solids in booleans and transforms, and round trips back
-  through STL and 3MF.
+  through STL and 3MF. 2D output: DXF R12 layers and SVG with sketch-local
+  coordinates, native lines/circles/arcs, splines as polylines, dashed
+  construction geometry, closed profile loops, a solid's source profile by id,
+  Y-flipped upright SVG arcs, sanitized layer names and byte-stable files.
 
-The rest of M18 is DXF/SVG output and a STEP path with an explicit B-rep vs
-tessellation decision. A GUI feature tree is not on the list — the agent edits
-the script and replays.
+The rest of M18 is the STEP path with an explicit B-rep vs tessellation
+decision. A GUI feature tree is not on the list — the agent edits the script
+and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
@@ -784,7 +809,9 @@ source, change a knob → export back to Python and run it),
 rebuilt, beside a cold replay that rebuilds all of them), and
 `examples/import_mesh.py` (export STL/3MF, import both into fresh documents,
 fuse a boss onto the imported STL, render, then reopen the saved program after
-deleting the source files).
+deleting the source files), and `examples/export_2d.py` (a slot profile with
+mounting holes exported three ways: the full DXF drawing, profile-only loops
+for a cutter, and the same loops from the solid instead of the sketch).
 
 ## What agents say
 

@@ -367,6 +367,7 @@ footer{padding:0 0 48px}
     <p><b>Shape leverage.</b> <code>linear_pattern</code> and <code>circular_pattern</code> repeat solids, <code>mirror</code> reflects them, <code>shell</code> hollows in place (open faces by outward normal), and <code>hole</code> cuts a real through, blind, counterbore or countersink hole. <code>sweep</code> carries a profile along a polyline or helix, <code>loft</code> morphs between profiles, and <code>thread</code> builds a helical screw thread: union it for a screw, subtract it for a threaded hole.</p>
 
     <p><b>Interoperability.</b> <code>import_mesh</code> reads binary or ASCII STL, OBJ and 3MF (units, build transforms and components included), welds the vertices, drops degenerate and duplicate triangles, flips inward winding and derives crease-aware normals. The cleaned triangles become an ordinary <code>add_mesh</code> program step, so the saved <code>.wcad</code> reopens after the source file is deleted and the imported part transforms, booleans, validates and exports like anything the script built.</p>
+    <p><b>2D output.</b> <code>export_dxf</code> and <code>export_svg</code> write sketches in their own <code>(u, v)</code> millimeters — native lines, circles and arcs, splines as polylines, dashed construction geometry, and closed profile loops on separate layers. Name a solid instead of its sketch and the source profile comes out; ask for <code>profiles</code> alone and it is a cutter-ready outline. Both files are deterministic, and exporting never touches the program.</p>
   </div>
 </section>
 
@@ -456,12 +457,13 @@ python3 -m venv .venv
           <li><b>M16 Shape leverage</b> <span>patterns, mirror, shell, holes, sweep, loft, threads</span></li>
           <li><b>M17 Sketch completeness</b> <span>arcs, splines, construction, trim/extend/offset, conflict diagnostics</span></li>
           <li><b>M18 Mesh import</b> <span>STL/OBJ/3MF in, self-contained replay</span></li>
+          <li><b>M18b DXF/SVG output</b> <span>sketch-local drawings and cutter profiles</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M18b 2D and STEP</b> <span>DXF/SVG output, STEP path</span></li>
+          <li><b>M18c STEP path</b> <span>explicit B-rep vs tessellation</span></li>
           <li><b>M19 Assemblies and drawings</b></li>
         </ul>
       </div>
@@ -475,7 +477,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">Wright CAD</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/wright-cad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/wright-cad">sy-borg/wright-cad</a></div>
-      <div><small>Status</small>Milestone 18 · mesh import</div>
+      <div><small>Status</small>Milestone 18 · mesh import and 2D export</div>
     </div>
   </div>
 </footer>

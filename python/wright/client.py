@@ -1337,6 +1337,41 @@ class Wright:
         per-object colors) — a session command."""
         return self._request("export_3mf", doc=doc, path=path, entities=entities)
 
+    def export_dxf(
+        self,
+        doc: int,
+        path: str,
+        entities: list[int] | None = None,
+        curves: str = "elements",
+    ) -> dict[str, Any]:
+        """Write a 2D ASCII DXF (R12) of sketches — a session command.
+
+        Coordinates are **sketch-local** (u, v) millimeters, not world XYZ.
+        ``entities`` defaults to every sketch; name an extrude/revolve/sweep/
+        loft solid to export its source sketch's closed profile instead.
+        ``curves`` is ``"elements"`` (solved lines/circles/arcs/splines),
+        ``"profiles"`` (closed loops only, e.g. for a cutter) or ``"both"``.
+        """
+        return self._request(
+            "export_dxf", doc=doc, path=path, entities=entities, curves=curves
+        )
+
+    def export_svg(
+        self,
+        doc: int,
+        path: str,
+        entities: list[int] | None = None,
+        curves: str = "elements",
+    ) -> dict[str, Any]:
+        """Write an SVG of sketches (same selection as :meth:`export_dxf`).
+
+        The viewBox is in millimeters, construction geometry is dashed and
+        profile loops form their own group — a session command.
+        """
+        return self._request(
+            "export_svg", doc=doc, path=path, entities=entities, curves=curves
+        )
+
     def pick(
         self,
         doc: int,

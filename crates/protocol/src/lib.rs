@@ -133,7 +133,7 @@ impl RpcResponse {
 /// Modeling commands (Add*, Transform, SetColor, Delete, Boolean) are
 /// appended to the document program and replayed when parameters change.
 /// Session commands (initialize, undo/redo, get_scene, export_stl,
-/// export_3mf, ...)
+/// export_3mf, export_dxf, export_svg, ...)
 /// are not part of the program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
@@ -363,6 +363,43 @@ pub enum Command {
         path: String,
         #[serde(default)]
         entities: Option<Vec<EntityId>>,
+    },
+
+    /// Write a 2D ASCII DXF (R12) drawing of sketches. Coordinates are the
+    /// **sketch-local** (u, v) millimeters — the drawing's own 2D frame, not
+    /// world XYZ. `entities` defaults to every sketch; explicitly naming an
+    /// extrude/revolve/sweep/loft solid exports its source sketch profile
+    /// instead, so a part's footprint can be exported without knowing the
+    /// sketch id. A session command, not part of the program.
+    #[serde(rename = "export_dxf")]
+    ExportDxf {
+        doc: DocId,
+        /// Filesystem path the *server* writes to; absolute paths avoid
+        /// surprises about the server's working directory.
+        path: String,
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+        /// Which curves to write. Defaults to the solved sketch elements;
+        /// `profiles` writes only the closed loops an extrude/revolve
+        /// consumes, and `both` writes both on separate layers.
+        #[serde(default)]
+        curves: CurveMode,
+    },
+
+    /// Write an SVG of sketches, with the same selection and coordinate
+    /// rules as [`Command::ExportDxf`]: sketch-local millimeters, a viewBox
+    /// around the drawing, construction geometry dashed and profile loops
+    /// on their own group. A session command, not part of the program.
+    #[serde(rename = "export_svg")]
+    ExportSvg {
+        doc: DocId,
+        /// Filesystem path the *server* writes to; absolute paths avoid
+        /// surprises about the server's working directory.
+        path: String,
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+        #[serde(default)]
+        curves: CurveMode,
     },
 
     /// Write the document to a `.wcad` file: its program plus the current
@@ -1102,6 +1139,26 @@ impl std::fmt::Display for MeshFormat {
     }
 }
 
+/// Which curves a 2D drawing export writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurveMode {
+    /// The solved sketch elements: lines, circles, arcs and splines (the
+    /// latter as polylines, since DXF R12 has no spline entity).
+    Elements,
+    /// Only the closed profile loops an extrude/revolve consumes, as
+    /// polylines — e.g. a laser-cutter outline.
+    Profiles,
+    /// Both: elements on the sketch layer, profile loops on a separate one.
+    Both,
+}
+
+impl Default for CurveMode {
+    fn default() -> Self {
+        Self::Elements
+    }
+}
+
 /// Which set operation a [`Command::Boolean`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1326,6 +1383,23 @@ pub enum CommandResult {
         path: String,
         objects: usize,
         tris: usize,
+        bytes: usize,
+    },
+    /// A 2D DXF drawing was written. `entities` counts the source entities
+    /// exported, `curves` the primitives in the file.
+    DxfExported {
+        doc: DocId,
+        path: String,
+        entities: usize,
+        curves: usize,
+        bytes: usize,
+    },
+    /// A 2D SVG drawing was written (same fields as [`Self::DxfExported`]).
+    SvgExported {
+        doc: DocId,
+        path: String,
+        entities: usize,
+        curves: usize,
         bytes: usize,
     },
     DocumentSaved {

@@ -40,7 +40,8 @@ Workflow: create_document -> set_parameter(...) -> add primitives with expressio
 dimensions -> transform -> boolean ops for printable solids -> wright_scene to
 verify -> validate to prove watertightness/printability and diff_scene to see
 exactly what a knob changed -> wright_render to SEE the result -> export_stl/
-export_3mf for slicing. Sketches are
+export_3mf for slicing, and export_dxf/export_svg for 2D sketch drawings.
+Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle/add_sketch_arc/add_sketch_spline ->
 constrain(...) re-solves after every change -> trim_sketch/extend_sketch/
@@ -237,6 +238,15 @@ export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
 export_3mf{doc,path,entities?} (3MF package, world space, absolute path — one
   named object per solid with its display color, millimeter unit; prefer it
   over STL when the build has several parts or colors; session command),
+export_dxf{doc,path,entities?,curves?: "elements"|"profiles"|"both"} (2D ASCII
+  DXF R12; sketch-local (u,v) millimeters, NOT world XYZ. entities defaults to
+  every sketch; naming an extrude/revolve/sweep/loft solid exports its source
+  sketch's closed profile loops, so a part's footprint needs no sketch id.
+  curves defaults to "elements"; "profiles" writes only the closed loops a
+  cutter needs, "both" separates them onto a profile layer; session command),
+export_svg{doc,path,entities?,curves?} (same selection and coordinates as
+  export_dxf, but an SVG with an mm viewBox: Y flipped upright, construction
+  geometry dashed, profile loops on their own group; session command),
 render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,ortho?,background?,path?}
   (headless PNG; prefer the wright_render tool, which returns the image inline.
   ortho:true gives a parallel projection for front/top/side views).
