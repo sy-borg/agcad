@@ -181,6 +181,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Export3mf { doc, .. }
         | Command::ExportDxf { doc, .. }
         | Command::ExportSvg { doc, .. }
+        | Command::ExportStep { doc, .. }
         | Command::SaveDocument { doc, .. }
         | Command::GetProgram { doc }
         | Command::RenderOffscreen { doc, .. }

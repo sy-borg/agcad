@@ -133,7 +133,7 @@ impl RpcResponse {
 /// Modeling commands (Add*, Transform, SetColor, Delete, Boolean) are
 /// appended to the document program and replayed when parameters change.
 /// Session commands (initialize, undo/redo, get_scene, export_stl,
-/// export_3mf, export_dxf, export_svg, ...)
+/// export_3mf, export_step, export_dxf, export_svg, ...)
 /// are not part of the program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
@@ -400,6 +400,26 @@ pub enum Command {
         entities: Option<Vec<EntityId>>,
         #[serde(default)]
         curves: CurveMode,
+    },
+
+    /// Write a STEP (ISO 10303-21, AP214 `AUTOMOTIVE_DESIGN`) file of the
+    /// selected entities' **world-space** geometry (default: every solid in
+    /// the document). wright is a tessellation kernel, so the file is an
+    /// explicit **faceted B-rep**: one planar `FACE_SURFACE` per triangle,
+    /// welded `CARTESIAN_POINT`s shared between neighbours, and one
+    /// `FACETED_BREP` per closed edge-manifold piece. Open or non-manifold
+    /// pieces are written as `SHELL_BASED_SURFACE_MODEL`s instead of being
+    /// rejected or mislabelled as solids. Analytic surfaces (true cylinders,
+    /// cones, splines) are not reconstructed. A session command, not part of
+    /// the program — exporting changes no state.
+    #[serde(rename = "export_step")]
+    ExportStep {
+        doc: DocId,
+        /// Filesystem path the *server* writes to; absolute paths avoid
+        /// surprises about the server's working directory.
+        path: String,
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
     },
 
     /// Write the document to a `.wcad` file: its program plus the current
@@ -1400,6 +1420,18 @@ pub enum CommandResult {
         path: String,
         entities: usize,
         curves: usize,
+        bytes: usize,
+    },
+    /// A STEP file was written. `entities` counts the source entities,
+    /// `solids` the closed `FACETED_BREP` pieces, `surfaces` the open
+    /// `SHELL_BASED_SURFACE_MODEL` pieces and `faces` the triangles written.
+    StepExported {
+        doc: DocId,
+        path: String,
+        entities: usize,
+        solids: usize,
+        surfaces: usize,
+        faces: usize,
         bytes: usize,
     },
     DocumentSaved {

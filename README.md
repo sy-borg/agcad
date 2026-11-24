@@ -17,7 +17,9 @@ client — as is the Python client an agent drives. Mesh import closes the other
 direction: an STL, OBJ or 3MF file becomes an ordinary editable solid, so an
 agent handed an existing part can participate instead of starting over. DXF
 and SVG export close the drawing loop: sketches and their closed profiles come
-back out in sketch-local millimeters for CAD, laser cutters and CAM.
+back out in sketch-local millimeters for CAD, laser cutters and CAM. STEP
+export hands the solids themselves to another CAD kernel as an explicit
+faceted B-rep, without pretending the tessellation is analytic geometry.
 
 ```
 ┌───────────────┐   JSON-RPC (stdio/TCP)   ┌───────────────┐   ┌──────────────────┐
@@ -77,7 +79,7 @@ and `compare.png` (the drawing above that part).
 | Path | What it is |
 |---|---|
 | `crates/protocol` | Wire types: commands, results, meshes (serde/JSON) |
-| `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, DXF/SVG drawings, deterministic rendering |
+| `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, DXF/SVG drawings, STEP export, deterministic rendering |
 | `crates/server` | `wright` binary — line-delimited JSON-RPC on stdio or TCP |
 | `crates/viewer` | `wright-view` — wgpu renderer, talks only the bus |
 | `python/wright` | Dependency-free sync Python client (the agent API) and MCP server |
@@ -122,8 +124,8 @@ Commands, grouped by intent:
 - **Interoperability**: `import_mesh` (STL/OBJ/3MF → solid), `add_mesh` (raw
   triangles; the baked program step import records)
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `validate`,
-  `diff_scene`, `export_stl`, `export_3mf`, `export_dxf`, `export_svg`,
-  `render_offscreen`, `save_document`, `open_document`
+  `diff_scene`, `export_stl`, `export_3mf`, `export_step`, `export_dxf`,
+  `export_svg`, `render_offscreen`, `save_document`, `open_document`
 - **History**: `undo`, `redo`
 
 `get_program` returns the program, the parameters and any embedded authoring
@@ -183,6 +185,23 @@ layers for drawing, construction (dashed) and profile geometry; SVG flips Y
 upright, uses a millimeter viewBox and groups the same layers. Construction
 geometry is exported but never part of a profile. Both are session commands,
 never enter the program, and are byte-identical for identical drawings.
+
+`export_step{doc,path,entities?}` writes the selected solids (default: every
+solid) as STEP ISO 10303-21 AP214 (`AUTOMOTIVE_DESIGN`) in world space. The
+format choice is explicit: wright is a tessellation kernel, so it writes a
+**faceted B-rep** instead of inventing analytic surfaces. Every triangle becomes
+a planar `FACE_SURFACE` with a `PLANE` and an `AXIS2_PLACEMENT_3D`, bounded by a
+three-point `POLY_LOOP`; coincident vertices are welded by exact `f32` position,
+so neighbouring faces share `CARTESIAN_POINT`s. Each connected, edge-manifold,
+consistently wound piece becomes a `FACETED_BREP` in a `CLOSED_SHELL`. An open
+or non-manifold piece becomes an `OPEN_SHELL` in a
+`SHELL_BASED_SURFACE_MODEL` instead of being rejected or mislabelled as a
+solid; the result reports `entities`, `solids`, `surfaces`, `faces` and
+`bytes`. Entity names ride on the `FACETED_BREP`s; display colors are not
+written. The header timestamp is fixed, so repeated exports are byte-identical.
+STEP **import** is deliberately absent: real STEP files are mostly trimmed
+analytic surfaces, and turning those into a watertight mesh is a different
+kernel problem — incoming geometry stays on STL/OBJ/3MF.
 
 Conventions: millimeters, degrees, RGBA floats. Z is up — primitives are
 axis-aligned and `add_cylinder` extrudes along +Z. Document ids start at 1;
@@ -602,12 +621,13 @@ This session is private. For the human/agent loop, start
 
 ## Roadmap
 
-Direction: **the script is the source of truth**. The next milestones make the
-agent-authored script loop faster and more expressive — shape and sketch
+Direction: **the script is the source of truth**. The milestones so far make
+the agent-authored script loop faster and more expressive — shape and sketch
 coverage, interoperability — and give the human a concrete way
 to point at geometry, rather than building a GUI feature tree. Validation and
 scene diffs (M14) make a rebuild provable; incremental rebuilds (M15) make it
-fast. Feature-history editing is
+fast; interoperability (M18) connects the script to existing meshes, drawings
+and CAD kernels. Next are assemblies and drawings. Feature-history editing is
 deliberately not a goal: replay is deterministic and `set_parameter` covers knob
 turns, while the script remains the editing surface.
 
@@ -693,10 +713,7 @@ turns, while the script remains the editing surface.
       concentric, symmetric, angle and point-on-line constraints; construction
       geometry; trim/extend/offset; conflict diagnostics that name the
       over-constrained equations.
-
-### Next
-
-- [ ] **M18 — Interoperability** (in progress):
+- [x] **M18 — Interoperability**:
   - [x] **Mesh import** — `import_mesh` reads binary and ASCII STL, OBJ and
         3MF (store or deflate ZIP, units, build transforms, components) and
         adds a real solid. Vertices are welded, degenerate/duplicate triangles
@@ -709,7 +726,17 @@ turns, while the script remains the editing surface.
         lines/circles/arcs, and `export_svg` writes the same drawing with an
         upright millimeter viewBox. Sketch-local coordinates, a solid's source
         profile by id, and `curves=elements|profiles|both`.
-  - [ ] **STEP path** with an explicit B-rep vs tessellation decision.
+  - [x] **STEP path** with an explicit B-rep vs tessellation decision.
+        `export_step` writes AP214 `FACETED_BREP`s — planar per-triangle
+        `FACE_SURFACE`s over welded `POLY_LOOP`s, one closed shell per
+        connected edge-manifold piece. It does not reconstruct analytic
+        cylinders, cones or splines, and STEP import is out of scope: trimmed
+        analytic surfaces are a different kernel, so incoming geometry stays
+        on STL/OBJ/3MF. Open or non-manifold pieces become
+        `SHELL_BASED_SURFACE_MODEL`s and the result counts both.
+
+### Next
+
 - [ ] **M19 — Assemblies and drawings**: parts/instances, mates, interference
       and BOM; drawing views with dimensions and annotations. The two pillars
       still missing from “general parametric CAD”.
@@ -719,13 +746,15 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 18 is underway: mesh import and 2D drawing output are complete.
+Milestone 18 is complete: interoperability runs in both directions.
 `import_mesh` turns an STL, OBJ or 3MF file into an editable wright solid,
 bakes it into the program, and keeps the whole downstream toolchain — booleans,
-fillets, validate, save/open, STL/3MF export — working on it. `export_dxf` and
-`export_svg` take the other direction, handing sketches and their closed
-profiles to drawing and cutting tools in sketch-local millimeters. The STEP
-path is next. The suite is **215 tests** (201 engine + 1 server + 13 viewer).
+fillets, validate, save/open, STL/3MF/STEP export — working on it. `export_dxf`
+and `export_svg` hand sketches and their closed profiles to drawing and cutting
+tools in sketch-local millimeters. `export_step` hands the solids themselves to
+another CAD kernel as a faceted AP214 B-rep, with open meshes honestly reported
+as surface models. The suite is **226 tests** (212 engine + 1 server +
+13 viewer).
 
 What it covers:
 
@@ -783,10 +812,11 @@ What it covers:
   coordinates, native lines/circles/arcs, splines as polylines, dashed
   construction geometry, closed profile loops, a solid's source profile by id,
   Y-flipped upright SVG arcs, sanitized layer names and byte-stable files.
-
-The rest of M18 is the STEP path with an explicit B-rep vs tessellation
-decision. A GUI feature tree is not on the list — the agent edits the script
-and replays.
+  STEP output: AP214 faceted B-reps with welded shared points, planar
+  per-triangle faces, closed shells per connected piece, open and
+  inconsistently wound pieces as surface models, world-space coordinates,
+  escaped names, fixed timestamps and byte-identical repeat exports. A GUI
+  feature tree is not on the list — the agent edits the script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
@@ -809,9 +839,11 @@ source, change a knob → export back to Python and run it),
 rebuilt, beside a cold replay that rebuilds all of them), and
 `examples/import_mesh.py` (export STL/3MF, import both into fresh documents,
 fuse a boss onto the imported STL, render, then reopen the saved program after
-deleting the source files), and `examples/export_2d.py` (a slot profile with
+deleting the source files), `examples/export_2d.py` (a slot profile with
 mounting holes exported three ways: the full DXF drawing, profile-only loops
-for a cutter, and the same loops from the solid instead of the sketch).
+for a cutter, and the same loops from the solid instead of the sketch), and
+`examples/step_export.py` (a bored plate as one faceted B-rep, a second export
+proving byte determinism, and an open sheet reported as a surface model).
 
 ## What agents say
 

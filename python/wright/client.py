@@ -1372,6 +1372,27 @@ class Wright:
             "export_svg", doc=doc, path=path, entities=entities, curves=curves
         )
 
+    def export_step(
+        self,
+        doc: int,
+        path: str,
+        entities: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Write a STEP (AP214) faceted B-rep of solids — a session command.
+
+        wright's kernel is tessellated, so this is deliberately a **faceted**
+        B-rep, not analytic geometry: each triangle becomes a planar
+        ``FACE_SURFACE`` over a ``POLY_LOOP``, coincident vertices are welded,
+        and each closed edge-manifold piece becomes a ``FACETED_BREP``.
+        Open or non-manifold pieces become ``SHELL_BASED_SURFACE_MODEL``
+        surfaces; the result counts ``solids``, ``surfaces`` and ``faces``.
+        Geometry is world space, like :meth:`export_stl`; colors are not
+        written.
+        """
+        return self._request(
+            "export_step", doc=doc, path=path, entities=entities
+        )
+
     def pick(
         self,
         doc: int,

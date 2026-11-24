@@ -34,6 +34,7 @@ pub mod render;
 pub mod shell;
 pub mod sketch;
 pub mod solid;
+pub mod step;
 pub mod stl;
 pub mod svg;
 pub mod sweep;
@@ -545,6 +546,7 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Export3mf { doc: d, .. }
         | Command::ExportDxf { doc: d, .. }
         | Command::ExportSvg { doc: d, .. }
+        | Command::ExportStep { doc: d, .. }
         | Command::SaveDocument { doc: d, .. }
         | Command::RenderOffscreen { doc: d, .. }
         | Command::CloseDocument { doc: d } => *d = doc,
@@ -1077,6 +1079,47 @@ impl Engine {
                 })
             },
 
+            Command::ExportStep { doc, path, entities } => {
+                let d = self.doc(*doc)?;
+                let ids: Vec<EntityId> = match entities {
+                    Some(ids) => ids.clone(),
+                    None => d.entities.keys().copied().collect(),
+                };
+                let mut parts = Vec::new();
+                for id in ids {
+                    let e = d
+                        .entities
+                        .get(&id)
+                        .ok_or(Error::UnknownEntity { doc: *doc, entity: id })?;
+                    // Sketches are display-only; empty solids would produce
+                    // an empty shell.
+                    if matches!(e.shape, Shape::Sketch { .. }) || e.mesh.indices.is_empty() {
+                        continue;
+                    }
+                    parts.push(step::Part {
+                        name: &e.name,
+                        mesh: &e.mesh,
+                        transform: e.transform(),
+                    });
+                }
+                if parts.is_empty() {
+                    return Err(Error::Invalid(
+                        "nothing to export: no solid entities (hint: sketches are not meshes — extrude them into solids first)".into(),
+                    ));
+                }
+                let sources = parts.len();
+                let (resolved, export) = step::write_step(path, &parts, &d.name)?;
+                Ok(CommandResult::StepExported {
+                    doc: *doc,
+                    path: resolved,
+                    entities: sources,
+                    solids: export.solids,
+                    surfaces: export.surfaces,
+                    faces: export.faces,
+                    bytes: export.bytes,
+                })
+            },
+
             Command::SaveDocument { doc, path, source } => {
                 let d = self.doc_mut(*doc)?;
                 // Remember the recipe so `get_program` reflects what a
@@ -1567,6 +1610,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Export3mf { doc, .. }
         | Command::ExportDxf { doc, .. }
         | Command::ExportSvg { doc, .. }
+        | Command::ExportStep { doc, .. }
         | Command::RenderOffscreen { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         _ => None,
@@ -4421,6 +4465,123 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, Error::UnknownEntity { entity: 99, .. }), "{err:?}");
+    }
+
+    #[test]
+    fn step_export_writes_a_world_space_faceted_brep() {
+        let mut e = engine();
+        let id = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "base".into(),
+                center: vec3(0.0),
+                size: vec3(10.0),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::Transform {
+            doc: 1,
+            entity: id,
+            translation: Some([num(100.0), num(0.0), num(0.0)]),
+            rotation_deg: None,
+            scale: None,
+        })
+        .unwrap();
+
+        let (path, path_s) = temp_file("wright_export.step");
+        match e
+            .execute(Command::ExportStep { doc: 1, path: path_s, entities: None })
+            .unwrap()
+        {
+            CommandResult::StepExported {
+                entities,
+                solids,
+                surfaces,
+                faces,
+                bytes,
+                path: resolved,
+                ..
+            } => {
+                assert_eq!(entities, 1);
+                assert_eq!(solids, 1);
+                assert_eq!(surfaces, 0);
+                assert_eq!(faces, 12);
+                assert_eq!(bytes, std::fs::metadata(&path).unwrap().len() as usize);
+                assert!(resolved.ends_with("wright_export.step"));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("FACETED_BREP('base'"));
+        assert!(text.contains("FACETED_BREP_SHAPE_REPRESENTATION('test'"));
+        // World-space vertices, not the entity-local 5 mm cube.
+        assert!(text.contains("(95.,-5.,-5.)"));
+        assert!(text.contains("(105.,5.,5.)"));
+
+        // Exporting is a session command: two identical writes are identical
+        // and neither changes the document.
+        let (first_path, first_s) = temp_file("wright_export_a.step");
+        let (second_path, second_s) = temp_file("wright_export_b.step");
+        for target in [first_s, second_s] {
+            e.execute(Command::ExportStep { doc: 1, path: target, entities: None }).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(&first_path).unwrap(),
+            std::fs::read(&second_path).unwrap()
+        );
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert_eq!(entities.len(), 1),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&first_path);
+        let _ = std::fs::remove_file(&second_path);
+    }
+
+    #[test]
+    fn step_export_marks_open_meshes_as_surfaces() {
+        let mut e = engine();
+        e.execute(Command::AddMesh {
+            doc: 1,
+            name: "sheet".into(),
+            positions: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            indices: vec![0, 1, 2],
+            smooth_angle_deg: None,
+            color: None,
+        })
+        .unwrap();
+        let (path, path_s) = temp_file("wright_sheet.step");
+        match e
+            .execute(Command::ExportStep { doc: 1, path: path_s, entities: None })
+            .unwrap()
+        {
+            CommandResult::StepExported { entities: 1, solids: 0, surfaces: 1, faces: 1, .. } => {},
+            r => panic!("unexpected result {r:?}"),
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("SHELL_BASED_SURFACE_MODEL('sheet'"));
+        assert!(text.contains("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('test surfaces'"));
+        assert!(!text.contains("FACETED_BREP("));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn step_export_skips_sketches_and_rejects_empty_selection() {
+        let mut e = engine();
+        let s = add_sketch(&mut e, "drawing only");
+        add_line(&mut e, s, [0.0, 0.0], [10.0, 0.0]);
+        let err = e
+            .execute(Command::ExportStep {
+                doc: 1,
+                path: "/tmp/wright_sketch_only.step".into(),
+                entities: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("no solid entities"), "{err}");
     }
 
     // --- sketches -----------------------------------------------------------

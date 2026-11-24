@@ -40,7 +40,8 @@ Workflow: create_document -> set_parameter(...) -> add primitives with expressio
 dimensions -> transform -> boolean ops for printable solids -> wright_scene to
 verify -> validate to prove watertightness/printability and diff_scene to see
 exactly what a knob changed -> wright_render to SEE the result -> export_stl/
-export_3mf for slicing, and export_dxf/export_svg for 2D sketch drawings.
+export_3mf for slicing, export_step for a faceted STEP B-rep in other CAD, and
+export_dxf/export_svg for 2D sketch drawings.
 Sketches are
 2D constraint-solved drawings placed in 3D by the entity transform: add_sketch ->
 add_sketch_line/add_sketch_circle/add_sketch_arc/add_sketch_spline ->
@@ -247,6 +248,13 @@ export_dxf{doc,path,entities?,curves?: "elements"|"profiles"|"both"} (2D ASCII
 export_svg{doc,path,entities?,curves?} (same selection and coordinates as
   export_dxf, but an SVG with an mm viewBox: Y flipped upright, construction
   geometry dashed, profile loops on their own group; session command),
+export_step{doc,path,entities?} (STEP ISO 10303-21 AP214, world space: an
+  explicit FACETED B-rep, one planar FACE_SURFACE per triangle with welded
+  shared points. Closed edge-manifold pieces become FACETED_BREP solids; open
+  or non-manifold pieces become SHELL_BASED_SURFACE_MODEL surfaces. Returns
+  entities/solids/surfaces/faces/bytes. Analytic cylinders/cones are NOT
+  reconstructed, and STEP import is not supported — use STL/OBJ/3MF for
+  incoming meshes; session command),
 render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,ortho?,background?,path?}
   (headless PNG; prefer the wright_render tool, which returns the image inline.
   ortho:true gives a parallel projection for front/top/side views).
