@@ -93,6 +93,8 @@ fn is_mutating(command: &Command) -> bool {
         Command::AddBox { .. }
             | Command::AddSphere { .. }
             | Command::AddCylinder { .. }
+            | Command::ImportMesh { .. }
+            | Command::AddMesh { .. }
             | Command::Transform { .. }
             | Command::SetColor { .. }
             | Command::Delete { .. }
@@ -136,6 +138,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         Command::AddBox { doc, .. }
         | Command::AddSphere { doc, .. }
         | Command::AddCylinder { doc, .. }
+        | Command::ImportMesh { doc, .. }
+        | Command::AddMesh { doc, .. }
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }

@@ -23,6 +23,7 @@ pub mod geo;
 pub mod hole;
 pub mod loft;
 pub mod mat4;
+pub mod mesh_import;
 pub mod pattern;
 pub mod pick;
 pub mod plane;
@@ -172,6 +173,9 @@ pub enum Shape {
         source: EntityId,
         kind: pattern::CopyKind,
     },
+    /// An imported or client-supplied triangle mesh. The geometry lives in
+    /// `Entity::mesh`; this variant only marks it as a standalone solid.
+    Mesh,
 }
 
 impl Shape {
@@ -189,6 +193,7 @@ impl Shape {
             Self::Loft { .. } => "loft",
             Self::Thread => "thread",
             Self::Copy { kind, .. } => kind.label(),
+            Self::Mesh => "mesh",
         }
     }
 }
@@ -493,6 +498,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         Command::AddBox { doc: d, .. }
         | Command::AddSphere { doc: d, .. }
         | Command::AddCylinder { doc: d, .. }
+        | Command::ImportMesh { doc: d, .. }
+        | Command::AddMesh { doc: d, .. }
         | Command::Transform { doc: d, .. }
         | Command::SetColor { doc: d, .. }
         | Command::Delete { doc: d, .. }
@@ -616,10 +623,60 @@ impl Engine {
                 Ok(CommandResult::Closed { doc: *doc })
             },
 
+            // --- mesh import: parse now, record the baked triangles -----
+            Command::ImportMesh {
+                doc,
+                path,
+                name,
+                scale,
+                format,
+                smooth_angle_deg,
+                color,
+            } => {
+                // Fail on a bad document before touching the filesystem.
+                self.doc(*doc)?;
+                let scale = scale.unwrap_or(1.0);
+                let imported = mesh_import::import_file(path, *format, scale)?;
+                let entity_name = name
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or(imported.name);
+                let add = Command::AddMesh {
+                    doc: *doc,
+                    name: entity_name.clone(),
+                    positions: imported.positions,
+                    indices: imported.indices,
+                    smooth_angle_deg: *smooth_angle_deg,
+                    color: *color,
+                };
+                match self.execute(add)? {
+                    CommandResult::EntityCreated { entity, .. } => {
+                        let resolved = std::fs::canonicalize(path)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| path.clone());
+                        Ok(CommandResult::MeshImported {
+                            doc: *doc,
+                            entity,
+                            name: entity_name,
+                            format: imported.format,
+                            path: resolved,
+                            bytes: imported.bytes,
+                            vertices: imported.vertices,
+                            triangles: imported.triangles,
+                            dropped: imported.dropped,
+                        })
+                    },
+                    other => Err(Error::Document(format!(
+                        "mesh import produced an unexpected result: {other:?}"
+                    ))),
+                }
+            },
+
             // --- modeling: record into the program, then execute --------
             Command::AddBox { .. }
             | Command::AddSphere { .. }
             | Command::AddCylinder { .. }
+            | Command::AddMesh { .. }
             | Command::Transform { .. }
             | Command::SetColor { .. }
             | Command::Delete { .. }
@@ -1436,6 +1493,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         Command::AddBox { doc, .. }
         | Command::AddSphere { doc, .. }
         | Command::AddCylinder { doc, .. }
+        | Command::ImportMesh { doc, .. }
+        | Command::AddMesh { doc, .. }
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
         | Command::Delete { doc, .. }
@@ -1531,6 +1590,37 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 [1.0; 3],
                 *color,
             )
+        },
+
+        Command::AddMesh { doc, name, positions, indices, smooth_angle_deg, color } => {
+            let angle = smooth_angle_deg.unwrap_or(mesh_import::DEFAULT_SMOOTH_ANGLE_DEG);
+            let key = rebuild::add_mesh_key(positions, indices, angle);
+            let cached = d.cached_geometry(key, |_| {
+                let (mesh, _cleaned) = mesh_import::build(positions, indices, angle)?;
+                // Follow the engine convention: bake the mesh around its
+                // origin and let the translation restore its world position.
+                let (mesh, center) = recenter(&mesh);
+                Ok(rebuild::CachedGeometry {
+                    mesh,
+                    center: Some(center),
+                    ..Default::default()
+                })
+            })?;
+            let id = d.next_entity();
+            let entity = Entity {
+                id,
+                name: name.clone(),
+                shape: Shape::Mesh,
+                mesh: cached.mesh,
+                translation: cached.center.unwrap_or([0.0; 3]),
+                rotation_deg: [0.0; 3],
+                scale: [1.0; 3],
+                color: color.unwrap_or([0.7, 0.72, 0.75, 1.0]),
+                geom_key: key,
+            };
+            let mesh = entity.mesh.clone();
+            d.entities.insert(id, entity);
+            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
         },
 
         Command::Transform { doc, entity, translation, rotation_deg, scale } => {
@@ -2929,7 +3019,8 @@ fn add_entity(
         | Shape::Sweep { .. }
         | Shape::Loft { .. }
         | Shape::Thread
-        | Shape::Copy { .. } => {
+        | Shape::Copy { .. }
+        | Shape::Mesh => {
             unreachable!("derived solid shapes are not tessellated here")
         },
     };
@@ -6504,5 +6595,250 @@ mod tests {
 
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn import_mesh_is_a_self_contained_program_step() {
+        let (stl_path, stl_s) = temp_file("wright_import_source.stl");
+        let (doc_path, doc_s) = temp_file("wright_import_replay.wcad");
+        let (doc2_path, doc2_s) = temp_file("wright_import_replay_again.wcad");
+        let mesh = geo::box_mesh([10.0, 20.0, 30.0]);
+        let (bytes, _) = stl::stl_bytes(&[(mesh, mat4::identity())]);
+        std::fs::write(&stl_path, bytes).unwrap();
+
+        let mut e = engine();
+        match e
+            .execute(Command::ImportMesh {
+                doc: 1,
+                path: stl_s.clone(),
+                name: None,
+                scale: None,
+                format: None,
+                smooth_angle_deg: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::MeshImported {
+                entity, name, format, triangles, vertices, dropped, ..
+            } => {
+                assert_eq!(entity, 1);
+                assert_eq!(name, "wright_import_source");
+                assert_eq!(format, wright_protocol::MeshFormat::Stl);
+                assert_eq!(triangles, 12);
+                assert_eq!(vertices, 8);
+                assert_eq!(dropped, 0);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let bbox = match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => entities[0].world_bbox,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(bbox.min, [-5.0, -10.0, -15.0]);
+        assert_eq!(bbox.max, [5.0, 10.0, 15.0]);
+
+        match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { ok, solids, .. } => {
+                assert!(ok, "welded STL box must validate: {solids:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // The program stores the baked triangles, not a file reference.
+        match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { program, .. } => {
+                assert_eq!(program.len(), 1);
+                assert!(matches!(program[0], Command::AddMesh { .. }), "got {program:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Imported meshes take part in the incremental-rebuild cache too: a
+        // knob turn replays the program but reuses the welded mesh.
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "unused".into(),
+            value: num(1.0),
+            description: None,
+        })
+        .unwrap();
+        match e
+            .execute(Command::SetParameter {
+                doc: 1,
+                name: "unused".into(),
+                value: num(2.0),
+                description: None,
+            })
+            .unwrap()
+        {
+            CommandResult::ParameterSet { rebuilt, reused, .. } => {
+                assert_eq!(rebuilt, 0, "the import is not downstream of a knob");
+                assert_eq!(reused, 1, "the imported mesh came from the cache");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Undo/redo treat the import like any other modeling step. Two knob
+        // turns sit on top of it, so rewind three checkpoints.
+        for _ in 0..3 {
+            e.execute(Command::Undo { doc: 1 }).unwrap();
+        }
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => assert!(entities.is_empty()),
+            r => panic!("unexpected result {r:?}"),
+        }
+        for _ in 0..3 {
+            e.execute(Command::Redo { doc: 1 }).unwrap();
+        }
+
+        let before = scene_meshes(&e);
+        e.execute(Command::SaveDocument { doc: 1, path: doc_s.clone(), source: None }).unwrap();
+        // The .wcad must not need the STL: delete it before opening.
+        std::fs::remove_file(&stl_path).unwrap();
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: doc_s.clone(), name: None }).unwrap();
+        assert_eq!(scene_sig(&e), scene_sig(&b));
+        assert_same_meshes(&before, &scene_meshes(&b));
+        b.execute(Command::SaveDocument { doc: 1, path: doc2_s.clone(), source: None }).unwrap();
+        assert_eq!(
+            std::fs::read(&doc_path).unwrap(),
+            std::fs::read(&doc2_path).unwrap(),
+            "imported triangles must serialize byte-stably"
+        );
+        let _ = std::fs::remove_file(doc_path);
+        let _ = std::fs::remove_file(doc2_path);
+    }
+
+    #[test]
+    fn imported_mesh_participates_in_booleans_and_transforms() {
+        let (stl_path, stl_s) = temp_file("wright_import_editable.stl");
+        let mesh = geo::box_mesh([20.0, 20.0, 10.0]);
+        let (bytes, _) = stl::stl_bytes(&[(mesh, mat4::identity())]);
+        std::fs::write(&stl_path, bytes).unwrap();
+
+        let mut e = engine();
+        e.execute(Command::ImportMesh {
+            doc: 1,
+            path: stl_s.clone(),
+            name: Some("imported base".into()),
+            scale: None,
+            format: None,
+            smooth_angle_deg: None,
+            color: None,
+        })
+        .unwrap();
+        e.execute(Command::AddCylinder {
+            doc: 1,
+            name: "cutter".into(),
+            center: [num(0.0), num(0.0), num(0.0)],
+            radius: num(3.0),
+            height: num(40.0),
+            segments: Some(32),
+            color: None,
+        })
+        .unwrap();
+        match e.execute(Command::Boolean {
+            doc: 1,
+            op: BooleanOp::Difference,
+            entities: vec![1, 2],
+            name: None,
+            color: None,
+        }) {
+            Ok(CommandResult::EntityCreated { entity, mesh, .. }) => {
+                assert_eq!(entity, 3);
+                assert!(!mesh.indices.is_empty());
+            },
+            other => panic!("boolean on an imported mesh failed: {other:?}"),
+        }
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![3]), min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { ok, .. } => assert!(ok, "boolean result must stay printable"),
+            r => panic!("unexpected result {r:?}"),
+        }
+        e.execute(Command::Transform {
+            doc: 1,
+            entity: 3,
+            translation: Some([num(5.0), num(0.0), num(0.0)]),
+            rotation_deg: Some([num(0.0), num(0.0), num(45.0)]),
+            scale: None,
+        })
+        .unwrap();
+        let _ = std::fs::remove_file(stl_path);
+    }
+
+    #[test]
+    fn import_mesh_applies_scale_and_rejects_bad_meshes() {
+        let (stl_path, stl_s) = temp_file("wright_import_scale.stl");
+        let mesh = geo::box_mesh([10.0, 10.0, 10.0]);
+        let (bytes, _) = stl::stl_bytes(&[(mesh, mat4::identity())]);
+        std::fs::write(&stl_path, bytes).unwrap();
+
+        let mut e = engine();
+        e.execute(Command::ImportMesh {
+            doc: 1,
+            path: stl_s.clone(),
+            name: Some("scaled".into()),
+            scale: Some(2.5),
+            format: None,
+            smooth_angle_deg: None,
+            color: None,
+        })
+        .unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                assert_eq!(entities[0].name, "scaled");
+                assert_eq!(entities[0].world_bbox.min, [-12.5, -12.5, -12.5]);
+                assert_eq!(entities[0].world_bbox.max, [12.5, 12.5, 12.5]);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        // An offset source keeps its world position but is baked around its
+        // own center, so later rotations pivot on the part.
+        let (offset_path, offset_s) = temp_file("wright_import_offset.stl");
+        let offset = mat4::compose([100.0, 20.0, 5.0], [0.0; 3], [1.0; 3]);
+        let (bytes, _) = stl::stl_bytes(&[(geo::box_mesh([10.0, 10.0, 10.0]), offset)]);
+        std::fs::write(&offset_path, bytes).unwrap();
+        e.execute(Command::ImportMesh {
+            doc: 1,
+            path: offset_s.clone(),
+            name: Some("offset".into()),
+            scale: None,
+            format: None,
+            smooth_angle_deg: None,
+            color: None,
+        })
+        .unwrap();
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => {
+                let ent = entities.iter().find(|x| x.name == "offset").unwrap();
+                assert_eq!(ent.translation, [100.0, 20.0, 5.0]);
+                assert_eq!(ent.world_bbox.min, [95.0, 15.0, 0.0]);
+                assert_eq!(ent.world_bbox.max, [105.0, 25.0, 10.0]);
+                let lo = ent.mesh.positions.iter().fold([f32::MAX; 3], |mut lo, p| {
+                    for i in 0..3 {
+                        lo[i] = lo[i].min(p[i]);
+                    }
+                    lo
+                });
+                assert_eq!(lo, [-5.0, -5.0, -5.0], "mesh is baked around its center");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(offset_path);
+
+        let err = e
+            .execute(Command::AddMesh {
+                doc: 1,
+                name: "bad".into(),
+                positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                indices: vec![0, 1, 9],
+                smooth_angle_deg: None,
+                color: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("out of range"), "{err}");
+        let _ = std::fs::remove_file(stl_path);
     }
 }

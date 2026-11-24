@@ -47,6 +47,11 @@ Keep the `README.md` and `index.html` in synch with the code.
   (`open_document` replays it). An embedded Python source rides along as the
   canonical recipe but is never executed. Saves must be byte-stable
   (save → open → save is a no-op).
+- Mesh import (`crates/core/src/mesh_import.rs`) parses STL/OBJ/3MF and bakes
+  the result into an `add_mesh` program step, so a `.wcad` never references
+  the source file. Keep zero-area triangles with distinct corners: the
+  manifold kernel emits them on tangent seams and using them keeps the edge
+  pairing closed. Drop only repeated-corner and exact-duplicate triangles.
 - `examples/cross_block.py` embeds its own source into the committed
   `examples/cross_block/*.wcad`. Editing the script therefore changes those
   files' recipe text; regenerate with the example — program and parameters

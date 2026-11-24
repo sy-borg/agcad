@@ -13,7 +13,9 @@ A CAD whose primary user is an **AI agent**.
 
 The architecture inverts the usual GUI-first design: the headless core and
 its command bus are the product; the human-facing viewer is just another
-client — as is the Python client an agent drives.
+client — as is the Python client an agent drives. Mesh import closes the other
+direction: an STL, OBJ or 3MF file becomes an ordinary editable solid, so an
+agent handed an existing part can participate instead of starting over.
 
 ```
 ┌───────────────┐   JSON-RPC (stdio/TCP)   ┌───────────────┐   ┌──────────────────┐
@@ -115,6 +117,8 @@ Commands, grouped by intent:
   `add_sketch_circle`, `add_sketch_arc`, `add_sketch_spline`, `constrain`,
   `remove_constraint`, `move_sketch_point`, `delete_sketch_element`,
   `trim_sketch`, `extend_sketch`, `offset_sketch`, `extrude`, `revolve`
+- **Interoperability**: `import_mesh` (STL/OBJ/3MF → solid), `add_mesh` (raw
+  triangles; the baked program step import records)
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `validate`,
   `diff_scene`, `export_stl`, `export_3mf`, `render_offscreen`, `save_document`,
   `open_document`
@@ -145,6 +149,23 @@ bus), and `edge` is exactly the `edges` filter `fillet`/`chamfer` take
 Sketches are display-only, so they never absorb a ray. The viewer turns a
 click into this command; the human copies the selector and the agent passes
 it straight back — no parallel face or edge ID namespace.
+
+`import_mesh{doc,path,name?,scale?,format?,smooth_angle_deg?,color?}` reads an
+STL (binary or ASCII), OBJ or 3MF file **on the server** and adds it as a
+solid. 3MF's declared unit is converted to millimeters; STL and OBJ are
+assumed millimeters. `scale` multiplies after that (25.4 for an inch-unit file
+without metadata). Vertices are welded by exact position, degenerate and duplicate
+triangles are dropped, a globally inward winding is flipped outward, and
+crease-aware shading normals are derived (`smooth_angle_deg`, default 30,
+keeps sharp edges hard). The parser records the cleaned triangles as an
+`add_mesh` program step, so a `.wcad` save replays without the source file;
+imported solids then behave like any other entity (transform, boolean,
+fillet, validate, export). Source coordinates are preserved in world space,
+while the entity is baked around its own bounding-box center so later
+rotations pivot on the part. A 3MF build with several objects merges into one
+solid (per-object splitting waits for the assembly milestone). A
+non-watertight file is imported anyway — `validate` reports it, and booleans
+reject it with an error rather than guessing a repair.
 
 Conventions: millimeters, degrees, RGBA floats. Z is up — primitives are
 axis-aligned and `add_cylinder` extrudes along +Z. Document ids start at 1;
@@ -658,9 +679,16 @@ turns, while the script remains the editing surface.
 
 ### Next
 
-- [ ] **M18 — Interoperability**: mesh import (STL/OBJ/3MF), DXF/SVG for 2D
-      output, and a STEP path (with an explicit B-rep vs tessellation
-      decision). An agent handed a real CAD file should be able to participate.
+- [ ] **M18 — Interoperability** (in progress):
+  - [x] **Mesh import** — `import_mesh` reads binary and ASCII STL, OBJ and
+        3MF (store or deflate ZIP, units, build transforms, components) and
+        adds a real solid. Vertices are welded, degenerate/duplicate triangles
+        are dropped, inward winding is flipped, normals respect a crease
+        angle, and the cleaned triangles become an `add_mesh` program step, so
+        the `.wcad` is self-contained. Imported solids transform, boolean,
+        fillet, validate and export like any other entity.
+  - [ ] **DXF/SVG output** for sketches and profiles.
+  - [ ] **STEP path** with an explicit B-rep vs tessellation decision.
 - [ ] **M19 — Assemblies and drawings**: parts/instances, mates, interference
       and BOM; drawing views with dimensions and annotations. The two pillars
       still missing from “general parametric CAD”.
@@ -670,10 +698,12 @@ turns, while the script remains the editing surface.
 
 ## Status
 
-Milestone 17 is complete: sketches cover arcs, splines, a wider constraint
-vocabulary, construction geometry, destructive trim/extend/offset edits and
-conflict diagnostics that name redundant equations. The suite is **182
-tests** (174 engine + 8 viewer).
+Milestone 18 is underway: the mesh-import slice is complete. `import_mesh`
+turns an STL, OBJ or 3MF file into an editable wright solid, bakes it into the
+program, and keeps the whole downstream toolchain — booleans, fillets,
+validate, save/open, STL/3MF export — working on it. DXF/SVG output and the
+STEP path are next. The suite is **203 tests** (189 engine + 1 server +
+13 viewer).
 
 What it covers:
 
@@ -722,10 +752,16 @@ What it covers:
   polyline and helical sweeps, square-to-circle and non-convex lofts, real
   right- and left-hand threads, in-place replay, save/open and cold-replay
   determinism.
+- **Interoperability** — binary/ASCII STL, OBJ (polygons, negative indices) and
+  3MF (store/deflate ZIP, unit conversion, build and component transforms)
+  imports; welding, degenerate/duplicate handling, outward winding and
+  crease-aware normals; self-contained `add_mesh` replay after the source file
+  is deleted, imported solids in booleans and transforms, and round trips back
+  through STL and 3MF.
 
-The next milestone is interoperability (M18): mesh import, DXF/SVG output and
-a STEP path with an explicit representation decision. A GUI feature tree is not
-on the list — the agent edits the script and replays.
+The rest of M18 is DXF/SVG output and a STEP path with an explicit B-rep vs
+tessellation decision. A GUI feature tree is not on the list — the agent edits
+the script and replays.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
@@ -743,9 +779,12 @@ thin-wall knob, then diff the rebuild against the saved baseline),
 helical spring, a loft and an M8 thread in one validated scene),
 `examples/cross_block.py` (the picture → model reproduction above),
 `examples/save_load.py` (save → open in a fresh engine → recover the embedded
-source, change a knob → export back to Python and run it), and
+source, change a knob → export back to Python and run it),
 `examples/incremental_rebuild.py` (a knob turn reports how few features
-rebuilt, beside a cold replay that rebuilds all of them).
+rebuilt, beside a cold replay that rebuilds all of them), and
+`examples/import_mesh.py` (export STL/3MF, import both into fresh documents,
+fuse a boss onto the imported STL, render, then reopen the saved program after
+deleting the source files).
 
 ## What agents say
 

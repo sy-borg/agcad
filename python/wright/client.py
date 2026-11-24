@@ -512,6 +512,77 @@ class Wright:
             segments=segments, color=color,
         )
 
+    def import_mesh(
+        self,
+        doc: int,
+        path: str,
+        name: str | None = None,
+        scale: float | None = None,
+        format: str | None = None,
+        smooth_angle_deg: float | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Read an STL, OBJ or 3MF file on the **server** and add it as a solid.
+
+        ``path`` is resolved on the server, so absolute paths are least
+        surprising. 3MF's declared unit is converted to millimeters
+        automatically; ``scale`` multiplies the result (e.g. 25.4 for an
+        inch-unit file without metadata). ``format`` (``"stl"``, ``"obj"`` or
+        ``"3mf"``) overrides detection from the extension and contents;
+        ``name`` defaults to the file stem.
+
+        The parsed triangles are recorded as an ``add_mesh`` program step, so
+        the resulting ``.wcad`` replays without the source file. Vertices are
+        welded, degenerate and duplicate triangles are dropped, an inward
+        winding is flipped outward, and ``smooth_angle_deg`` (default 30)
+        controls which face pairs share shading normals. A non-watertight
+        import is still created — :meth:`validate` reports it, and booleans
+        may reject it. Returns the cleaned vertex/triangle/dropped counts.
+        """
+        return self._request(
+            "import_mesh",
+            doc=doc,
+            path=path,
+            name=name,
+            scale=scale,
+            format=format,
+            smooth_angle_deg=smooth_angle_deg,
+            color=color,
+        )
+
+    def add_mesh(
+        self,
+        doc: int,
+        name: str = "mesh",
+        positions: list[tuple[float, float, float]] | list[list[float]] | None = None,
+        indices: list[int] | list[list[int]] | None = None,
+        smooth_angle_deg: float | None = None,
+        color: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Add a solid from raw triangles (the program step import_mesh records).
+
+        ``indices`` is accepted flat (three per triangle) or as a list of
+        triples; it is flattened here. The same cleanup as :meth:`import_mesh`
+        applies (welding, degenerate/duplicate removal, outward winding).
+        """
+        if positions is None or indices is None:
+            raise TypeError("add_mesh needs positions and indices")
+        flat: list[int] = []
+        for item in indices:
+            if isinstance(item, (list, tuple)):
+                flat.extend(int(i) for i in item)
+            else:
+                flat.append(int(item))
+        return self._request(
+            "add_mesh",
+            doc=doc,
+            name=name,
+            positions=[list(p) for p in positions],
+            indices=flat,
+            smooth_angle_deg=smooth_angle_deg,
+            color=color,
+        )
+
     def boolean(
         self,
         doc: int,

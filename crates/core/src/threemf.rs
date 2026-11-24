@@ -5,7 +5,8 @@
 //! named objects, each with its own display color, and the model declares
 //! its unit (millimeters). The package is written by hand — a store-only
 //! ZIP with fixed timestamps — so the same scene exports to bit-identical
-//! bytes and the core stays dependency-free.
+//! bytes and the writer needs no ZIP library. (Import inflates deflated
+//! entries with `flate2`; see `mesh_import`.)
 //!
 //! Format: OPC package with three parts — `[Content_Types].xml`,
 //! `_rels/.rels` and `3D/3dmodel.model`. Geometry is baked into world space,

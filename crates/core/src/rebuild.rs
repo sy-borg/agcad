@@ -216,6 +216,29 @@ pub fn cylinder_key(radius: f64, height: f64, segments: u32) -> GeomKey {
     h.finish()
 }
 
+/// An imported or client-supplied mesh has no parameters: its raw triangles
+/// and crease angle are its key. Computed before tessellation, so a replay can
+/// reuse the welded mesh and its derived normals.
+pub fn add_mesh_key(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    smooth_angle_deg: f64,
+) -> GeomKey {
+    let mut h = start("mesh");
+    h.f64(smooth_angle_deg);
+    h.u64(positions.len() as u64);
+    for p in positions {
+        for v in p {
+            h.u32(v.to_bits());
+        }
+    }
+    h.u64(indices.len() as u64);
+    for &i in indices {
+        h.u32(i);
+    }
+    h.finish()
+}
+
 /// Sketch display mesh depends on its solved elements, but solids key off the
 /// profile loops they are built from. This key makes a boolean that consumes a
 /// sketch follow edits too.

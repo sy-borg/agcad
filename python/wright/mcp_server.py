@@ -87,6 +87,19 @@ add_box{doc,name,center:[x,y,z],size:[w,d,h],color?},
 add_sphere{doc,name,center,radius,segments?,color?},
 add_cylinder{doc,name,center,radius,height,segments?,color?} (extruded along
   +Z, spanning center.z ± height/2 — no rotation needed to stand it up),
+import_mesh{doc,path,name?,scale?,format?,smooth_angle_deg?,color?} (read an
+  STL (binary/ASCII), OBJ or 3MF from the SERVER filesystem and add it as a
+  solid; `path` should be absolute. 3MF units convert to mm automatically;
+  `scale` multiplies after that. The parser welds vertices, drops degenerate
+  or duplicate triangles, flips a globally inward winding, and computes
+  crease-aware normals (default 30°). It records an add_mesh program step
+  containing the baking triangles, so save/open does NOT need the source
+  file; a non-watertight import is allowed, validate reports it. format
+  overrides extension/contents detection; name defaults to the file stem),
+add_mesh{doc,name,positions:[[x,y,z],...],indices:[i0,i1,i2,...],
+  smooth_angle_deg?,color?} (raw triangle solid, three indices per triangle;
+  normally produced by import_mesh, but useful when a client already has mesh
+  data),
 transform{doc,entity,translation?,rotation_deg?,scale?} (only provided parts change),
 boolean{doc,op:"union"|"difference"|"intersection",entities:[ids],name?,color?}
   (world-space set op; creates a NEW entity, sources are kept — delete them if

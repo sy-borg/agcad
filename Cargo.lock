@@ -2610,6 +2610,7 @@ name = "wright-core"
 version = "0.1.0"
 dependencies = [
  "clipper2-rust",
+ "flate2",
  "manifold-rust",
  "png",
  "serde_json",

@@ -182,6 +182,57 @@ pub enum Command {
         color: Option<Rgba>,
     },
 
+    /// Read a triangle mesh (STL binary or ASCII, OBJ, or 3MF) from the
+    /// server's filesystem and add it as a solid entity.
+    ///
+    /// Coordinates are millimeters: 3MF's declared unit is converted and
+    /// `scale` multiplies the result. The parsed geometry is recorded as an
+    /// [`Command::AddMesh`] program step, so a `.wcad` save replays without
+    /// the source file. The importer welds vertices by exact position, drops
+    /// degenerate and duplicate triangles, flips a globally inward winding,
+    /// and computes crease-aware shading normals. A non-watertight import is
+    /// still allowed — `validate` reports it, and booleans may reject it.
+    ImportMesh {
+        doc: DocId,
+        /// Path the *server* reads; absolute paths avoid surprises about the
+        /// server's working directory.
+        path: String,
+        /// Entity name; defaults to the file stem.
+        #[serde(default)]
+        name: Option<String>,
+        /// Uniform scale applied after unit conversion (default 1).
+        #[serde(default)]
+        scale: Option<f64>,
+        /// Force a format instead of detecting it from the extension and
+        /// contents.
+        #[serde(default)]
+        format: Option<MeshFormat>,
+        /// Crease angle for shading normals in degrees (default 30).
+        /// Adjacent faces meeting at a sharper angle keep a hard edge.
+        #[serde(default)]
+        smooth_angle_deg: Option<f64>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
+    /// Add a solid from raw triangles — the program step `import_mesh`
+    /// records. `positions` are millimeters in the source frame; like every
+    /// other solid, the mesh is baked around its bounding-box center and the
+    /// entity translation restores the world position. `indices` is flat,
+    /// three per triangle. The same cleanup as import applies (welding,
+    /// degenerate/duplicate removal, outward winding).
+    AddMesh {
+        doc: DocId,
+        name: String,
+        positions: Vec<[f32; 3]>,
+        indices: Vec<u32>,
+        /// Crease angle for shading normals in degrees (default 30).
+        #[serde(default)]
+        smooth_angle_deg: Option<f64>,
+        #[serde(default)]
+        color: Option<Rgba>,
+    },
+
     /// Round the selected sharp edges of one solid. The entity keeps its
     /// id, name, color and transform; its mesh is replaced by the filleted
     /// result (in the same local frame). Convex edges are cut back to a
@@ -1014,6 +1065,43 @@ pub struct ParameterChange {
     pub to: Option<f64>,
 }
 
+/// A triangle-mesh interchange format accepted by [`Command::ImportMesh`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshFormat {
+    #[serde(rename = "stl")]
+    Stl,
+    #[serde(rename = "obj")]
+    Obj,
+    #[serde(rename = "3mf")]
+    ThreeMf,
+}
+
+impl MeshFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stl => "stl",
+            Self::Obj => "obj",
+            Self::ThreeMf => "3mf",
+        }
+    }
+
+    /// Recognize a filename extension (without the dot, case-insensitive).
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "stl" => Some(Self::Stl),
+            "obj" => Some(Self::Obj),
+            "3mf" => Some(Self::ThreeMf),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for MeshFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Which set operation a [`Command::Boolean`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1122,6 +1210,20 @@ pub enum CommandResult {
     DocumentCreated { doc: DocId },
     Closed { doc: DocId },
     EntityCreated { doc: DocId, entity: EntityId, mesh: Mesh },
+    /// A mesh file was imported as a solid (see [`Command::ImportMesh`]).
+    /// `vertices` and `triangles` are the cleaned counts, and `dropped`
+    /// counts degenerate or duplicate input triangles that were discarded.
+    MeshImported {
+        doc: DocId,
+        entity: EntityId,
+        name: String,
+        format: MeshFormat,
+        path: String,
+        bytes: usize,
+        vertices: usize,
+        triangles: usize,
+        dropped: usize,
+    },
     /// A solid was reshaped in place (fillet/chamfer). `edges` is how many
     /// sharp edges the selection matched, `volume` the new world-space
     /// volume in mm³, and `mesh` the new local mesh.
