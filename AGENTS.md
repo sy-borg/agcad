@@ -30,6 +30,7 @@ Keep the `README.md` and `index.html` in synch with the code.
   reformat unrelated code. Clippy has pre-existing warnings. There is no CI,
   so neither is a gate.
 - Keep `python/wright` stdlib-only (`pyproject.toml` has no dependencies).
+- Python client regressions: `.venv/bin/python -m unittest discover -s python/tests`.
 
 ## Layout and conventions
 

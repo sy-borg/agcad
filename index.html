@@ -397,6 +397,7 @@ WRIGHT_CONNECT=127.0.0.1:7860 wright-mcp
 ./target/debug/wright-view --port 7860
 <span class="c"># labels: name #id · click: pick a face or edge · C: copy selector</span></pre>
         <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation. Without <code>WRIGHT_CONNECT</code>, the MCP server runs a private engine. A click sends a ray through <code>pick</code>; the HUD shows the exact <code>{entity,normal,near}</code> face or <code>{direction,near,near_radius}</code> edge selector to hand to the agent, who passes it straight to <code>add_sketch</code>, <code>fillet</code> or <code>chamfer</code>.</p>
+        <p>Restarts self-heal: the client reconnects (retrying briefly) and the viewer's watcher reconnects and re-fetches by itself. The MCP result then carries <code>reconnected</code> with the documents that survived; a restarted engine is empty, so the agent replays its script.</p>
       </div>
     </div>
   </div>

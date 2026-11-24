@@ -68,6 +68,11 @@ original), mirror reflects them across a plane, shell hollows a solid in place
 countersink hole in place, sweep carries a profile along a polyline or helix,
 loft morphs between two or more profiles, and thread builds a real screw thread
 (union it for a screw, subtract it for a threaded hole).
+Documents live in the engine process, not in this server, so a restarted backend
+starts empty. When a tool result carries `reconnected`, the client rebuilt the
+connection: read its `open_documents` list, replay your script if your document
+is gone, and never assume old entity ids survived. The viewer reconnects and
+refreshes on its own.
 Failed commands report a hint; fix the named issue and retry."""
 
 EXECUTE_DESCRIPTION = """Batch-execute wright commands. Each command is an object:
@@ -332,6 +337,10 @@ def summarize(obj: Any) -> Any:
 class McpServer:
     def __init__(self) -> None:
         self._cad: Wright | None = None
+        # Last transport generation reported to the agent. The Python client
+        # bumps its generation when it reconnects; a change means the server
+        # may have restarted (and lost its in-memory documents).
+        self._generation = 0
 
     @property
     def cad(self) -> Wright:
@@ -348,7 +357,63 @@ class McpServer:
                 print(f"wright-mcp: attached to shared backend {host}:{port} (live preview)", file=sys.stderr)
             else:
                 self._cad = Wright.spawn()
+                print(
+                    "wright-mcp: spawned a private engine (set WRIGHT_CONNECT=host:port "
+                    "to draw into a shared backend a viewer can watch)",
+                    file=sys.stderr,
+                )
         return self._cad
+
+    def _reconnect_note(self) -> dict | None:
+        """Report a transport rebuild once per generation.
+
+        Documents live in the engine process, so a restarted server is empty.
+        Telling the agent explicitly beats a bare ``unknown document`` error:
+        the notice carries the documents that actually survived and tells the
+        agent to replay its script when they are gone.
+        """
+        cad = self._cad
+        if cad is None or cad.generation == self._generation:
+            return None
+
+        docs: list[dict] | None
+        try:
+            docs = cad.call("list_documents", {})["docs"]
+        except Exception:  # noqa: BLE001 — the notice must never fail a tool call
+            docs = None
+        # list_documents may itself have reconnected; report the latest state.
+        self._generation = cad.generation
+
+        if docs is None:
+            message = (
+                "The client reconnected to the wright server, but it is not "
+                "answering again yet. Retry; if the server restarted, its "
+                "document space is empty."
+            )
+            return {"generation": self._generation, "open_documents": None, "message": message}
+
+        ids = [d["doc"] for d in docs if isinstance(d, dict) and "doc" in d]
+        if ids:
+            message = (
+                "The client reconnected to the wright server. Open documents: "
+                f"{ids}. A restarted server starts empty — if your document id "
+                "is missing, re-create it and replay your script; previous "
+                "entity ids are gone."
+            )
+        else:
+            message = (
+                "The client reconnected to the wright server, but it has no open "
+                "documents: a restarted engine starts empty and cannot restore "
+                "in-memory documents. Re-create the document and replay your "
+                "script (create_document + commands, or open_document from a "
+                "saved .wcad) before continuing; previous entity ids are gone."
+            )
+        return {"generation": self._generation, "open_documents": ids, "message": message}
+
+    def _note_on_error(self, text: str) -> str:
+        """Append a reconnect explanation to a failed tool message."""
+        note = self._reconnect_note()
+        return f"{text}\n{note['message']}" if note is not None else text
 
     # -- MCP methods ---------------------------------------------------------
 
@@ -431,11 +496,19 @@ class McpServer:
                 error = "unexpected failure, see last step"
                 break
 
+        note = self._reconnect_note()
         payload: dict[str, Any] = {"executed": len(results), "results": results}
+        if note is not None:
+            payload["reconnected"] = note
         if error is not None:
             payload["stopped_early"] = True
             payload["remaining"] = len(commands) - len(results)
-            payload["hint"] = "fix the error in the last result, then re-send the remaining commands"
+            hint = "fix the error in the last result, then re-send the remaining commands"
+            if note is not None and "unknown document" in error:
+                # A restart is the usual reason a previously valid doc id
+                # vanished; say so instead of sending the agent in circles.
+                hint = note["message"]
+            payload["hint"] = hint
         return {"content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}]}
 
     def _tool_scene(self, args: dict) -> dict:
@@ -447,7 +520,7 @@ class McpServer:
             scene = self.cad.call("get_scene", {"doc": doc})
             params = self.cad.call("get_parameters", {"doc": doc})
         except WrightError as e:
-            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+            return {"content": [{"type": "text", "text": self._note_on_error(str(e))}], "isError": True}
 
         entities = []
         for e in scene["entities"]:
@@ -482,6 +555,9 @@ class McpServer:
                 }
             entities.append(entry)
         payload = {"doc": doc, "parameters": params["params"], "entities": entities}
+        note = self._reconnect_note()
+        if note is not None:
+            payload["reconnected"] = note
         return {"content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}]}
 
     def _tool_render(self, args: dict) -> dict:
@@ -489,10 +565,13 @@ class McpServer:
         try:
             r = self.cad.call("render_offscreen", params)
         except WrightError as e:
-            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+            return {"content": [{"type": "text", "text": self._note_on_error(str(e))}], "isError": True}
         meta = {"doc": r["doc"], "width": r["width"], "height": r["height"], "bytes": len(r["png_base64"])}
         if "path" in r:
             meta["saved_to"] = r["path"]
+        note = self._reconnect_note()
+        if note is not None:
+            meta["reconnected"] = note
         return {
             "content": [
                 {"type": "image", "data": r["png_base64"], "mimeType": "image/png"},

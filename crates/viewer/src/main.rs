@@ -21,6 +21,7 @@ use std::net::TcpStream;
 use std::process::{Command as Process, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use wright_protocol::{DocId, EntitySnapshot, Mat4, PickHit, Ray};
 use font8x8::UnicodeFonts;
@@ -1343,30 +1344,65 @@ impl App {
 
     /// Persistent connection that only listens for `scene_changed`
     /// notifications; every tick nudges the render loop to re-fetch.
+    ///
+    /// The listener reconnects by itself: a backend restart closes the
+    /// stream, and the viewer must not go permanently deaf. Every (re)connect
+    /// also sends a tick so the scene is re-fetched immediately; `R` remains
+    /// a manual fallback.
     fn start_live_listener(&mut self) {
         let (tx, rx) = mpsc::channel::<()>();
         self.reload_rx = Some(rx);
         let host = self.host.clone();
         let port = self.port;
         std::thread::spawn(move || {
-            let stream = match TcpStream::connect((host.as_str(), port)) {
-                Ok(s) => s,
-                Err(err) => {
-                    eprintln!("live preview off: cannot connect to {host}:{port}: {err} (press R to refresh)");
-                    return;
-                },
-            };
-            eprintln!("live preview: watching {host}:{port} for scene_changed");
-            for line in BufReader::new(stream).lines() {
-                match line {
-                    Ok(l) if l.contains("scene_changed") => {
-                        let _ = tx.send(());
+            let mut backoff = Duration::from_millis(250);
+            let mut warned = false;
+            loop {
+                let stream = match TcpStream::connect((host.as_str(), port)) {
+                    Ok(s) => {
+                        if warned {
+                            eprintln!("live preview: reconnected to {host}:{port}");
+                        } else {
+                            eprintln!("live preview: watching {host}:{port} for scene_changed");
+                        }
+                        warned = false;
+                        backoff = Duration::from_millis(250);
+                        // The scene may have changed while we were away (or
+                        // the server may have restarted): refresh once now,
+                        // then keep following notifications.
+                        if tx.send(()).is_err() {
+                            return; // viewer window is gone
+                        }
+                        s
                     },
-                    Ok(_) => {},
-                    Err(_) => break,
+                    Err(_) => {
+                        if !warned {
+                            eprintln!(
+                                "live preview off: cannot connect to {host}:{port} \
+                                 (retrying; it reconnects by itself)"
+                            );
+                            warned = true;
+                        }
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(Duration::from_secs(2));
+                        continue;
+                    },
+                };
+                for line in BufReader::new(stream).lines() {
+                    match line {
+                        Ok(l) if l.contains("scene_changed") => {
+                            if tx.send(()).is_err() {
+                                return;
+                            }
+                        },
+                        Ok(_) => {},
+                        Err(_) => break,
+                    }
                 }
+                // EOF: the server went away (restart) — reconnect shortly.
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(2));
             }
-            eprintln!("live preview: notification connection closed (press R to refresh)");
         });
     }
 
@@ -1840,5 +1876,33 @@ mod tests {
         // Off-centre picks stay inside the frustum and differ from forward.
         let (edge, _) = cam.ray(0.0, 0.0, (800, 600));
         assert!((edge.direction[0] - ray.direction[0]).abs() > 1e-3);
+    }
+
+    /// A backend restart closes the notification stream. The watcher must
+    /// reconnect on its own (and nudge a re-fetch), not go deaf until the
+    /// viewer is restarted.
+    #[test]
+    fn live_listener_reconnects_after_the_server_restarts() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake backend");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Accept, then drop the stream (a restart), then accept again.
+            for i in 0..2 {
+                let (stream, _) = listener.accept().expect("accept");
+                let _ = accepted_tx.send(i);
+                std::thread::sleep(Duration::from_millis(50));
+                drop(stream);
+            }
+        });
+
+        let mut app = App::new("127.0.0.1".to_string(), port);
+        app.start_live_listener();
+        let rx = app.reload_rx.as_ref().expect("reload channel");
+        // One tick when the watcher first connects, one after reconnecting.
+        rx.recv_timeout(Duration::from_secs(2)).expect("tick on first connect");
+        rx.recv_timeout(Duration::from_secs(5)).expect("tick after reconnect");
+        accepted_rx.recv_timeout(Duration::from_secs(2)).expect("both connections accepted");
     }
 }

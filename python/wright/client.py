@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -278,6 +279,38 @@ def _find_server() -> list[str]:
     )
 
 
+# Retry windows for opening a transport. A restarting server is unavailable
+# for a moment, so a single `ConnectionRefused` must not surface as a permanent
+# failure. These total ~1.15 s; a tool call stays responsive while covering a
+# normal process restart.
+_CONNECT_DELAYS = (0.0, 0.1, 0.3, 0.75)
+
+
+def _open_with_retry(
+    kind: tuple, delays: tuple[float, ...], what: str
+) -> "_LineTransport":
+    """Build a transport, retrying transient failures with a short backoff.
+
+    ``kind`` is ``("tcp", host, port)`` or ``("spawn", argv)``. Failures are
+    wrapped in :class:`WrightError` so callers (and the MCP boundary) get an
+    agent-readable message instead of a bare ``ConnectionRefusedError``.
+    """
+    last: OSError | None = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            if kind[0] == "tcp":
+                return WrightTcpTransport(kind[1], kind[2])
+            return WrightStdioTransport(kind[1])
+        except OSError as e:
+            last = e
+    raise WrightError(
+        f"could not {what} the wright server ({last}); "
+        "if it is still starting, retry the command"
+    ) from None
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -286,16 +319,21 @@ class Wright:
     command on the bus and raises :class:`WrightError` on rejection.
 
     If the connection dies (server restart, network blip) the client
-    reconnects transparently on the next call. Note: documents live in
-    the server's memory, so after a restart the engine is empty — the
-    reconnect just keeps the client usable (the agent sees a clean
-    unknown-document error instead of permanent connection failures)."""
+    reconnects on the next call, retrying briefly while the server comes
+    back. Documents live in the server's memory, so after a restart the
+    engine is empty — reconnection keeps the client usable (the agent sees
+    a clean unknown-document error instead of permanent connection
+    failures) and :attr:`generation` tells callers that the transport was
+    rebuilt, so they can re-check ``list_documents`` and replay the script.
+    """
 
     def __init__(self, transport: _LineTransport, reconnect: tuple | None = None) -> None:
         self._t = transport
         self._ids = itertools.count(1)
         # How to build a fresh transport: ("tcp", host, port) or ("spawn", argv).
         self._reconnect = reconnect
+        # Counts successful transport rebuilds; see the `generation` property.
+        self._generation = 0
 
     # -- constructors -------------------------------------------------------
 
@@ -303,21 +341,32 @@ class Wright:
     def spawn(cls, argv: Iterable[str] | None = None) -> "Wright":
         """Start a fresh server subprocess (stdio transport)."""
         args = list(argv) if argv is not None else _find_server()
-        return cls(WrightStdioTransport(args), reconnect=("spawn", args))
+        return cls(
+            _open_with_retry(("spawn", args), _CONNECT_DELAYS, "start"),
+            reconnect=("spawn", args),
+        )
 
     @classmethod
     def connect(cls, host: str = "127.0.0.1", port: int = 7860) -> "Wright":
         """Attach to a running server. TCP mode shares one document space
         across all connections; mutations are broadcast to the others."""
-        return cls(WrightTcpTransport(host, port), reconnect=("tcp", host, port))
+        return cls(
+            _open_with_retry(("tcp", host, port), _CONNECT_DELAYS, "connect to"),
+            reconnect=("tcp", host, port),
+        )
+
+    @property
+    def generation(self) -> int:
+        """Counts transport rebuilds. It moves when the client reconnected
+        after a lost connection. Compare it between calls: a new generation
+        means the server may have restarted (an empty in-memory document
+        space), so re-check ``list_documents`` before using old ids."""
+        return self._generation
 
     def _fresh_transport(self) -> _LineTransport:
         if self._reconnect is None:
             raise WrightError("connection lost (no reconnect info available)")
-        kind = self._reconnect
-        if kind[0] == "tcp":
-            return WrightTcpTransport(kind[1], kind[2])
-        return WrightStdioTransport(kind[1])
+        return _open_with_retry(self._reconnect, _CONNECT_DELAYS, "reconnect to")
 
     # -- plumbing -----------------------------------------------------------
 
@@ -345,6 +394,7 @@ class Wright:
                 # unknown-document errors instead of connection failures.
                 self._t.close()
                 self._t = self._fresh_transport()
+                self._generation += 1
                 return self._do_request(method, **params)
             raise
 

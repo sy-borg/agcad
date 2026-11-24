@@ -434,6 +434,18 @@ Then ask the agent to draw; what it builds through MCP appears in the
 viewer immediately. Without `WRIGHT_CONNECT`, the MCP server spawns a
 private engine (isolated, invisible to viewers) — attach mode is opt-in.
 
+Restarts are handled without restarting anyone:
+
+- the Python client reconnects on the next command (TCP re-attaches, `spawn`
+  starts a fresh child) and retries briefly while the server comes back;
+- a reconnected client bumps its `generation`, and the MCP server reports it
+  in the tool result as `reconnected` with the documents the engine still has
+  open. A restarted engine is empty, so replay the script — old entity ids
+  are gone;
+- the viewer's `scene_changed` watcher reconnects on its own and re-fetches,
+  so the picture returns as soon as the agent draws again. `R` still forces
+  a fetch if you do not want to wait for the next change.
+
 The script side is the same contract:
 
 ```python
@@ -505,7 +517,8 @@ Add `"environment": { "WRIGHT_CONNECT": "127.0.0.1:7860" }` to attach to a
 shared backend and let the viewer follow along. Tools then appear as
 `wright_wright_execute` (direct) or `tools.wright.wright_execute(...)` in Code
 Mode. The engine lives in the server process, so documents persist across
-tool calls within a session.
+tool calls within a session; a server restart empties them, and the next call
+reconnects and reports `reconnected` with the surviving document list.
 
 ### Claude Desktop and other hosts
 
