@@ -4,25 +4,44 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 
-use wright_protocol::{CommandResult, DocId, EntitySnapshot, PickHit, Ray, RpcRequest, RpcResponse};
+use wright_protocol::{
+    CommandResult, DocId, DocInfo, EntitySnapshot, PickHit, Ray, RpcRequest, RpcResponse,
+};
 
-pub fn fetch_scene(host: &str, port: u16) -> Result<(DocId, Vec<EntitySnapshot>), String> {
+/// What the viewer needs for one refresh: the available documents, the
+/// resolved selection, and that document's entities. An empty document list
+/// is a valid snapshot (the viewer waits for one to be created), not an error.
+pub struct FetchedScene {
+    pub docs: Vec<DocInfo>,
+    pub doc: Option<DocId>,
+    pub entities: Vec<EntitySnapshot>,
+}
+
+/// Resolve a viewer's preferred document against the live document list.
+/// An explicit `want` wins while it still exists; otherwise the first open
+/// document is the fallback (what an unselected viewer follows).
+pub fn select_document(docs: &[DocInfo], want: Option<DocId>) -> Option<DocId> {
+    want.filter(|id| docs.iter().any(|d| d.doc == *id))
+        .or_else(|| docs.first().map(|d| d.doc))
+}
+
+pub fn fetch_scene(host: &str, port: u16, want: Option<DocId>) -> Result<FetchedScene, String> {
     let mut conn = Connection::open(host, port)?;
 
     let docs = match conn.call("list_documents", "{}")? {
         CommandResult::Documents { docs } => docs,
         other => return Err(format!("unexpected result: {other:?}")),
     };
-    let Some(first) = docs.first() else {
-        return Err("server has no open documents (create one with the Python client first)".into());
-    };
-    let doc = first.doc;
+    let doc = select_document(&docs, want);
 
-    let scene = match conn.call("get_scene", &format!(r#"{{"doc":{doc}}}"#))? {
-        CommandResult::Scene { entities, .. } => entities,
-        other => return Err(format!("unexpected result: {other:?}")),
+    let entities = match doc {
+        Some(doc) => match conn.call("get_scene", &format!(r#"{{"doc":{doc}}}"#))? {
+            CommandResult::Scene { entities, .. } => entities,
+            other => return Err(format!("unexpected result: {other:?}")),
+        },
+        None => Vec::new(),
     };
-    Ok((doc, scene))
+    Ok(FetchedScene { docs, doc, entities })
 }
 
 /// Ask the engine what is under a world-space ray. A miss is `Ok(None)`;

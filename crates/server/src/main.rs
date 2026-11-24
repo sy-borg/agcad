@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex, mpsc};
 
 use wright_core::Engine;
-use wright_protocol::{Command, DocId, RpcError, RpcRequest, RpcResponse};
+use wright_protocol::{Command, CommandResult, DocId, RpcError, RpcRequest, RpcResponse};
 use serde_json::{Map, Value, json};
 
 fn main() -> ExitCode {
@@ -186,8 +186,15 @@ fn doc_of(command: &Command) -> Option<DocId> {
     }
 }
 
-fn scene_changed(command: &Command) -> String {
-    let params = match doc_of(command) {
+fn scene_changed(command: &Command, result: &CommandResult) -> String {
+    // Create/open have no doc in their params; the result names the new
+    // document, so viewers can react to it without re-listing blindly.
+    let doc = doc_of(command).or_else(|| match result {
+        CommandResult::DocumentCreated { doc }
+        | CommandResult::DocumentOpened { doc, .. } => Some(*doc),
+        _ => None,
+    });
+    let params = match doc {
         Some(doc) => json!({ "doc": doc }),
         None => json!({}),
     };
@@ -328,10 +335,17 @@ fn handle_line(
 
     let response = match to_command(&req) {
         Ok(command) => {
-            // Compute the notification *before* the command is consumed.
-            let notify = is_mutating(&command).then(|| scene_changed(&command));
+            // Create/open know their document only after they run, so keep a
+            // copy of mutating commands and build the notification from the
+            // result rather than from the request params.
+            let notify_for = is_mutating(&command).then(|| command.clone());
             match engine.lock().unwrap().execute(command) {
-                Ok(result) => (RpcResponse::ok(req.id, result), notify),
+                Ok(result) => {
+                    let notify = notify_for
+                        .as_ref()
+                        .map(|command| scene_changed(command, &result));
+                    (RpcResponse::ok(req.id, result), notify)
+                },
                 Err(err) => (RpcResponse::err(req.id, RpcError::invalid_params(err.to_string())), None),
             }
         },
@@ -367,4 +381,27 @@ fn to_command(req: &RpcRequest) -> Result<Command, serde_json::Error> {
     };
     params.insert("method".into(), Value::String(req.method.clone()));
     serde_json::from_value(Value::Object(params))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notified_doc(line: &str) -> Option<u64> {
+        let value: Value = serde_json::from_str(line).expect("notification json");
+        assert_eq!(value["method"], "scene_changed");
+        value["params"].get("doc").and_then(Value::as_u64)
+    }
+
+    #[test]
+    fn create_and_open_notifications_name_the_new_document() {
+        let create = Command::CreateDocument { name: "bracket".into(), doc: None };
+        let created = CommandResult::DocumentCreated { doc: 7 };
+        assert_eq!(notified_doc(&scene_changed(&create, &created)), Some(7));
+
+        let open = Command::OpenDocument { path: "/tmp/a.wcad".into(), name: None };
+        let opened =
+            CommandResult::DocumentOpened { doc: 8, name: "a".into(), commands: 1, params: 0, entities: 1 };
+        assert_eq!(notified_doc(&scene_changed(&open, &opened)), Some(8));
+    }
 }

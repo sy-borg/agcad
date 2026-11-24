@@ -417,7 +417,10 @@ and a no-op rebuild shows `changed:false` with identical signatures.
 
 The TCP server runs **one shared document space** for all connections, and
 broadcasts a `scene_changed` notification after every mutating command.
-The viewer listens and re-fetches by itself — no refresh key needed.
+Every notification names the affected document (`create_document` and
+`open_document` report the new id), so a viewer can ignore unrelated
+documents and refresh only the one it shows. The viewer listens and
+re-fetches by itself — no refresh key needed.
 
 ```sh
 # 1. the shared backend
@@ -426,7 +429,7 @@ The viewer listens and re-fetches by itself — no refresh key needed.
 # 2. point the MCP server at it
 WRIGHT_CONNECT=127.0.0.1:7860 .venv/bin/wright-mcp
 
-# 3. the viewer — it auto-refreshes when the agent draws
+# 3. the viewer — auto-refreshes; Tab/[ ] switches documents, --doc ID pins one
 ./target/debug/wright-view --port 7860
 ```
 
@@ -461,9 +464,11 @@ should watch; `R` is only a manual refresh fallback.
 
 Two limits worth knowing:
 
-- the viewer shows the **first open document** (`list_documents` order, so the
-  lowest id). With several documents, close the stale ones or reuse one; a
-  document picker is future work.
+- the viewer shows **one document at a time**. It follows the first open
+  document (`list_documents` order, so the lowest id) until you pin one with
+  `Tab`/`[`/`]`, a `1`-`9` slot key, or `--doc ID` at startup. Selection is
+  view state local to the viewer, so several viewers can watch different
+  documents; `scene_changed` for another document is ignored.
 - the viewer is a reference surface, not an editor: the human can orbit,
   zoom, watch live updates, read the corner axis triad and toggle `name #id`
   labels. A click runs `pick` and the HUD shows the exact JSON selector to
@@ -537,7 +542,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ./python
 
 # Human seat: viewer (needs a server with an open document)
 ./target/debug/wright --tcp 7860 &
-./target/debug/wright-view --port 7860     # drag = orbit, wheel = zoom, L = labels, click = pick, R = refresh
+./target/debug/wright-view --port 7860     # drag = orbit, wheel = zoom, L = labels, Tab = switch document, click = pick, R = refresh
 ```
 
 Minimal agent session:

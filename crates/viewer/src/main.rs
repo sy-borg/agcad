@@ -7,9 +7,14 @@
 //! `R` forces a manual refresh.
 //!
 //! Controls: drag = orbit, wheel = zoom, `R` = manual refresh, `L` = toggle
-//! entity labels. A click casts a ray (`pick`) and shows the geometric
-//! selector in a HUD; `C`/`F`/`E` copy the edge-or-face/face/edge selector.
-//! A corner triad shows the world axes and follows the camera.
+//! entity labels, `Tab`/`[`/`]` = switch document, `1`-`9` = select a
+//! document. A click casts a ray (`pick`) and shows the geometric selector
+//! in a HUD; `C`/`F`/`E` copy the edge-or-face/face/edge selector. A corner
+//! triad shows the world axes and follows the camera.
+//!
+//! Document selection is view state, not document state: the viewer holds
+//! the choice locally and passes it to `get_scene`, so several viewers can
+//! watch different documents on the same shared engine.
 
 mod cam;
 mod net;
@@ -23,7 +28,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use wright_protocol::{DocId, EntitySnapshot, Mat4, PickHit, Ray};
+use wright_protocol::{DocId, DocInfo, EntitySnapshot, Mat4, PickHit, Ray};
 use font8x8::UnicodeFonts;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -176,6 +181,10 @@ struct State {
     camera: OrbitCamera,
     /// Last fetched scene, kept CPU-side so labels can follow the camera.
     entities: Vec<EntitySnapshot>,
+    /// Documents the last refresh saw, for the HUD picker.
+    docs: Vec<DocInfo>,
+    /// The document currently on screen (`None` when the engine is empty).
+    doc: Option<DocId>,
     labels_on: bool,
     pick: PickState,
 }
@@ -587,6 +596,8 @@ impl State {
             scene: None,
             camera: OrbitCamera::new(),
             entities: Vec::new(),
+            docs: Vec::new(),
+            doc: None,
             labels_on: true,
             pick: PickState::None,
         })
@@ -665,6 +676,13 @@ impl State {
         self.scene = Some(SceneGpu { vertex_buf, index_buf, draws });
     }
 
+    /// Record the document list and resolved selection for the HUD. The
+    /// scene itself arrives separately through `set_scene`.
+    fn set_documents(&mut self, docs: Vec<DocInfo>, doc: Option<DocId>) {
+        self.docs = docs;
+        self.doc = doc;
+    }
+
     fn render(&mut self) {
         let vp = self.camera.view_proj(self.size);
         self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&vp));
@@ -677,6 +695,8 @@ impl State {
             self.size,
             self.labels_on,
             &self.pick,
+            &self.docs,
+            self.doc,
         );
         self.queue.write_buffer(
             &self.text_screen_buf,
@@ -1122,6 +1142,29 @@ fn edge_selector(pick: &PickState) -> Option<String> {
     }
 }
 
+/// The HUD's document line: which document is on screen, out of how many,
+/// and the key hint when there is something to switch to.
+fn document_line(docs: &[DocInfo], doc: Option<DocId>) -> String {
+    let Some(doc) = doc else {
+        return "no open documents - waiting (R to retry)".into();
+    };
+    let Some(index) = docs.iter().position(|d| d.doc == doc) else {
+        return format!("doc #{doc}");
+    };
+    let info = &docs[index];
+    if docs.len() > 1 {
+        format!(
+            "doc {}/{}: \"{}\"  #{}   Tab/[ ] switch",
+            index + 1,
+            docs.len(),
+            info.name,
+            doc
+        )
+    } else {
+        format!("doc 1/1: \"{}\"  #{}", info.name, doc)
+    }
+}
+
 /// Build the screen-space overlay: entity labels (toggleable), the hit
 /// marker and the pick HUD. Pure, so its geometry is unit-testable without
 /// a GPU.
@@ -1131,6 +1174,8 @@ fn build_overlay(
     size: (u32, u32),
     labels: bool,
     pick: &PickState,
+    docs: &[DocInfo],
+    doc: Option<DocId>,
 ) -> TextBatch {
     let mut batch = TextBatch::default();
     let vp = camera.view_proj(size);
@@ -1179,7 +1224,7 @@ fn build_overlay(
     // HUD: the selectors as exact JSON, ready to copy into the chat.
     let scale = 1.5;
     let line_height = 8.0 * scale + 6.0;
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = vec![document_line(docs, doc)];
     match pick {
         PickState::None => {
             lines.push("click a face or edge to pick  ·  L labels  ·  R reload".into());
@@ -1310,9 +1355,52 @@ impl OrbitCamera {
 
 // --- app ---------------------------------------------------------------------
 
+/// One message from the live watcher to the render loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneEvent {
+    /// Reconnect or a document-agnostic change: re-list and re-fetch.
+    Refresh,
+    /// A specific document changed; reload only if it is on screen.
+    Changed(Option<DocId>),
+}
+
+/// Parse a `scene_changed` notification line. Returns `None` for responses
+/// and unrelated messages; a missing `params.doc` becomes `Changed(None)`.
+fn parse_scene_event(line: &str) -> Option<SceneEvent> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("method")?.as_str()? != "scene_changed" {
+        return None;
+    }
+    let doc = value
+        .get("params")
+        .and_then(|p| p.get("doc"))
+        .and_then(serde_json::Value::as_u64);
+    Some(SceneEvent::Changed(doc))
+}
+
+/// Zero-based document slot for the number keys `1`-`9`.
+fn digit_slot(code: KeyCode) -> Option<usize> {
+    Some(match code {
+        KeyCode::Digit1 => 0,
+        KeyCode::Digit2 => 1,
+        KeyCode::Digit3 => 2,
+        KeyCode::Digit4 => 3,
+        KeyCode::Digit5 => 4,
+        KeyCode::Digit6 => 5,
+        KeyCode::Digit7 => 6,
+        KeyCode::Digit8 => 7,
+        KeyCode::Digit9 => 8,
+        _ => return None,
+    })
+}
+
 struct App {
     host: String,
     port: u16,
+    /// The document the viewer should show. `None` follows the first open
+    /// document; cycling or `1`-`9` pins an explicit choice.
+    selected_doc: Option<DocId>,
+    /// The resolved document currently on screen.
     doc: Option<DocId>,
     dragging: bool,
     /// Where the left button went down, and whether the pointer moved far
@@ -1322,15 +1410,16 @@ struct App {
     last_cursor: Option<(f64, f64)>,
     window: Option<Arc<Window>>,
     state: Option<State>,
-    /// Receives a tick whenever the server broadcasts `scene_changed`.
-    reload_rx: Option<mpsc::Receiver<()>>,
+    /// Receives an event whenever the server broadcasts `scene_changed`.
+    reload_rx: Option<mpsc::Receiver<SceneEvent>>,
 }
 
 impl App {
-    fn new(host: String, port: u16) -> Self {
+    fn new(host: String, port: u16, doc: Option<DocId>) -> Self {
         Self {
             host,
             port,
+            selected_doc: doc,
             doc: None,
             dragging: false,
             press_at: None,
@@ -1350,7 +1439,7 @@ impl App {
     /// also sends a tick so the scene is re-fetched immediately; `R` remains
     /// a manual fallback.
     fn start_live_listener(&mut self) {
-        let (tx, rx) = mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel::<SceneEvent>();
         self.reload_rx = Some(rx);
         let host = self.host.clone();
         let port = self.port;
@@ -1370,7 +1459,7 @@ impl App {
                         // The scene may have changed while we were away (or
                         // the server may have restarted): refresh once now,
                         // then keep following notifications.
-                        if tx.send(()).is_err() {
+                        if tx.send(SceneEvent::Refresh).is_err() {
                             return; // viewer window is gone
                         }
                         s
@@ -1390,12 +1479,13 @@ impl App {
                 };
                 for line in BufReader::new(stream).lines() {
                     match line {
-                        Ok(l) if l.contains("scene_changed") => {
-                            if tx.send(()).is_err() {
+                        Ok(l) => {
+                            if let Some(event) = parse_scene_event(&l)
+                                && tx.send(event).is_err()
+                            {
                                 return;
                             }
                         },
-                        Ok(_) => {},
                         Err(_) => break,
                     }
                 }
@@ -1410,32 +1500,104 @@ impl App {
         if self.state.is_none() {
             return;
         }
-        match net::fetch_scene(&self.host, self.port) {
-            Ok((doc, entities)) => {
+        match net::fetch_scene(&self.host, self.port, self.selected_doc) {
+            Ok(fetched) => {
+                // A selected document that has been closed falls back to
+                // "follow the first document" instead of staying stale.
+                if self.selected_doc.is_some() && fetched.doc != self.selected_doc {
+                    self.selected_doc = None;
+                }
+                self.doc = fetched.doc;
+                let label = match fetched
+                    .doc
+                    .and_then(|id| fetched.docs.iter().find(|d| d.doc == id))
+                {
+                    Some(info) => format!("doc {} \"{}\"", info.doc, info.name),
+                    None => "no open documents".into(),
+                };
                 eprintln!(
-                    "scene: doc {doc}, {} entities (live; R = manual refresh)",
-                    entities.len()
+                    "scene: {label}, {} entities (live; Tab/[ ] switches, R = refresh)",
+                    fetched.entities.len()
                 );
-                self.doc = Some(doc);
+                self.set_window_title(fetched.doc, &fetched.docs);
                 let Some(state) = self.state.as_mut() else { return };
                 // A rebuild can delete the picked entity: drop the stale
                 // marker, but keep the HUD text — the selector may still be
                 // what the human is about to hand to the agent.
                 if let PickState::Hit(hit) = &state.pick
-                    && !entities.iter().any(|e| e.id == hit.entity)
+                    && !fetched.entities.iter().any(|e| e.id == hit.entity)
                 {
                     state.pick = PickState::None;
                 }
-                state.set_scene(entities);
+                state.set_documents(fetched.docs, fetched.doc);
+                state.set_scene(fetched.entities);
             },
             Err(err) => {
                 eprintln!("scene fetch failed: {err}");
                 eprintln!("tip: start a server (`wright --tcp {0}`) and create a document via the Python client, then press R", self.port);
                 self.doc = None;
+                self.set_window_title(None, &[]);
                 if let Some(state) = self.state.as_mut() {
+                    state.set_documents(Vec::new(), None);
                     state.set_scene(Vec::new());
                 }
             },
+        }
+    }
+
+    fn set_window_title(&self, doc: Option<DocId>, docs: &[DocInfo]) {
+        let title = match doc.and_then(|id| docs.iter().find(|d| d.doc == id)) {
+            Some(info) => format!("Wright CAD viewer - {} (#{})", info.name, info.doc),
+            None => "Wright CAD viewer - no open documents".into(),
+        };
+        if let Some(window) = &self.window {
+            window.set_title(&title);
+        }
+    }
+
+    /// Pin the viewer to one document and refresh. Selection is local view
+    /// state, so it never travels over the bus.
+    fn choose_document(&mut self, doc: DocId) {
+        if self.doc == Some(doc) {
+            return;
+        }
+        self.selected_doc = Some(doc);
+        // Entity ids are per document, so a pick from the old document must
+        // not leak into the new one.
+        if let Some(state) = self.state.as_mut() {
+            state.pick = PickState::None;
+        }
+        self.reload_scene();
+    }
+
+    /// Step through the open documents (Tab / bracket keys).
+    fn cycle_document(&mut self, delta: isize) {
+        let Some(state) = self.state.as_ref() else { return };
+        if state.docs.is_empty() {
+            return;
+        }
+        let count = state.docs.len() as isize;
+        let current = self
+            .doc
+            .and_then(|id| state.docs.iter().position(|d| d.doc == id));
+        let index = match current {
+            Some(index) => (index as isize + delta).rem_euclid(count),
+            None if delta < 0 => count - 1,
+            None => 0,
+        };
+        let doc = state.docs[index as usize].doc;
+        self.choose_document(doc);
+    }
+
+    /// Select a document by its `1`-`9` slot in `list_documents` order.
+    fn select_document_index(&mut self, slot: usize) {
+        let doc = self
+            .state
+            .as_ref()
+            .and_then(|state| state.docs.get(slot))
+            .map(|info| info.doc);
+        if let Some(doc) = doc {
+            self.choose_document(doc);
         }
     }
 
@@ -1606,19 +1768,33 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match event.physical_key {
-                    PhysicalKey::Code(KeyCode::KeyR) => self.reload_scene(),
-                    PhysicalKey::Code(KeyCode::KeyL) => {
-                        if let Some(state) = self.state.as_mut() {
-                            state.labels_on = !state.labels_on;
-                            eprintln!("labels: {}", if state.labels_on { "on" } else { "off" });
+                    PhysicalKey::Code(code) => {
+                        if let Some(slot) = digit_slot(code) {
+                            self.select_document_index(slot);
+                            return;
                         }
-                    },
-                    PhysicalKey::Code(KeyCode::KeyC) => self.copy_selector("primary"),
-                    PhysicalKey::Code(KeyCode::KeyF) => self.copy_selector("face"),
-                    PhysicalKey::Code(KeyCode::KeyE) => self.copy_selector("edge"),
-                    PhysicalKey::Code(KeyCode::Escape) => {
-                        if let Some(state) = self.state.as_mut() {
-                            state.pick = PickState::None;
+                        match code {
+                            KeyCode::KeyR => self.reload_scene(),
+                            KeyCode::Tab | KeyCode::BracketRight => self.cycle_document(1),
+                            KeyCode::BracketLeft => self.cycle_document(-1),
+                            KeyCode::KeyL => {
+                                if let Some(state) = self.state.as_mut() {
+                                    state.labels_on = !state.labels_on;
+                                    eprintln!(
+                                        "labels: {}",
+                                        if state.labels_on { "on" } else { "off" }
+                                    );
+                                }
+                            },
+                            KeyCode::KeyC => self.copy_selector("primary"),
+                            KeyCode::KeyF => self.copy_selector("face"),
+                            KeyCode::KeyE => self.copy_selector("edge"),
+                            KeyCode::Escape => {
+                                if let Some(state) = self.state.as_mut() {
+                                    state.pick = PickState::None;
+                                }
+                            },
+                            _ => {},
                         }
                     },
                     _ => {},
@@ -1629,11 +1805,18 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Drain any pending scene_changed ticks and reload once.
+        // Drain pending scene_changed events and reload once. Only changes
+        // to the document on screen (or the empty-list case) matter, so a
+        // busy neighbour document does not make this viewer re-fetch.
         let mut reload = false;
         if let Some(rx) = &self.reload_rx {
-            while rx.try_recv().is_ok() {
-                reload = true;
+            while let Ok(event) = rx.try_recv() {
+                reload |= match event {
+                    SceneEvent::Refresh | SceneEvent::Changed(None) => true,
+                    SceneEvent::Changed(Some(doc)) => {
+                        self.doc.is_none() || self.doc == Some(doc)
+                    },
+                };
             }
         }
         if reload {
@@ -1648,13 +1831,21 @@ impl ApplicationHandler for App {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 7860;
+    let mut doc: Option<DocId> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--host" => host = args.next().unwrap_or(host),
             "--port" => port = args.next().and_then(|v| v.parse().ok()).unwrap_or(port),
+            "--doc" => match args.next().and_then(|v| v.parse::<DocId>().ok()) {
+                Some(id) => doc = Some(id),
+                None => {
+                    eprintln!("--doc needs a numeric document id");
+                    return Err("invalid --doc".into());
+                },
+            },
             other => {
-                eprintln!("usage: wright-view [--host HOST] [--port PORT]");
+                eprintln!("usage: wright-view [--host HOST] [--port PORT] [--doc ID]");
                 if other != "--help" && other != "-h" {
                     return Err(format!("unknown argument: {other}").into());
                 }
@@ -1665,7 +1856,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("wright-view | scene source: tcp://{host}:{port}");
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(host, port);
+    let mut app = App::new(host, port, doc);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -1811,8 +2002,9 @@ mod tests {
         let cam = OrbitCamera::new();
         let size = (800, 600);
         let entities = [box_snapshot(2, "boss")];
-        let on = build_overlay(&entities, &cam, size, true, &PickState::None);
-        let off = build_overlay(&entities, &cam, size, false, &PickState::None);
+        let docs = [DocInfo { doc: 2, name: "bracket".into(), entity_count: 1 }];
+        let on = build_overlay(&entities, &cam, size, true, &PickState::None, &docs, Some(2));
+        let off = build_overlay(&entities, &cam, size, false, &PickState::None, &docs, Some(2));
         assert!(!on.is_empty());
         // Labels draw a dot plus 8 glyphs ("boss #2" = 7 chars, actually
         // seven), so hiding them must shrink the batch. The HUD hint stays.
@@ -1878,6 +2070,53 @@ mod tests {
         assert!((edge.direction[0] - ray.direction[0]).abs() > 1e-3);
     }
 
+    fn doc_info(doc: DocId, name: &str) -> DocInfo {
+        DocInfo { doc, name: name.to_string(), entity_count: 0 }
+    }
+
+    #[test]
+    fn selection_prefers_a_live_choice_and_falls_back_to_the_first() {
+        let docs = [doc_info(1, "bracket"), doc_info(2, "jig")];
+        assert_eq!(net::select_document(&docs, Some(2)), Some(2));
+        assert_eq!(net::select_document(&docs, Some(9)), Some(1));
+        assert_eq!(net::select_document(&docs, None), Some(1));
+        assert_eq!(net::select_document(&[], Some(2)), None);
+        assert_eq!(net::select_document(&[], None), None);
+    }
+
+    #[test]
+    fn scene_notifications_carry_the_document_id() {
+        let with_doc = r#"{"jsonrpc":"2.0","method":"scene_changed","params":{"doc":2}}"#;
+        assert_eq!(parse_scene_event(with_doc), Some(SceneEvent::Changed(Some(2))));
+        // Document-agnostic notifications still trigger a re-list.
+        let no_doc = r#"{"jsonrpc":"2.0","method":"scene_changed","params":{}}"#;
+        assert_eq!(parse_scene_event(no_doc), Some(SceneEvent::Changed(None)));
+        // Responses and junk are not events.
+        assert_eq!(parse_scene_event(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#), None);
+        assert_eq!(parse_scene_event("not json"), None);
+    }
+
+    #[test]
+    fn the_hud_names_the_selected_document_and_counts_documents() {
+        let docs = [doc_info(1, "bracket"), doc_info(2, "jig")];
+        let line = document_line(&docs, Some(2));
+        assert!(line.contains("doc 2/2"), "{line}");
+        assert!(line.contains("jig"), "{line}");
+        assert!(line.contains("Tab"), "{line}");
+        // One document needs no picker hint.
+        let single = document_line(&docs[..1], Some(1));
+        assert!(single.contains("doc 1/1"), "{single}");
+        assert!(!single.contains("Tab"), "{single}");
+        assert!(document_line(&[], None).contains("no open documents"));
+    }
+
+    #[test]
+    fn number_keys_map_to_document_slots() {
+        assert_eq!(digit_slot(KeyCode::Digit1), Some(0));
+        assert_eq!(digit_slot(KeyCode::Digit9), Some(8));
+        assert_eq!(digit_slot(KeyCode::KeyR), None);
+    }
+
     /// A backend restart closes the notification stream. The watcher must
     /// reconnect on its own (and nudge a re-fetch), not go deaf until the
     /// viewer is restarted.
@@ -1897,7 +2136,7 @@ mod tests {
             }
         });
 
-        let mut app = App::new("127.0.0.1".to_string(), port);
+        let mut app = App::new("127.0.0.1".to_string(), port, None);
         app.start_live_listener();
         let rx = app.reload_rx.as_ref().expect("reload channel");
         // One tick when the watcher first connects, one after reconnecting.
