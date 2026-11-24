@@ -1,0 +1,64 @@
+{
+  "format": "wright-document",
+  "version": 3,
+  "protocol": 1,
+  "name": "cube_10cm",
+  "parameters": {},
+  "program": [
+    {
+      "method": "add_box",
+      "doc": 1,
+      "name": "cube_10cm",
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "size": [
+        100.0,
+        100.0,
+        100.0
+      ],
+      "color": null
+    },
+    {
+      "method": "thread",
+      "doc": 1,
+      "major_diameter": 10.0,
+      "minor_diameter": 8.27,
+      "pitch": 1.5,
+      "length": 100.0,
+      "hand": "right",
+      "flank_angle_deg": null,
+      "segments_per_turn": null,
+      "origin": [
+        0.0,
+        0.0,
+        -50.0
+      ],
+      "name": "thread_M10",
+      "color": null
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "difference",
+      "entities": [
+        1,
+        2
+      ],
+      "name": null,
+      "color": null
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 1
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 2
+    }
+  ]
+}
