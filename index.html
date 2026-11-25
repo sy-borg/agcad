@@ -399,7 +399,8 @@ WRIGHT_CONNECT=127.0.0.1:7860 wright-mcp
 
 <span class="c"># 3. the viewer refreshes on every change</span>
 ./target/debug/wright-view --port 7860
-<span class="c"># labels: name #id · Tab/[ ]/1-9: switch document · click: pick · C: copy selector</span></pre>
+<span class="c"># labels: name #id · Tab/[ ]/1-9: switch
+# document · click: pick · C: copy selector</span></pre>
         <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation; each notification names the affected document (including the new id for create/open). Without <code>WRIGHT_CONNECT</code>, the MCP server runs a private engine. The viewer shows one document at a time and chooses it locally (following the first until you switch), so several viewers can watch different documents on one engine. A click sends a ray through <code>pick</code>; the HUD shows the exact <code>{entity,normal,near}</code> face or <code>{direction,near,near_radius}</code> edge selector to hand to the agent, who passes it straight to <code>add_sketch</code>, <code>fillet</code> or <code>chamfer</code>.</p>
         <p>Restarts self-heal: the client reconnects (retrying briefly) and the viewer's watcher reconnects and re-fetches by itself. The MCP result then carries <code>reconnected</code> with the documents that survived; a restarted engine is empty, so the agent replays its script.</p>
       </div>
@@ -424,7 +425,9 @@ python3 -m venv .venv
 <pre>./target/debug/wright --tcp 7860 &amp;
 ./target/debug/wright-view --port 7860
 
-<span class="c"># drag = orbit, wheel = zoom, L = labels, Tab = switch document, click = pick, R = refresh</span></pre>
+<span class="c"># drag = orbit, wheel = zoom, L = labels,
+# Tab = switch document, click = pick,
+# R = refresh</span></pre>
       </div>
     </div>
     <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a validate-and-diff trust loop, a save and load round trip, and an STL/3MF import round trip that reopens after the source files are gone.</p>
