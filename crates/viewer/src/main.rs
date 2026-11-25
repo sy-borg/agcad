@@ -6,7 +6,8 @@
 //! for `scene_changed` and triggers a re-fetch, so live preview is automatic;
 //! `R` forces a manual refresh.
 //!
-//! Controls: drag = orbit, wheel = zoom, `R` = manual refresh, `L` = toggle
+//! Controls: left/MMB drag = orbit, Shift+MMB drag = pan, wheel = zoom,
+//! `R` = manual refresh, `L` = toggle
 //! entity labels, `Tab`/`[`/`]` = switch document, `1`-`9` = select a
 //! document. A click casts a ray (`pick`) and shows the geometric selector
 //! in a HUD; `C`/`F`/`E` copy the edge-or-face/face/edge selector. A corner
@@ -31,9 +32,9 @@ use std::time::Duration;
 use wright_protocol::{DocId, DocInfo, EntitySnapshot, Mat4, PickHit, Ray};
 use font8x8::UnicodeFonts;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 /// Corner axis-gizmo size and margin, in physical pixels.
@@ -42,6 +43,9 @@ const GIZMO_MARGIN: f32 = 16.0;
 /// Click radius for edge snapping, in physical pixels. Converted to world
 /// units at the orbit target before the ray goes to the engine.
 const PICK_RADIUS_PX: f32 = 6.0;
+/// Vertical field of view. Shared by projection, picking and panning so a
+/// screen-space drag covers the same world distance in every path.
+const FOV_Y_DEG: f32 = 50.0;
 /// Bitmap text: one 8x8 cell per printable ASCII character plus one solid
 /// white cell for panels and dots.
 const FONT_COLS: u32 = 16;
@@ -1288,7 +1292,7 @@ impl OrbitCamera {
     fn view_proj(&self, size: (u32, u32)) -> [f32; 16] {
         let view = cam::look_at_zup(self.eye(), self.target, [0.0, 0.0, 1.0]);
         let aspect = size.0 as f32 / size.1 as f32;
-        let proj = cam::perspective_opengl(50.0, aspect, 1.0, 20_000.0);
+        let proj = cam::perspective_opengl(FOV_Y_DEG, aspect, 1.0, 20_000.0);
         let vp = cam::mul(&cam::to_wgpu_depth(&proj), &view);
         let mut out = [0.0f32; 16];
         for (col, c) in vp.iter().enumerate() {
@@ -1321,6 +1325,28 @@ impl OrbitCamera {
         self.dist = (self.dist * factor).clamp(10.0, 10_000.0);
     }
 
+    /// Slide the camera target in the screen plane, Blender-style: the world
+    /// follows the cursor, so a right/down drag moves the target left/up.
+    /// `dx`/`dy` are physical pixels, `size` is the viewport in the same units.
+    fn pan(&mut self, dx: f64, dy: f64, size: (u32, u32)) {
+        let eye = self.eye();
+        let forward = cam::normalize([
+            self.target[0] - eye[0],
+            self.target[1] - eye[1],
+            self.target[2] - eye[2],
+        ]);
+        let right = cam::normalize(cam::cross(forward, [0.0, 0.0, 1.0]));
+        let up = cam::cross(right, forward);
+        let world_per_px =
+            2.0 * self.dist * (FOV_Y_DEG.to_radians() * 0.5).tan() / size.1.max(1) as f32;
+        let k = world_per_px as f64;
+        for (axis, offset) in [(&right, -dx), (&up, dy)] {
+            self.target[0] += (axis[0] as f64 * offset * k) as f32;
+            self.target[1] += (axis[1] as f64 * offset * k) as f32;
+            self.target[2] += (axis[2] as f64 * offset * k) as f32;
+        }
+    }
+
     /// World-space ray through a physical-pixel position, plus a pick
     /// tolerance in mm for the same click (a few pixels at the orbit
     /// distance, so edge snapping feels the same at every zoom).
@@ -1333,7 +1359,7 @@ impl OrbitCamera {
         ]);
         let right = cam::normalize(cam::cross(forward, [0.0, 0.0, 1.0]));
         let up = cam::cross(right, forward);
-        let tan_half = (50.0f32.to_radians() * 0.5).tan();
+        let tan_half = (FOV_Y_DEG.to_radians() * 0.5).tan();
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let nx = 2.0 * px as f32 / size.0.max(1) as f32 - 1.0;
         let ny = 1.0 - 2.0 * py as f32 / size.1.max(1) as f32;
@@ -1394,6 +1420,13 @@ fn digit_slot(code: KeyCode) -> Option<usize> {
     })
 }
 
+/// Middle-button drag mode: Blender-style MMB orbits, Shift+MMB pans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MiddleDrag {
+    Orbit,
+    Pan,
+}
+
 struct App {
     host: String,
     port: u16,
@@ -1403,6 +1436,10 @@ struct App {
     /// The resolved document currently on screen.
     doc: Option<DocId>,
     dragging: bool,
+    /// Active middle-button drag, if any.
+    mmb: Option<MiddleDrag>,
+    /// Keyboard modifiers, for Shift+MMB panning.
+    modifiers: ModifiersState,
     /// Where the left button went down, and whether the pointer moved far
     /// enough to make it an orbit rather than a click.
     press_at: Option<(f64, f64)>,
@@ -1422,6 +1459,8 @@ impl App {
             selected_doc: doc,
             doc: None,
             dragging: false,
+            mmb: None,
+            modifiers: ModifiersState::default(),
             press_at: None,
             moved: false,
             last_cursor: None,
@@ -1716,39 +1755,50 @@ impl ApplicationHandler for App {
                     state.render();
                 }
             },
-            WindowEvent::MouseInput { state: mouse, button, .. } => {
-                if button == winit::event::MouseButton::Left {
-                    match mouse {
-                        ElementState::Pressed => {
-                            self.dragging = true;
-                            self.press_at = self.last_cursor;
-                            self.moved = false;
-                        },
-                        ElementState::Released => {
-                            self.dragging = false;
-                            // Only a real press-release pair is a click; a
-                            // stray release (focus change) must not pick.
-                            let pressed_at = self.press_at.take();
-                            let click = !self.moved && pressed_at.is_some();
-                            self.moved = false;
-                            if click
-                                && let Some((x, y)) = pressed_at.or(self.last_cursor)
-                            {
-                                self.do_pick(x, y);
-                            }
-                        },
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            },
+            WindowEvent::MouseInput { state: mouse, button, .. } => match (button, mouse) {
+                (MouseButton::Left, ElementState::Pressed) => {
+                    self.dragging = true;
+                    self.press_at = self.last_cursor;
+                    self.moved = false;
+                },
+                (MouseButton::Left, ElementState::Released) => {
+                    self.dragging = false;
+                    // Only a real press-release pair is a click; a
+                    // stray release (focus change) must not pick.
+                    let pressed_at = self.press_at.take();
+                    let click = !self.moved && pressed_at.is_some();
+                    self.moved = false;
+                    if click
+                        && let Some((x, y)) = pressed_at.or(self.last_cursor)
+                    {
+                        self.do_pick(x, y);
                     }
-                }
+                },
+                (MouseButton::Middle, ElementState::Pressed) => {
+                    self.mmb = Some(if self.modifiers.shift_key() {
+                        MiddleDrag::Pan
+                    } else {
+                        MiddleDrag::Orbit
+                    });
+                },
+                (MouseButton::Middle, ElementState::Released) => self.mmb = None,
+                _ => {},
             },
             WindowEvent::CursorMoved { position, .. } => {
-                if self.dragging {
-                    if let Some(last) = self.last_cursor {
-                        let (dx, dy) = (position.x - last.0, position.y - last.1);
-                        if dx.abs() + dy.abs() > 2.0 {
-                            self.moved = true;
-                        }
-                        if let Some(state) = self.state.as_mut() {
-                            state.camera.orbit(dx, dy);
+                if let Some(last) = self.last_cursor {
+                    let (dx, dy) = (position.x - last.0, position.y - last.1);
+                    if self.dragging && dx.abs() + dy.abs() > 2.0 {
+                        self.moved = true;
+                    }
+                    if let Some(state) = self.state.as_mut()
+                        && (self.dragging || self.mmb.is_some())
+                    {
+                        match self.mmb {
+                            Some(MiddleDrag::Pan) => state.camera.pan(dx, dy, state.size),
+                            _ => state.camera.orbit(dx, dy),
                         }
                     }
                 }
@@ -2068,6 +2118,36 @@ mod tests {
         // Off-centre picks stay inside the frustum and differ from forward.
         let (edge, _) = cam.ray(0.0, 0.0, (800, 600));
         assert!((edge.direction[0] - ray.direction[0]).abs() > 1e-3);
+    }
+
+    #[test]
+    fn panning_slides_the_target_in_the_screen_plane() {
+        let mut cam = OrbitCamera::new();
+        let before = cam.target;
+        let eye = cam.eye();
+        let forward = cam::normalize([
+            before[0] - eye[0],
+            before[1] - eye[1],
+            before[2] - eye[2],
+        ]);
+        let right = cam::normalize(cam::cross(forward, [0.0, 0.0, 1.0]));
+        let up = cam::cross(right, forward);
+        let size = (800, 400);
+        let (dx, dy) = (10.0, -6.0);
+        cam.pan(dx, dy, size);
+
+        let delta =
+            [cam.target[0] - before[0], cam.target[1] - before[1], cam.target[2] - before[2]];
+        let world_per_px = 2.0 * cam.dist * (FOV_Y_DEG.to_radians() * 0.5).tan() / size.1 as f32;
+        // The world follows the cursor: drag right/down moves the target
+        // left/up by exactly the on-screen distance at the target plane.
+        assert!((cam::dot(delta, right) + dx as f32 * world_per_px).abs() < 1e-3);
+        assert!((cam::dot(delta, up) - dy as f32 * world_per_px).abs() < 1e-3);
+        assert!(cam::dot(delta, forward).abs() < 1e-3);
+        // Panning neither zooms nor re-aims the camera.
+        assert_eq!(cam.dist, 250.0);
+        assert_eq!(cam.yaw, OrbitCamera::new().yaw);
+        assert_eq!(cam.pitch, OrbitCamera::new().pitch);
     }
 
     fn doc_info(doc: DocId, name: &str) -> DocInfo {

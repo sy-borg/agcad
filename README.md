@@ -599,7 +599,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ./python
 
 # Human seat: viewer (needs a server with an open document)
 ./target/debug/wright --tcp 7860 &
-./target/debug/wright-view --port 7860     # drag = orbit, wheel = zoom, L = labels, Tab = switch document, click = pick, R = refresh
+./target/debug/wright-view --port 7860     # drag = orbit, Shift+MMB drag = pan, wheel = zoom, L = labels, Tab = switch document, click = pick, R = refresh
 ```
 
 Minimal agent session:
