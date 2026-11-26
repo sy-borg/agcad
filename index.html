@@ -7,6 +7,17 @@
 <meta name="description" content="Wright CAD is a headless, scriptable parametric CAD. An AI agent drives it over a JSON-RPC command bus or MCP; the viewer is just another client.">
 <meta property="og:title" content="Wright CAD">
 <meta property="og:description" content="A CAD whose primary user is an AI agent.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Wright CAD">
+<meta property="og:url" content="https://sy-borg.github.io/wright-cad/">
+<meta property="og:image" content="https://sy-borg.github.io/wright-cad/examples/cross_block/compare.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="1275">
+<meta property="og:image:alt" content="A drawing of a cross block next to the 3D model Wright CAD rebuilt from it">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Wright CAD">
+<meta name="twitter:description" content="A CAD whose primary user is an AI agent.">
+<link rel="canonical" href="https://sy-borg.github.io/wright-cad/">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <meta name="theme-color" content="#eef0ec">
 <link rel="preload" as="image" href="examples/cross_block/compare.png" fetchpriority="high">
@@ -150,14 +161,15 @@ footer{padding:0 0 48px}
   ol.loop li:last-child{border-bottom:0}
   .titleblock{grid-template-columns:1fr 1fr}
   .titleblock div{border-bottom:1px solid var(--ink)}
-  nav .links{display:none}
+  nav .links{display:flex;flex-wrap:wrap;gap:6px 18px;margin-left:0;font-size:.9rem}
+  nav .wrap{height:auto;flex-wrap:wrap;gap:8px 18px;padding-top:10px;padding-bottom:10px}
 }
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style>
 </head>
 <body>
 
-<nav>
+<nav aria-label="Primary">
   <div class="wrap">
     <a class="brand" href="#top"><img src="logo.svg" alt="" width="256" height="256" decoding="async">Wright CAD</a>
     <div class="links">
@@ -190,6 +202,7 @@ footer{padding:0 0 48px}
   </div>
 </header>
 
+<main>
 <section id="knobs" class="alt">
   <div class="wrap">
     <h2>The program is the function</h2>
@@ -266,11 +279,11 @@ footer{padding:0 0 48px}
 
     <div class="pair twoone">
       <figure>
-        <img src="examples/example_body.png" alt="The source picture" width="600" height="900" loading="lazy" decoding="async">
+        <img src="examples/example_body.png" alt="The source picture" width="2203" height="1070" loading="lazy" decoding="async">
         <figcaption>The source picture to resemble including the size with the scale. See <code>examples/example_body.png</code>.</figcaption>
       </figure>
       <figure>
-        <img src="examples/cross_block/rounded.png" alt="The finished cross block with rounded top and bottom rims" width="300" height="900" loading="lazy" decoding="async">
+        <img src="examples/cross_block/rounded.png" alt="The finished cross block with rounded top and bottom rims" width="900" height="900" loading="lazy" decoding="async">
         <figcaption>The finished part: 1 mm rounds on the rims, driven by the <code>round_r</code> knob.</figcaption>
       </figure>
     </div>
@@ -296,7 +309,7 @@ footer{padding:0 0 48px}
         <figcaption>The whole session: one sentence in, then thread, head, chamfer, validation and file list out. About 22k tokens.</figcaption>
       </figure>
       <figure>
-        <img src="examples/m10x20_screw/m10screw_result.png" alt="The M10x20 screw in the Wright CAD viewer, labelled M10x20_screw #5" width="2061" height="2324" loading="lazy" decoding="async">
+        <img src="examples/m10x20_screw/m10screw_result.png" alt="The M10x20 screw in the Wright CAD viewer, labelled M10x20_screw #5" width="1920" height="2169" loading="lazy" decoding="async">
         <figcaption>The part in the live viewer while the agent worked. The viewer is another bus client: no document state, no hidden modelling code.</figcaption>
       </figure>
     </div>
@@ -335,7 +348,7 @@ footer{padding:0 0 48px}
 
     <div class="pair twoone">
       <figure>
-        <a href="examples/assembly_drawing/assembly_drawing.svg"><img src="examples/assembly_drawing/assembly_drawing.svg" alt="Dimensioned drawing sheet of the two-post clamp with front, top, right and isometric views, balloons and a BOM" width="820" height="840" loading="lazy" decoding="async"></a>
+        <a href="examples/assembly_drawing/assembly_drawing.svg"><img src="examples/assembly_drawing/assembly_drawing.svg" alt="Dimensioned drawing sheet of the two-post clamp with front, top, right and isometric views, balloons and a BOM" width="820" height="948" loading="lazy" decoding="async"></a>
         <figcaption>The generated sheet: third-angle views, hidden lines, true-length dimensions, part balloons and a BOM. Open the <a href="examples/assembly_drawing/assembly_drawing.svg">SVG</a> or <a href="examples/assembly_drawing/assembly_drawing.dxf">DXF</a>.</figcaption>
       </figure>
       <figure>
@@ -390,17 +403,14 @@ footer{padding:0 0 48px}
       </div>
     </div>
 
-    <p><b>Sketch completeness.</b> Sketches now draw arcs and interpolating splines, close profiles with tangent joints, and use equal, concentric, symmetric, angle and point-on-line constraints. Construction geometry guides the solve without joining the extrusion; <code>trim_sketch</code>, <code>extend_sketch</code> and <code>offset_sketch</code> edit the drawing, and every solve names an unsatisfied or redundant constraint by id instead of quietly compromising.</p>
-
-    <p><b>Trust loop.</b> <code>validate</code> checks every solid for watertightness, non-manifold edges, self-intersections, volume and an approximate thinnest wall (optionally against <code>min_wall_mm</code>), and every sketch for solver status, conflict diagnostics and a closed profile. <code>diff_scene</code> compares two revisions by entity signature — against another open document or a saved <code>.wcad</code> — and names what changed: added, removed and modified entities with field-level detail, parameter values and the program. Both are queries: no program entry, no state change. A rebuild is proven correct, not assumed.</p>
-
-    <p><b>Shape leverage.</b> <code>linear_pattern</code> and <code>circular_pattern</code> repeat solids, <code>mirror</code> reflects them, <code>shell</code> hollows in place (open faces by outward normal), and <code>hole</code> cuts a real through, blind, counterbore or countersink hole. <code>sweep</code> carries a profile along a polyline or helix, <code>loft</code> morphs between profiles, and <code>thread</code> builds a helical screw thread: union it for a screw, subtract it for a threaded hole.</p>
-
-    <p><b>Interoperability.</b> <code>import_mesh</code> reads binary or ASCII STL, OBJ and 3MF (units, build transforms and components included), welds the vertices, drops degenerate and duplicate triangles, flips inward winding and derives crease-aware normals. The cleaned triangles become an ordinary <code>add_mesh</code> program step, so the saved <code>.wcad</code> reopens after the source file is deleted and the imported part transforms, booleans, validates and exports like anything the script built.</p>
-    <p><b>2D output.</b> <code>export_dxf</code> and <code>export_svg</code> write sketches in their own <code>(u, v)</code> millimeters — native lines, circles and arcs, splines as polylines, dashed construction geometry, and closed profile loops on separate layers. Name a solid instead of its sketch and the source profile comes out; ask for <code>profiles</code> alone and it is a cutter-ready outline. Both files are deterministic, and exporting never touches the program.</p>
-    <p><b>STEP path.</b> <code>export_step</code> hands the solids themselves to another CAD kernel. wright is a tessellation kernel, so it makes the B-rep decision explicit instead of faking analytic surfaces: an AP214 <code>FACETED_BREP</code> with one planar <code>FACE_SURFACE</code> per triangle, welded shared points and a closed shell per connected edge-manifold piece. Open or non-manifold pieces come out as <code>SHELL_BASED_SURFACE_MODEL</code> surfaces, not fake solids. STEP import is deliberately out of scope — real STEP is mostly trimmed analytic surfaces, a different kernel problem — so incoming geometry stays on STL, OBJ and 3MF.</p>
-    <p><b>Assemblies.</b> <code>import_part</code> embeds a whole part document in the assembly program, so save/open never needs the source again; <code>add_instance</code> places it (with per-instance parameter overrides) and members stay ordinary solids. Named connectors and <code>mate</code> give coincident, distance, parallel and angle joints; <code>check_interference</code> reports overlapping volumes and <code>bill_of_materials</code> groups quantities, members and total volume.</p>
-    <p><b>Drawings.</b> <code>export_drawing</code> projects the scene into third-angle front/top/right and isometric views (or explicit positions and scale), rebuilds feature and silhouette edges, removes hidden lines on a deterministic grid, and dimensions each orthographic view in true model millimeters. Instance balloons, a BOM table, a title block and free annotations ride along; SVG and DXF come out byte-stable.</p>
+    <div class="rules">
+      <div><h3>Sketch completeness</h3><p>Arcs and interpolating splines, tangent/equal/concentric/symmetric/angle/point-on-line constraints, construction geometry, and <code>trim_sketch</code>/<code>extend_sketch</code>/<code>offset_sketch</code>. Every solve names an unsatisfied or redundant constraint by id.</p></div>
+      <div><h3>Trust loop</h3><p><code>validate</code> checks watertightness, non-manifold edges, self-intersections, volume and thinnest wall; <code>diff_scene</code> compares two revisions by entity signature and names what changed. Both are read-only queries.</p></div>
+      <div><h3>Shape leverage</h3><p>Patterns, <code>mirror</code>, <code>shell</code>, <code>hole</code>, <code>sweep</code>, <code>loft</code> and <code>thread</code> cover the repetitive printable moves without manual copies.</p></div>
+      <div><h3>Interoperability</h3><p><code>import_mesh</code> reads STL/OBJ/3MF, welds and repairs the mesh, and bakes it into an <code>add_mesh</code> step so the <code>.wcad</code> reopens without the source file.</p></div>
+      <div><h3>2D and STEP output</h3><p><code>export_dxf</code>/<code>export_svg</code> write sketch-local drawings and cutter profiles; <code>export_step</code> writes an honest AP214 faceted B-rep, with open pieces as surface models. STEP import stays out of scope.</p></div>
+      <div><h3>Assemblies and drawings</h3><p>Embedded parts, instances with parameter overrides, connectors and mates, BOM and interference checks; <code>export_drawing</code> produces deterministic multi-view SVG/DXF sheets with hidden lines, dimensions, balloons and a title block.</p></div>
+    </div>
   </div>
 </section>
 
@@ -522,6 +532,7 @@ python3 -m venv .venv
     </div>
   </div>
 </section>
+</main>
 
 <footer>
   <div class="wrap">
