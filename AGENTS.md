@@ -35,11 +35,21 @@ Keep the `README.md` and `index.html` in synch with the code.
 ## Layout and conventions
 
 - `crates/protocol` wire types; `crates/core` documents, history, geometry,
-  constraints, booleans, fillets, software rasterizer; `crates/server` JSON-RPC
+  constraints, booleans, fillets, assemblies, drawing sheets, software
+  rasterizer; `crates/server` JSON-RPC
   over stdio/TCP; `crates/viewer` wgpu client. The bus is the only API; the
   viewer and MCP own no document state. Viewer-side labels are display only;
   hit-testing and selector construction live in the engine's `pick` command,
   never in the viewer.
+- `assembly.rs` embeds a part's complete `DocumentSnapshot` in an `AddPart`
+  program step, so assemblies are self-contained; instances are rigid
+  (rotation + uniform scale) and members stay ordinary entities. Part
+  snapshots keep `doc: 1` internally; never rebind their commands.
+- `drawing_sheet.rs` rebuilds topology by welding the mesh and indexes the
+  **welded** positions. The crease-normal mesh has several vertices per
+  corner, so using the raw position buffer silently draws edges between
+  unrelated corners. Keep zero-area seam triangles in the edge pairing (they
+  close the mesh) but out of the hidden-line triangle set.
 - Units are mm and degrees, Z is up, colors are `[r,g,b,a]` floats 0..1, and
   cylinders extrude along +Z. Document ids start at 1; `create_document`
   accepts an explicit unused id so create + populate can share one batch.

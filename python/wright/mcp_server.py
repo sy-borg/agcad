@@ -70,6 +70,12 @@ original), mirror reflects them across a plane, shell hollows a solid in place
 countersink hole in place, sweep carries a profile along a polyline or helix,
 loft morphs between two or more profiles, and thread builds a real screw thread
 (union it for a screw, subtract it for a threaded hole).
+Assemblies reuse whole parts: import_part (a .wcad file or an open document)
+embeds the part's program, add_instance places it (with per-instance parameter
+overrides), add_connector names attachment points and mate joins two instances
+(coincident/distance/parallel/angle). bill_of_materials and check_interference
+answer the assembly questions, and export_drawing writes an SVG or DXF sheet
+with front/top/right/iso views, hidden lines, dimensions, balloons and a BOM.
 Documents live in the engine process, not in this server, so a restarted backend
 starts empty. When a tool result carries `reconnected`, the client rebuilt the
 connection: read its `open_documents` list, replay your script if your document
@@ -199,6 +205,39 @@ thread{doc,major_diameter,minor_diameter?,pitch,length,hand?:"right"|"left",
   flank_angle_deg?=60,segments_per_turn?,origin?,name?,color?} (a real threaded
   solid along +Z from origin; union for a screw, boolean difference for a
   threaded hole),
+import_part{doc,path?|from?:doc_id,name?} (register a part for assembly: `path`
+  is a .wcad file on the server, `from` snapshots an open document. Give one.
+  The part program is embedded in this document, so save/open never needs the
+  source again; nothing is placed yet. Replays the part once to validate it),
+add_part{doc,name,part} (register an already-embedded part snapshot — the
+  program step import_part records; agents normally use import_part),
+add_instance{doc,part,name,translation?,rotation_deg?,scale?=1,parameters?}
+  (place a part; every printable solid becomes an entity named
+  "<instance>.<member>" and returns its ids. parameters overrides the part's
+  saved knob values for this instance only; values may be expressions over
+  the ASSEMBLY parameters. Instances move as a rigid group),
+add_connector{doc,instance,name,point:[x,y,z],axis?:[x,y,z]} (named attachment
+  point in instance-local coordinates; mates use these),
+move_instance{doc,instance,translation?,rotation_deg?,scale?} (move one
+  instance and all its members; omitted parts stay),
+mate{doc,kind:"coincident"|"distance"|"parallel"|"angle",a:{instance,connector},
+  b:{instance,connector},offset?} (moves instance b so its connector meets a's:
+  coincident = points together + axes anti-parallel; distance = same with a gap
+  along a's axis (mm); parallel = align axes only; angle = points together and
+  b's axis offset degrees from a's. Mates solve sequentially in program order),
+bill_of_materials{doc} (rows per part: item number, quantity, current entities,
+  total world volume, instance names; session query),
+check_interference{doc,instances?,entities?,tolerance?=0.001} (pairwise
+  volumetric overlap: by default across placed instances; or pass `entities`
+  to check specific solids. Returns ok, checked and hits with intersection
+  volume/bbox; session query),
+export_drawing{doc,path,format?:"svg"|"dxf",views?,scale?,hidden_lines?,
+  dimensions?,balloons?,bom?,title?,annotations?} (multi-view engineering
+  drawing: default front/top/right/iso in third-angle layout, feature +
+  silhouette edges, hidden-line removal, overall dimensions in true model mm,
+  part balloons, BOM table, title block. A view is "front"/"top"/"right"/
+  "left"/"back"/"bottom"/"iso" or {view,at:[x,y],dimensions?} in sheet mm;
+  annotations are {text,at:[x,y]}; session command),
 save_document{doc,path,source?} (writes a .wcad JSON file: the program plus
   the current parameter values; geometry is rebuilt by replay, so the file stays
   small and diffable. source={language,text} embeds the authoring script as the
@@ -265,7 +304,8 @@ SCENE_DESCRIPTION = """Inspect an wright document: parameters and entities with
 placement, a world-space bounding box per entity (meshes are entity-local;
 world_bbox already includes translation/rotation/scale), vertex/triangle
 counts, and for sketches a compact solver + resolved plane summary (origin,
-outward normal, in-plane X) — no raw meshes."""
+outward normal, in-plane X) — no raw meshes. Part members also carry their
+owning `instance` id and `part` name (their name is `<instance>.<member>`)."""
 
 RENDER_DESCRIPTION = """Render the document to a PNG image, returned inline as an
 image content block — so you can SEE the scene and compare it against what the

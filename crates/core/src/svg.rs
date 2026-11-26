@@ -39,6 +39,33 @@ fn style(role: Role) -> &'static str {
         Role::Profile => {
             r##"class="profile" fill="none" stroke="#0057b8" stroke-width="0.25" stroke-linecap="round" stroke-linejoin="round""##
         }
+        Role::Visible => {
+            r##"class="visible" fill="none" stroke="#111111" stroke-width="0.3" stroke-linecap="round" stroke-linejoin="round""##
+        }
+        Role::Hidden => {
+            r##"class="hidden" fill="none" stroke="#777777" stroke-width="0.18" stroke-dasharray="1.6 1" stroke-linecap="round" stroke-linejoin="round""##
+        }
+        Role::Dimension => {
+            r##"class="dimension" fill="none" stroke="#b02020" stroke-width="0.18" stroke-linecap="round" stroke-linejoin="round""##
+        }
+        Role::Annotation => {
+            r##"class="annotation" fill="none" stroke="#0057b8" stroke-width="0.2" stroke-linecap="round" stroke-linejoin="round""##
+        }
+        Role::Sheet => {
+            r##"class="sheet" fill="none" stroke="#444444" stroke-width="0.18" stroke-linecap="round" stroke-linejoin="round""##
+        }
+        Role::Bom => {
+            r##"class="bom" fill="none" stroke="#111111" stroke-width="0.18" stroke-linecap="round" stroke-linejoin="round""##
+        }
+    }
+}
+
+fn text_color(role: Role) -> &'static str {
+    match role {
+        Role::Dimension => "#b02020",
+        Role::Annotation | Role::Profile => "#0057b8",
+        Role::Construction | Role::Hidden | Role::Sheet => "#555555",
+        _ => "#111111",
     }
 }
 
@@ -70,7 +97,7 @@ pub fn svg_bytes(drawing: &Drawing) -> Result<Vec<u8>, Error> {
     ));
     out.push_str(&format!("  <title>{}</title>\n", escape(&drawing.name)));
     out.push_str(
-        "  <desc>2D drawing exported by wright - sketch coordinates in millimeters</desc>\n",
+        "  <desc>2D drawing exported by wright - coordinates in millimeters</desc>\n",
     );
 
     for (li, layer) in drawing.layers.iter().enumerate() {
@@ -153,6 +180,17 @@ pub fn svg_bytes(drawing: &Drawing) -> Result<Vec<u8>, Error> {
                         out.push_str(" Z");
                     }
                     out.push_str("\"/>\n");
+                }
+                CurveKind::Text { at, text, height } => {
+                    let p = flip(*at);
+                    out.push_str(&format!(
+                        "    <text x=\"{}\" y=\"{}\" font-family=\"monospace\" font-size=\"{}\" fill=\"{}\" stroke=\"none\">{}</text>\n",
+                        n(p[0]),
+                        n(p[1]),
+                        n(*height),
+                        text_color(layer.role),
+                        escape(text)
+                    ));
                 }
             }
         }

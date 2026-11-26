@@ -1932,6 +1932,8 @@ mod tests {
                 indices: vec![0, 1, 2],
             },
             sketch: None,
+            instance: None,
+            part: None,
         }
     }
 
@@ -2028,6 +2030,8 @@ mod tests {
                 indices: vec![0, 1, 2],
             },
             sketch: None,
+            instance: None,
+            part: None,
         }
     }
 

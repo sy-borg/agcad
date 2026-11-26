@@ -123,6 +123,12 @@ fn is_mutating(command: &Command) -> bool {
             | Command::Sweep { .. }
             | Command::Loft { .. }
             | Command::Thread { .. }
+            | Command::ImportPart { .. }
+            | Command::AddPart { .. }
+            | Command::AddInstance { .. }
+            | Command::AddConnector { .. }
+            | Command::MoveInstance { .. }
+            | Command::Mate { .. }
             | Command::SetParameter { .. }
             | Command::RemoveParameter { .. }
             | Command::CreateDocument { .. }
@@ -168,6 +174,15 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Sweep { doc, .. }
         | Command::Loft { doc, .. }
         | Command::Thread { doc, .. }
+        | Command::ImportPart { doc, .. }
+        | Command::AddPart { doc, .. }
+        | Command::AddInstance { doc, .. }
+        | Command::AddConnector { doc, .. }
+        | Command::MoveInstance { doc, .. }
+        | Command::Mate { doc, .. }
+        | Command::BillOfMaterials { doc }
+        | Command::CheckInterference { doc, .. }
+        | Command::ExportDrawing { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::Undo { doc }

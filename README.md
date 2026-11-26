@@ -20,6 +20,9 @@ and SVG export close the drawing loop: sketches and their closed profiles come
 back out in sketch-local millimeters for CAD, laser cutters and CAM. STEP
 export hands the solids themselves to another CAD kernel as an explicit
 faceted B-rep, without pretending the tessellation is analytic geometry.
+Assemblies place reusable parts with mates and interference checks, and
+`export_drawing` turns any scene into a dimensioned multi-view SVG or DXF
+sheet with hidden lines, balloons and a bill of materials.
 
 ```
 ┌───────────────┐   JSON-RPC (stdio/TCP)   ┌───────────────┐   ┌──────────────────┐
@@ -79,7 +82,7 @@ and `compare.png` (the drawing above that part).
 | Path | What it is |
 |---|---|
 | `crates/protocol` | Wire types: commands, results, meshes (serde/JSON) |
-| `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, DXF/SVG drawings, STEP export, deterministic rendering |
+| `crates/core` | Headless engine: documents, parameters, sketches, booleans, fillets, persistence, assemblies, DXF/SVG/STEP drawings and sheets, deterministic rendering |
 | `crates/server` | `wright` binary — line-delimited JSON-RPC on stdio or TCP |
 | `crates/viewer` | `wright-view` — wgpu renderer, talks only the bus |
 | `python/wright` | Dependency-free sync Python client (the agent API) and MCP server |
@@ -116,6 +119,8 @@ Commands, grouped by intent:
   `chamfer`
 - **Shape leverage**: `linear_pattern`, `circular_pattern`, `mirror`,
   `shell`, `hole`, `sweep`, `loft`, `thread`
+- **Assemblies**: `import_part`, `add_part`, `add_instance`, `add_connector`,
+  `move_instance`, `mate`, `bill_of_materials`, `check_interference`
 - **Parameters**: `set_parameter`, `remove_parameter`, `get_parameters`
 - **Sketches and solids**: `add_sketch`, `add_sketch_line`,
   `add_sketch_circle`, `add_sketch_arc`, `add_sketch_spline`, `constrain`,
@@ -125,7 +130,8 @@ Commands, grouped by intent:
   triangles; the baked program step import records)
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `validate`,
   `diff_scene`, `export_stl`, `export_3mf`, `export_step`, `export_dxf`,
-  `export_svg`, `render_offscreen`, `save_document`, `open_document`
+  `export_svg`, `export_drawing`, `render_offscreen`, `save_document`,
+  `open_document`
 - **History**: `undo`, `redo`
 
 `get_program` returns the program, the parameters and any embedded authoring
@@ -209,7 +215,8 @@ axis-aligned and `add_cylinder` extrudes along +Z. Document ids start at 1;
 batch is one round trip. Geometry is baked centered on the entity origin;
 placement comes from `T · Rz · Ry · Rx · S` (extrinsic XYZ rotation, applied
 X then Y then Z). `get_scene` reports the local mesh plus a world-space
-`world_bbox` per entity.
+`world_bbox` per entity; a placed part member also carries its owning
+`instance` id and `part` name.
 
 ## The parametric layer: the program *is* the function
 
@@ -417,6 +424,87 @@ cad.thread(doc, major_diameter=8, pitch=1.25, length=12, name="m8")
 the program. Change it by editing the script and replaying, or turn the
 expressions that position those entities. That is the same rule as any other
 structural edit, and it keeps downstream ids predictable.
+
+## Assemblies and drawings
+
+An **assembly** is an ordinary document whose program also embeds reusable
+**parts**. `import_part` snapshots a `.wcad` file (`path`) or another open
+document (`from`) and records an `add_part` step containing the part's whole
+program; `add_instance` then replays that part privately and adds every
+printable solid as a normal entity named `"<instance>.<member>"`:
+
+```python
+cad.import_part(asm, path="plate.wcad", name="plate")
+cad.import_part(asm, from_doc=post_doc, name="post")
+base = cad.add_instance(asm, "plate", "base")
+cad.add_instance(asm, "post", "post1", translation=(18, 0, 0),
+                 parameters={"post_h": 30})
+```
+
+The embedding is what keeps the promise made by `import_mesh`: save the
+assembly, delete the part files, reopen it — every instance still replays.
+`parameters` overrides the part's saved knob values for that instance only
+(expressions resolve against the *assembly's* parameters), so one part can
+appear in several variants. Instances move as a rigid group (rotation +
+uniform scale); their members stay ordinary solids for fillets, booleans and
+exports. Sketches are display-only inside a part and are not copied. Nested
+assemblies work, because a part is just a document replayed privately. A part
+is a snapshot, not a live link: to adopt a changed design, re-author the
+assembly script and re-import it (the script stays the editing surface).
+
+**Mates** join two instances through named **connectors** — points (and
+optional axes) in instance-local coordinates:
+
+```python
+cad.add_connector(asm, base["instance"], "top", (0, 0, 5), axis=(0, 0, 1))
+cad.add_connector(asm, top["instance"], "bottom", (0, 0, 0), axis=(0, 0, -1))
+cad.mate(asm, "distance", (base["instance"], "top"),
+         (top["instance"], "bottom"), offset=25)
+```
+
+`coincident` puts the points together and makes the axes anti-parallel;
+`distance` adds a gap along A's axis; `parallel` only aligns axes; `angle`
+puts the points together and tilts B's axis `offset` degrees from A's. Mates
+are solved sequentially in program order — each is a rigid motion of B — so
+they replay deterministically rather than solving a global constraint system.
+`move_instance` is the direct placement override.
+
+`bill_of_materials` groups instances by part into item-numbered rows with
+quantity, current member count, total world volume and instance names.
+`check_interference` checks placed instances against each other by default
+(or explicit `entities`), pruning by AABB and measuring the boolean
+intersection; `ok` is the short answer and each hit carries its volume and
+world bounds.
+
+**Drawing sheets** reuse the 2D writers. `export_drawing` projects the scene
+into front/top/right plus an isometric view by default (third-angle layout),
+or takes explicit `views` with sheet positions and a `scale`:
+
+```python
+cad.export_drawing(asm, "exports/assembly.svg", scale=1.0,
+                   annotations=[("CHECK ALL EDGES", (20, 20))])
+cad.export_drawing(asm, "exports/assembly.dxf", format="dxf")
+```
+
+Edges are rebuilt from welded topology: real feature edges (dihedral angle)
+plus per-view silhouettes, so cylinders read as outlines. Each edge is sampled
+and depth-tested against a deterministic screen-space grid; visible runs are
+solid black and occluded runs dashed grey. Orthographic views get overall
+width/height dimensions with extension lines and arrowheads, and the numbers
+are true model lengths even at a reduced scale. Instances get numbered
+balloons in the first orthographic view; the sheet gets a BOM table and a
+title block. `hidden_lines`, `dimensions`, `balloons` and `bom` are
+individually switchable. Output is deterministic: same scene + options →
+identical SVG or DXF bytes.
+
+The committed example is `examples/assembly_drawing/`: the two-post clamp
+built from a plate and a post, the [dimensioned sheet](examples/assembly_drawing/assembly_drawing.svg)
+(and [DXF](examples/assembly_drawing/assembly_drawing.dxf)), its
+[3D render](examples/assembly_drawing/assembly.png), and the
+[self-contained `.wcad`](examples/assembly_drawing/assembly.wcad).
+`examples/assembly_drawing.py` regenerates all of it.
+
+<img src="examples/assembly_drawing/assembly_drawing.svg" width="820" alt="Dimensioned front, top, right and isometric views of the two-post clamp with balloons and a BOM">
 
 ## Trust: prove the rebuild and see what changed
 
@@ -734,27 +822,48 @@ turns, while the script remains the editing surface.
         analytic surfaces are a different kernel, so incoming geometry stays
         on STL/OBJ/3MF. Open or non-manifold pieces become
         `SHELL_BASED_SURFACE_MODEL`s and the result counts both.
+- [x] **M19 — Assemblies and drawings**:
+  - [x] **Parts and instances** — `import_part` snapshots a `.wcad` file or
+        another open document and embeds its complete program as an
+        `add_part` step; `add_instance` places every printable solid as a
+        normal entity named `"<instance>.<member>"`, with an optional
+        per-instance parameter override. The assembly is self-contained
+        (save it, delete the parts, reopen it) and instances move as a rigid
+        group. Nested assemblies work because a part is replayed privately.
+  - [x] **Mates and interference** — named `add_connector` points/axes let
+        `mate` put instance B on instance A: `coincident`, `distance`,
+        `parallel` or `angle`, solved sequentially in program order and
+        replayed with the program. `check_interference` prunes by AABB, runs
+        the boolean intersection, and reports overlapping solids with the
+        intersection volume and world bounds.
+  - [x] **BOM** — `bill_of_materials` groups instances by part, with stable
+        item numbers, quantity, current member count, total world volume and
+        the instance names; a session query that changes no state.
+  - [x] **Drawing sheets** — `export_drawing` writes SVG or DXF with
+        third-angle front/top/right plus an isometric view (or explicit
+        views/positions), feature and silhouette edges, deterministic
+        hidden-line removal, overall dimensions in true model millimeters, a
+        configurable scale, view labels, free annotations, part balloons, a
+        BOM table and a title block. The existing 2D writer layers and text
+        support carry it, so both formats share styling and byte stability.
 
 ### Next
 
-- [ ] **M19 — Assemblies and drawings**: parts/instances, mates, interference
-      and BOM; drawing views with dimensions and annotations. The two pillars
-      still missing from “general parametric CAD”.
 - [ ] **Later / UI polish**: `patch_program` for script-less MCP documents,
       shaded-with-edges rendering (a thin outline where faces meet, so front
       views read as CAD drawings), a Rust MCP server and PyO3 bindings.
 
 ## Status
 
-Milestone 18 is complete: interoperability runs in both directions.
-`import_mesh` turns an STL, OBJ or 3MF file into an editable wright solid,
-bakes it into the program, and keeps the whole downstream toolchain — booleans,
-fillets, validate, save/open, STL/3MF/STEP export — working on it. `export_dxf`
-and `export_svg` hand sketches and their closed profiles to drawing and cutting
-tools in sketch-local millimeters. `export_step` hands the solids themselves to
-another CAD kernel as a faceted AP214 B-rep, with open meshes honestly reported
-as surface models. The suite is **226 tests** (212 engine + 1 server +
-13 viewer).
+Milestone 19 is complete: the roadmap's two missing pillars — assemblies and
+drawings — now sit on the same program/replay substrate as everything else.
+`import_part` embeds a whole part document in the assembly program, so
+instances survive save/open after the source files are gone; `mate` joins
+instances through named connectors; `check_interference` and
+`bill_of_materials` answer the assembly questions; and `export_drawing` turns
+the result into a dimensioned, hidden-line-removed SVG or DXF sheet with
+balloons, a BOM table and a title block. The suite is **250 tests**
+(235 engine + 1 server + 14 viewer).
 
 What it covers:
 
@@ -817,6 +926,15 @@ What it covers:
   inconsistently wound pieces as surface models, world-space coordinates,
   escaped names, fixed timestamps and byte-identical repeat exports. A GUI
   feature tree is not on the list — the agent edits the script and replays.
+- **Assemblies and drawings** — embedded part snapshots that reopen without
+  their source files, per-instance parameter overrides and replay,
+  rigid instance moves across multiple members, connectors and
+  coincident/distance/parallel/angle mates, BOM grouping and volumes,
+  AABB-pruned interference volumes, and drawing sheets with feature and
+  silhouette edges, hidden-line removal on a deterministic spatial grid,
+  third-angle layout, true-length dimensions, explicit view placement and
+  scale, annotations, balloons, BOM table and title block — byte-stable in
+  both SVG and DXF.
 
 End-to-end printable examples: `examples/printable_bracket.py` (constrained
 profile with holes → extrude → STL/3MF → render),
@@ -843,7 +961,11 @@ deleting the source files), `examples/export_2d.py` (a slot profile with
 mounting holes exported three ways: the full DXF drawing, profile-only loops
 for a cutter, and the same loops from the solid instead of the sketch), and
 `examples/step_export.py` (a bored plate as one faceted B-rep, a second export
-proving byte determinism, and an open sheet reported as a surface model).
+proving byte determinism, and an open sheet reported as a surface model), plus
+`examples/assembly_drawing.py` (two reusable parts placed four times, a
+distance mate seating the top plate, a BOM and interference check, then an SVG
+and DXF sheet with balloons — the saved assembly reopens after its part file is
+deleted).
 
 ## What agents say
 

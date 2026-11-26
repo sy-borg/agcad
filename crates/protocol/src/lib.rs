@@ -49,7 +49,12 @@ pub const DOCUMENT_FORMAT: &str = "wright-document";
 /// 3: M16 shape-leverage commands (`linear_pattern`, `circular_pattern`,
 /// `mirror`, `shell`, `hole`, `sweep`, `loft`, `thread`). Older readers fail
 /// to parse them, so the change is not downgrade-safe either.
-pub const DOCUMENT_VERSION: u32 = 3;
+///
+/// 4: M19 assembly commands (`add_part`, `add_instance`, `add_connector`,
+/// `mate`, `move_instance`). `add_part` embeds a complete part document in
+/// the program, so an assembly is self-contained just like an imported mesh;
+/// older readers cannot parse the step and would silently drop the parts.
+pub const DOCUMENT_VERSION: u32 = 4;
 
 pub type DocId = u64;
 pub type EntityId = u64;
@@ -130,11 +135,12 @@ impl RpcResponse {
 /// Every operation the bus understands. `method` is the JSON-RPC method
 /// name; all remaining variant fields live inside `params`.
 ///
-/// Modeling commands (Add*, Transform, SetColor, Delete, Boolean) are
-/// appended to the document program and replayed when parameters change.
-/// Session commands (initialize, undo/redo, get_scene, export_stl,
-/// export_3mf, export_step, export_dxf, export_svg, ...)
-/// are not part of the program.
+/// Modeling commands (Add*, Transform, SetColor, Delete, Boolean,
+/// AddInstance, Mate, ...) are appended to the document program and replayed
+/// when parameters change. Session commands (initialize, undo/redo, get_scene,
+/// export_stl, export_3mf, export_step, export_dxf, export_svg,
+/// export_drawing, bill_of_materials, check_interference, ...) are not part of
+/// the program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Command {
@@ -320,6 +326,185 @@ pub enum Command {
     Redo { doc: DocId },
 
     GetScene { doc: DocId },
+
+    /// Read a part document and make it available to `add_instance` under
+    /// `name`. Exactly one of `path` (a `.wcad` file on the server) or
+    /// `from` (another open document) must be given. The part's complete
+    /// program is embedded in the assembly program as an [`Command::AddPart`]
+    /// step, so the assembly remains self-contained: the source file (or
+    /// document) is not needed again, including after save/open. Nothing is
+    /// added to the scene yet — call `add_instance` to place one.
+    ImportPart {
+        doc: DocId,
+        /// Part name. Defaults to the document/file name.
+        #[serde(default)]
+        name: Option<String>,
+        /// A `.wcad` file the *server* reads; absolute paths avoid surprises.
+        #[serde(default)]
+        path: Option<String>,
+        /// Snapshot this open document as the part.
+        #[serde(default)]
+        from: Option<DocId>,
+    },
+
+    /// Register an embedded part definition. This is the self-contained
+    /// program step `import_part` records; agents normally use
+    /// `import_part`. Replaying a part document here never executes its
+    /// optional authoring source.
+    AddPart {
+        doc: DocId,
+        name: String,
+        /// The part document (program + parameter values + source). It is
+        /// replayed privately when an instance is placed.
+        part: DocumentSnapshot,
+    },
+
+    /// Place a part in the assembly. Every printable solid of the part
+    /// becomes an ordinary entity in this document, named
+    /// `"<instance>.<member>"`, with `Shape::PartMember` linking it back to
+    /// the instance. Sketches are display-only and are not copied. The
+    /// instance's placement is rigid (rotation + uniform scale); `parameters`
+    /// override the part's saved parameter values for this instance only.
+    AddInstance {
+        doc: DocId,
+        /// A part registered by `import_part` / `add_part`.
+        part: String,
+        /// Assembly-unique instance name (also the member-name prefix).
+        name: String,
+        /// Placement of the part origin in assembly space. May be expressions.
+        #[serde(default)]
+        translation: Option<SVec3>,
+        /// Extrinsic XYZ rotation in degrees. May be expressions.
+        #[serde(default)]
+        rotation_deg: Option<SVec3>,
+        /// Uniform scale (default 1). May be an expression.
+        #[serde(default)]
+        scale: Option<Scalar>,
+        /// Per-instance part parameter overrides. Values may be expressions
+        /// over the *assembly* parameters (resolved before the part replays).
+        #[serde(default)]
+        parameters: Option<std::collections::BTreeMap<String, Scalar>>,
+    },
+
+    /// Add a named connector to an instance: a point (and optional axis) in
+    /// instance-local coordinates. Mates reference connectors, so a screw's
+    /// tip and a hole's mouth can be defined once and reused.
+    AddConnector {
+        doc: DocId,
+        instance: u64,
+        name: String,
+        /// Connector point in instance-local coordinates. May be expressions.
+        point: SVec3,
+        /// Optional connector axis in instance-local coordinates (non-zero).
+        /// Used by `distance`, `parallel` and `angle` mates.
+        #[serde(default)]
+        axis: Option<[f64; 3]>,
+    },
+
+    /// Move one instance (and every member entity) to a new placement. A
+    /// modeling command, so it replays in program order.
+    MoveInstance {
+        doc: DocId,
+        instance: u64,
+        #[serde(default)]
+        translation: Option<SVec3>,
+        #[serde(default)]
+        rotation_deg: Option<SVec3>,
+        #[serde(default)]
+        scale: Option<Scalar>,
+    },
+
+    /// Constrain instance `b` to instance `a` through two connectors, then
+    /// move `b` (and all its members) to satisfy the mate. Mates are solved
+    /// sequentially in program order; each one is a rigid motion of `b`.
+    ///
+    /// * `coincident` — `b`'s connector point goes to `a`'s point; when both
+    ///   have axes they are anti-parallel (mating faces face each other).
+    /// * `distance` — like coincident, with `b`'s point offset along `a`'s
+    ///   axis by `offset` mm (both connectors need an axis).
+    /// * `parallel` — only rotates `b` so its axis is parallel to `a`'s,
+    ///   keeping the connector point where it is.
+    /// * `angle` — puts `b`'s point on `a`'s point and rotates `b`'s axis to
+    ///   `offset` degrees from `a`'s axis (offset 0 = parallel, 180 =
+    ///   anti-parallel). The tilt direction is derived deterministically
+    ///   from `a`'s axis.
+    Mate {
+        doc: DocId,
+        kind: MateKind,
+        a: MateRef,
+        b: MateRef,
+        /// Distance (mm) for `distance`, degrees for `angle`.
+        #[serde(default)]
+        offset: Option<Scalar>,
+    },
+
+    /// Bill of materials: one row per part used in the assembly, with the
+    /// instance count, entity count and total world volume. A session
+    /// command — no program entry, no state change.
+    BillOfMaterials { doc: DocId },
+
+    /// Check pairs of placed instances (default) or explicitly named solids
+    /// for volumetric interference. Uses AABB pruning and the boolean
+    /// kernel's intersection; reports the overlapping volume in mm³. A
+    /// session command — no program entry, no state change.
+    CheckInterference {
+        doc: DocId,
+        /// Instances to check against each other. Omit for every instance.
+        /// Ignored when `entities` is given.
+        #[serde(default)]
+        instances: Option<Vec<u64>>,
+        /// Solids to check pairwise. Defaults to cross-instance member pairs;
+        /// use this to check arbitrary solids in one document.
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+        /// Ignore overlaps at or below this volume (mm³, default 0.001).
+        #[serde(default)]
+        tolerance: Option<f64>,
+    },
+
+    /// Write a multi-view engineering drawing of the document (or assembly)
+    /// as SVG or DXF. Views are orthographic projections with feature and
+    /// silhouette edges, hidden-line removal, overall dimensions, part
+    /// balloons and an optional BOM table + title block. Coordinates on the
+    /// sheet are millimeters; `scale` scales the geometry but the dimension
+    /// numbers stay true model lengths. A session command — no program entry,
+    /// no state change.
+    #[serde(rename = "export_drawing")]
+    ExportDrawing {
+        doc: DocId,
+        path: String,
+        #[serde(default)]
+        format: DrawingFormat,
+        /// Views and their sheet placement. Omit for front, top, right and
+        /// an isometric view, auto-laid-out in third-angle style.
+        #[serde(default)]
+        views: Option<Vec<DrawingViewSpec>>,
+        /// Drawing scale as drawn/model (default 1). Dimensions still show
+        /// the real model length.
+        #[serde(default)]
+        scale: Option<f64>,
+        /// Draw occluded edges as dashed hidden lines (default true).
+        #[serde(default)]
+        hidden_lines: Option<bool>,
+        /// Add overall width/height dimensions to orthographic views
+        /// (default true). A view can override this.
+        #[serde(default)]
+        dimensions: Option<bool>,
+        /// Number part instances with BOM balloons in the first orthographic
+        /// view (default: true when the document has instances).
+        #[serde(default)]
+        balloons: Option<bool>,
+        /// Draw a BOM table above the title block (default: true when the
+        /// document has instances).
+        #[serde(default)]
+        bom: Option<bool>,
+        /// Sheet title; defaults to the document name.
+        #[serde(default)]
+        title: Option<String>,
+        /// Free annotation text placed in sheet millimeters.
+        #[serde(default)]
+        annotations: Option<Vec<DrawingAnnotation>>,
+    },
 
     /// Cast a world-space ray at the document's solids and report what it
     /// hits, with a ready-made geometric selector for the face and (when
@@ -1179,6 +1364,158 @@ impl Default for CurveMode {
     }
 }
 
+/// How an assembly mate positions instance `b` relative to instance `a`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MateKind {
+    Coincident,
+    Distance,
+    Parallel,
+    Angle,
+}
+
+impl MateKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Coincident => "coincident",
+            Self::Distance => "distance",
+            Self::Parallel => "parallel",
+            Self::Angle => "angle",
+        }
+    }
+}
+
+impl std::fmt::Display for MateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One side of a mate: an instance and one of its named connectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MateRef {
+    pub instance: u64,
+    pub connector: String,
+}
+
+/// A drawing sheet format. Both reuse the existing deterministic 2D writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawingFormat {
+    #[default]
+    Svg,
+    Dxf,
+}
+
+impl DrawingFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Svg => "svg",
+            Self::Dxf => "dxf",
+        }
+    }
+}
+
+/// Which orthographic (or isometric) projection a drawing view uses.
+///
+/// Third-angle placement: the front view looks along +Y (screen right +X,
+/// up +Z), the top view looks down -Z (right +X, up +Y) and belongs above the
+/// front view, and the right view looks along -X (right +Y, up +Z) and
+/// belongs to the right of the front view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewKind {
+    Front,
+    Back,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Iso,
+}
+
+impl ViewKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Front => "front",
+            Self::Back => "back",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Iso => "iso",
+        }
+    }
+
+    /// True for the six axis-aligned views; the isometric view is excluded
+    /// from automatic dimensions.
+    pub fn is_orthographic(&self) -> bool {
+        !matches!(self, Self::Iso)
+    }
+}
+
+impl std::fmt::Display for ViewKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One view on a drawing sheet. `at` is the sheet position (millimeters) of
+/// the projected geometry's bounding-box center; omit it for the automatic
+/// third-angle layout. `dimensions` overrides the sheet-wide default for
+/// this view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DrawingViewSpec {
+    pub view: ViewKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<bool>,
+}
+
+/// Free text on a drawing sheet, at sheet coordinates (millimeters).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DrawingAnnotation {
+    pub text: String,
+    pub at: [f64; 2],
+}
+
+/// One BOM line (see [`Command::BillOfMaterials`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BomRow {
+    /// Stable item number, assigned in part-name order from 1.
+    pub item: u32,
+    pub part: String,
+    /// The part document's name, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Number of placed instances.
+    pub quantity: u32,
+    /// Member entities currently present.
+    pub entities: usize,
+    /// Total signed world volume of the present members (mm³).
+    pub volume: f64,
+    /// Instance names, in creation order.
+    pub instances: Vec<String>,
+}
+
+/// One overlapping pair reported by [`Command::CheckInterference`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterferenceHit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a_instance: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_instance: Option<u64>,
+    pub a_name: String,
+    pub b_name: String,
+    pub a_entity: EntityId,
+    pub b_entity: EntityId,
+    /// Intersection volume in mm³.
+    pub volume: f64,
+    /// World-space bounds of the intersection.
+    pub bbox: Bbox,
+}
+
 /// Which set operation a [`Command::Boolean`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1287,6 +1624,53 @@ pub enum CommandResult {
     DocumentCreated { doc: DocId },
     Closed { doc: DocId },
     EntityCreated { doc: DocId, entity: EntityId, mesh: Mesh },
+    /// A part was registered for `add_instance` (see [`Command::ImportPart`]).
+    /// `solids` is the number of printable solids an instance will create and
+    /// `bytes` the embedded snapshot size.
+    PartImported {
+        doc: DocId,
+        name: String,
+        description: String,
+        solids: usize,
+        parameters: usize,
+        bytes: usize,
+    },
+    /// A bare embedded part definition was registered (`add_part`).
+    PartDefined { doc: DocId, name: String, solids: usize, parameters: usize },
+    /// A part was placed; `entities` lists its member solids in creation order.
+    InstanceCreated {
+        doc: DocId,
+        instance: u64,
+        name: String,
+        part: String,
+        entities: Vec<EntityId>,
+    },
+    ConnectorAdded { doc: DocId, instance: u64, name: String },
+    InstanceMoved { doc: DocId, instance: u64 },
+    /// A mate was solved by moving instance `b` (see [`Command::Mate`]).
+    MateSolved { doc: DocId, kind: MateKind, a_instance: u64, b_instance: u64 },
+    /// Bill of materials (see [`Command::BillOfMaterials`]).
+    Bom { doc: DocId, rows: Vec<BomRow> },
+    /// Interference report (see [`Command::CheckInterference`]). `ok` is true
+    /// when no pair overlapped above the tolerance. `checked` counts the pairs
+    /// whose world AABBs overlapped and therefore reached the kernel.
+    Interference {
+        doc: DocId,
+        ok: bool,
+        checked: usize,
+        tolerance: f64,
+        hits: Vec<InterferenceHit>,
+    },
+    /// A multi-view engineering drawing was written (see
+    /// [`Command::ExportDrawing`]).
+    DrawingExported {
+        doc: DocId,
+        path: String,
+        format: String,
+        views: usize,
+        curves: usize,
+        bytes: usize,
+    },
     /// A mesh file was imported as a solid (see [`Command::ImportMesh`]).
     /// `vertices` and `triangles` are the cleaned counts, and `dropped`
     /// counts degenerate or duplicate input triangles that were discarded.
@@ -1876,4 +2260,11 @@ pub struct EntitySnapshot {
     /// `mesh` of a sketch holds display ribbons, not printable geometry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<SketchSnapshot>,
+    /// For a solid placed by `add_instance`: the owning instance id. The
+    /// instance moves every entity that shares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<u64>,
+    /// For a part member: the part name it was replayed from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
 }

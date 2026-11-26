@@ -1,0 +1,258 @@
+{
+  "format": "wright-document",
+  "version": 4,
+  "protocol": 1,
+  "name": "two-post clamp",
+  "parameters": {},
+  "program": [
+    {
+      "method": "add_part",
+      "doc": 1,
+      "name": "plate",
+      "part": {
+        "format": "wright-document",
+        "version": 4,
+        "protocol": 1,
+        "name": "plate",
+        "parameters": {
+          "d": {
+            "value": 30.0,
+            "description": "plate depth [mm]"
+          },
+          "hole_d": {
+            "value": 10.0,
+            "description": "post clearance diameter [mm]"
+          },
+          "span": {
+            "value": 36.0,
+            "description": "hole center spacing [mm]"
+          },
+          "t": {
+            "value": 5.0,
+            "description": "plate thickness [mm]"
+          },
+          "w": {
+            "value": 60.0,
+            "description": "plate width [mm]"
+          }
+        },
+        "program": [
+          {
+            "method": "add_box",
+            "doc": 1,
+            "name": "body",
+            "center": [
+              0.0,
+              0.0,
+              "t/2"
+            ],
+            "size": [
+              "w",
+              "d",
+              "t"
+            ],
+            "color": null
+          },
+          {
+            "method": "add_cylinder",
+            "doc": 1,
+            "name": "hole_left",
+            "center": [
+              -18.0,
+              0.0,
+              "t/2"
+            ],
+            "radius": "hole_d/2",
+            "height": "t*3",
+            "segments": null,
+            "color": null
+          },
+          {
+            "method": "add_cylinder",
+            "doc": 1,
+            "name": "hole_right",
+            "center": [
+              18.0,
+              0.0,
+              "t/2"
+            ],
+            "radius": "hole_d/2",
+            "height": "t*3",
+            "segments": null,
+            "color": null
+          },
+          {
+            "method": "boolean",
+            "doc": 1,
+            "op": "difference",
+            "entities": [
+              1,
+              2,
+              3
+            ],
+            "name": "plate",
+            "color": null
+          },
+          {
+            "method": "delete",
+            "doc": 1,
+            "entity": 1
+          },
+          {
+            "method": "delete",
+            "doc": 1,
+            "entity": 2
+          },
+          {
+            "method": "delete",
+            "doc": 1,
+            "entity": 3
+          }
+        ]
+      }
+    },
+    {
+      "method": "add_part",
+      "doc": 1,
+      "name": "post",
+      "part": {
+        "format": "wright-document",
+        "version": 4,
+        "protocol": 1,
+        "name": "post",
+        "parameters": {
+          "post_d": {
+            "value": 9.0,
+            "description": "post diameter [mm]"
+          },
+          "post_h": {
+            "value": 30.0,
+            "description": "post length [mm]"
+          }
+        },
+        "program": [
+          {
+            "method": "add_cylinder",
+            "doc": 1,
+            "name": "post",
+            "center": [
+              0.0,
+              0.0,
+              "post_h/2"
+            ],
+            "radius": "post_d/2",
+            "height": "post_h",
+            "segments": null,
+            "color": null
+          }
+        ]
+      }
+    },
+    {
+      "method": "add_instance",
+      "doc": 1,
+      "part": "plate",
+      "name": "base",
+      "translation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_deg": null,
+      "scale": null,
+      "parameters": null
+    },
+    {
+      "method": "add_instance",
+      "doc": 1,
+      "part": "post",
+      "name": "post1",
+      "translation": [
+        -18.0,
+        0.0,
+        0.0
+      ],
+      "rotation_deg": null,
+      "scale": null,
+      "parameters": null
+    },
+    {
+      "method": "add_instance",
+      "doc": 1,
+      "part": "post",
+      "name": "post2",
+      "translation": [
+        18.0,
+        0.0,
+        0.0
+      ],
+      "rotation_deg": null,
+      "scale": null,
+      "parameters": null
+    },
+    {
+      "method": "add_connector",
+      "doc": 1,
+      "instance": 1,
+      "name": "top",
+      "point": [
+        0.0,
+        0.0,
+        "5"
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "method": "add_instance",
+      "doc": 1,
+      "part": "plate",
+      "name": "top",
+      "translation": [
+        0.0,
+        0.0,
+        60.0
+      ],
+      "rotation_deg": null,
+      "scale": null,
+      "parameters": null
+    },
+    {
+      "method": "add_connector",
+      "doc": 1,
+      "instance": 4,
+      "name": "bottom",
+      "point": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ]
+    },
+    {
+      "method": "mate",
+      "doc": 1,
+      "kind": "distance",
+      "a": {
+        "instance": 1,
+        "connector": "top"
+      },
+      "b": {
+        "instance": 4,
+        "connector": "bottom"
+      },
+      "offset": 25.0
+    }
+  ],
+  "source": {
+    "language": "python",
+    "text": "\"\"\"M19 assemblies and drawings: a bolted two-post clamp, dimensioned.\n\nTwo reusable parts are authored once, then placed several times:\n\n* ``plate`` — a 60 x 30 x 5 mm plate with two clearance holes,\n* ``post`` — a 9 mm round post, 30 mm long.\n\nThe assembly imports the plate from a saved ``.wcad`` file and the post from\nan open document, placing four instances. Connectors and a ``distance`` mate\nseat the top plate on the posts, the BOM groups the instances, and\n``check_interference`` proves the posts clear their holes. Finally\n``export_drawing`` writes a dimensioned SVG and DXF sheet with balloons and a\nBOM table.\n\nThe important property is that the assembly is *self-contained*: both part\nprograms are embedded in the assembly program, so the source files can be\ndeleted and ``assembly.wcad`` still reopens with every instance intact.\n\nUsage: .venv/bin/python examples/assembly_drawing.py\n\"\"\"\n\nimport os\nimport sys\nfrom pathlib import Path\n\nsys.path.insert(0, \"python\")  # noqa: E402\n\nfrom wright import Wright  # noqa: E402\n\nOUT = \"examples/assembly_drawing\"\n\n\ndef build_plate(cad: Wright) -> tuple[int, list[int]]:\n    doc = cad.create_document(\"plate\")[\"doc\"]\n    cad.set_parameter(doc, \"w\", 60.0, \"plate width [mm]\")\n    cad.set_parameter(doc, \"d\", 30.0, \"plate depth [mm]\")\n    cad.set_parameter(doc, \"t\", 5.0, \"plate thickness [mm]\")\n    cad.set_parameter(doc, \"hole_d\", 10.0, \"post clearance diameter [mm]\")\n    cad.set_parameter(doc, \"span\", 36.0, \"hole center spacing [mm]\")\n\n    plate = cad.add_box(\n        doc, \"body\", center=(0, 0, \"t/2\"), size=(\"w\", \"d\", \"t\")\n    )[\"entity\"]\n    cutters = []\n    for x, label in ((-18.0, \"left\"), (18.0, \"right\")):\n        cutters.append(\n            cad.add_cylinder(\n                doc,\n                f\"hole_{label}\",\n                center=(x, 0, \"t/2\"),\n                radius=\"hole_d/2\",\n                height=\"t*3\",\n            )[\"entity\"]\n        )\n    cad.boolean(doc, \"difference\", [plate, *cutters], name=\"plate\")\n    for eid in [plate, *cutters]:\n        cad.delete(doc, eid)\n    solids = [e[\"id\"] for e in cad.get_scene(doc, meshes=False)[\"entities\"]]\n    return doc, solids\n\n\ndef build_post(cad: Wright) -> int:\n    doc = cad.create_document(\"post\")[\"doc\"]\n    cad.set_parameter(doc, \"post_d\", 9.0, \"post diameter [mm]\")\n    cad.set_parameter(doc, \"post_h\", 30.0, \"post length [mm]\")\n    cad.add_cylinder(\n        doc, \"post\", center=(0, 0, \"post_h/2\"), radius=\"post_d/2\", height=\"post_h\"\n    )\n    return doc\n\n\ndef main() -> None:\n    os.makedirs(OUT, exist_ok=True)\n    source = Path(__file__).read_text(encoding=\"utf-8\")\n    plate_wcad = os.path.abspath(f\"{OUT}/m19_plate.wcad\")\n\n    with Wright.spawn() as cad:\n        cad.initialize()\n\n        # 1. Parts are ordinary documents. Save one, and keep the other open:\n        #    import_part accepts either source.\n        plate_doc, _ = build_plate(cad)\n        cad.save_document(plate_doc, plate_wcad)\n        post_doc = build_post(cad)\n\n        # 2. Assembly: import both parts, then place them.\n        asm = cad.create_document(\"two-post clamp\")[\"doc\"]\n        print(\"plate:\", cad.import_part(asm, path=plate_wcad, name=\"plate\"))\n        print(\"post:\", cad.import_part(asm, from_doc=post_doc, name=\"post\"))\n\n        base = cad.add_instance(asm, \"plate\", \"base\")\n        for i, x in enumerate((-18.0, 18.0), start=1):\n            cad.add_instance(asm, \"post\", f\"post{i}\", translation=(x, 0, 0))\n\n        # The top plate starts far above and is pulled onto the posts by a\n        # distance mate: base top (z=5) + 25 mm = the 30 mm post length.\n        cad.add_connector(asm, base[\"instance\"], \"top\", (0, 0, \"5\"), axis=(0, 0, 1))\n        top = cad.add_instance(asm, \"plate\", \"top\", translation=(0, 0, 60))\n        cad.add_connector(asm, top[\"instance\"], \"bottom\", (0, 0, 0), axis=(0, 0, -1))\n        cad.mate(\n            asm,\n            \"distance\",\n            (base[\"instance\"], \"top\"),\n            (top[\"instance\"], \"bottom\"),\n            offset=25,\n        )\n\n        # 3. Assembly-level checks.\n        for row in cad.bill_of_materials(asm):\n            print(\n                f\"BOM {row['item']}: {row['quantity']} x {row['part']} \"\n                f\"({row['entities']} solids, {row['volume']:.0f} mm3)\"\n            )\n        print(\"interference:\", cad.check_interference(asm))\n\n        # 4. A drawing sheet with dimensions, balloons, BOM and title block.\n        svg = os.path.abspath(f\"{OUT}/assembly_drawing.svg\")\n        dxf = os.path.abspath(f\"{OUT}/assembly_drawing.dxf\")\n        print(\"svg:\", cad.export_drawing(asm, svg))\n        print(\"dxf:\", cad.export_drawing(asm, dxf, format=\"dxf\"))\n        png = os.path.abspath(f\"{OUT}/assembly.png\")\n        cad.render_offscreen(asm, path=png, width=1000, height=700)\n\n        # 5. Save the assembly with its recipe. The embedded part programs\n        #    make this file independent of plate_wcad and post_doc.\n        saved = os.path.abspath(f\"{OUT}/assembly.wcad\")\n        print(\n            \"save:\",\n            cad.save_document(\n                asm, saved, source={\"language\": \"python\", \"text\": source}\n            ),\n        )\n        os.remove(plate_wcad)\n        reopened = cad.open_document(saved, name=\"reopened clamp\")[\"doc\"]\n        names = [e[\"name\"] for e in cad.get_scene(reopened, meshes=False)[\"entities\"]]\n        print(\"reopened solids:\", names)\n        print(f\"wrote {svg}, {dxf}, {png} and {saved}\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  }
+}

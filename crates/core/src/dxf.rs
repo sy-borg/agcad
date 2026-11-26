@@ -17,17 +17,24 @@ const LAYER_0: &str = "0";
 
 fn color(role: Role) -> i32 {
     match role {
-        Role::Drawing => 7,      // white / black
-        Role::Construction => 8, // dark grey
-        Role::Profile => 5,      // blue
+        Role::Drawing | Role::Visible | Role::Bom => 7, // white / black
+        Role::Construction | Role::Hidden | Role::Sheet => 8, // dark grey
+        Role::Profile | Role::Annotation => 5,         // blue
+        Role::Dimension => 1,                          // red
     }
 }
 
 fn linetype(role: Role) -> &'static str {
     match role {
-        Role::Construction => "DASHED",
+        Role::Construction | Role::Hidden => "DASHED",
         _ => "CONTINUOUS",
     }
+}
+
+/// DXF text must stay on one line; embedded newlines would corrupt the
+/// group-code stream.
+fn dxf_text(text: &str) -> String {
+    text.replace(['\r', '\n'], " ")
 }
 
 /// Serialize a drawing as DXF text.
@@ -179,6 +186,18 @@ pub fn dxf_bytes(drawing: &Drawing) -> Result<Vec<u8>, Error> {
                 }
                 emit(0, "SEQEND");
                 emit(8, layer);
+            }
+            CurveKind::Text { at, text, height } => {
+                emit(0, "TEXT");
+                emit(8, layer);
+                emit(10, &drawing::number(at[0]));
+                emit(20, &drawing::number(at[1]));
+                emit(30, "0");
+                emit(40, &drawing::number(*height));
+                emit(1, &dxf_text(text));
+                emit(50, "0");
+                emit(41, "1");
+                emit(7, "STANDARD");
             }
         }
     }

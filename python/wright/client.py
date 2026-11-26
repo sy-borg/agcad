@@ -672,6 +672,143 @@ class Wright:
     def delete(self, doc: int, entity: int) -> dict[str, Any]:
         return self._request("delete", doc=doc, entity=entity)
 
+    # -- assemblies ---------------------------------------------------------
+
+    def import_part(
+        self,
+        doc: int,
+        path: str | None = None,
+        from_doc: int | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a part for :meth:`add_instance`.
+
+        Give exactly one source: ``path`` to a ``.wcad`` file on the server,
+        or ``from_doc`` for another open document. The part's complete
+        program is embedded in this document's program, so the assembly is
+        self-contained — the source file/document is not needed again, even
+        after save/open. Nothing is added to the scene until ``add_instance``.
+        """
+        return self._request(
+            "import_part", doc=doc, path=path, name=name, **{"from": from_doc}
+        )
+
+    def add_part(self, doc: int, name: str, part: dict[str, Any]) -> dict[str, Any]:
+        """Register an embedded part definition (the program step
+        ``import_part`` records). Agents normally use :meth:`import_part`."""
+        return self._request("add_part", doc=doc, name=name, part=part)
+
+    def add_instance(
+        self,
+        doc: int,
+        part: str,
+        name: str,
+        translation: tuple[float | str, float | str, float | str] = (0.0, 0.0, 0.0),
+        rotation_deg: tuple[float | str, float | str, float | str] | None = None,
+        scale: float | str | None = None,
+        parameters: dict[str, float | str] | None = None,
+    ) -> dict[str, Any]:
+        """Place a part. Every printable solid becomes an entity named
+        ``"<instance>.<member>"`` and moves with the instance.
+
+        ``parameters`` overrides the part's saved parameter values for this
+        instance only (values may be expressions over the assembly's
+        parameters). The part is replayed privately; sketches are not copied.
+        """
+        return self._request(
+            "add_instance",
+            doc=doc,
+            part=part,
+            name=name,
+            translation=translation,
+            rotation_deg=rotation_deg,
+            scale=scale,
+            parameters=parameters,
+        )
+
+    def add_connector(
+        self,
+        doc: int,
+        instance: int,
+        name: str,
+        point: tuple[float | str, float | str, float | str],
+        axis: tuple[float, float, float] | None = None,
+    ) -> dict[str, Any]:
+        """Define a named point (and optional direction) in instance-local
+        coordinates. Mates attach two connectors to each other."""
+        return self._request(
+            "add_connector", doc=doc, instance=instance, name=name,
+            point=point, axis=axis,
+        )
+
+    def move_instance(
+        self,
+        doc: int,
+        instance: int,
+        translation: tuple[float | str, float | str, float | str] | None = None,
+        rotation_deg: tuple[float | str, float | str, float | str] | None = None,
+        scale: float | str | None = None,
+    ) -> dict[str, Any]:
+        """Move one instance and every member solid; omitted parts are kept."""
+        return self._request(
+            "move_instance", doc=doc, instance=instance,
+            translation=translation, rotation_deg=rotation_deg, scale=scale,
+        )
+
+    @staticmethod
+    def _mate_ref(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return {"instance": value["instance"], "connector": value["connector"]}
+        instance, connector = value
+        return {"instance": instance, "connector": connector}
+
+    def mate(
+        self,
+        doc: int,
+        kind: str,
+        a: Any,
+        b: Any,
+        offset: float | str | None = None,
+    ) -> dict[str, Any]:
+        """Mate instance ``b`` to instance ``a`` through connectors.
+
+        ``a`` and ``b`` are ``(instance, connector)`` pairs or
+        ``{"instance": id, "connector": "name"}`` dicts. Kinds:
+        ``coincident`` (points together, axes anti-parallel), ``distance``
+        (same, with a gap along a's axis), ``parallel`` (axes aligned, no
+        translation) and ``angle`` (points together, b's axis at ``offset``
+        degrees from a's).
+        """
+        return self._request(
+            "mate", doc=doc, kind=kind,
+            a=self._mate_ref(a), b=self._mate_ref(b), offset=offset,
+        )
+
+    def bill_of_materials(self, doc: int) -> list[dict[str, Any]]:
+        """One row per part: item number, quantity, current members and total
+        world volume. A session query — changes no state."""
+        return self._request("bill_of_materials", doc=doc)["rows"]
+
+    def check_interference(
+        self,
+        doc: int,
+        instances: list[int] | None = None,
+        entities: list[int] | None = None,
+        tolerance: float | None = None,
+    ) -> dict[str, Any]:
+        """Report volumetric overlaps.
+
+        By default every pair of placed instances is checked. Pass
+        ``instances`` to restrict that set, or ``entities`` to check specific
+        solids pairwise instead. ``tolerance`` (mm³, default 0.001) ignores
+        grazing contact. Returns ``ok``, ``checked`` and ``hits`` with the
+        intersection volume and bounds.
+        """
+        return self._request(
+            "check_interference", doc=doc, instances=instances,
+            entities=entities, tolerance=tolerance,
+        )
+
     # -- sketches -----------------------------------------------------------
     # Sketches are 2D constraint-solved drawings placed in 3D by the entity
     # transform. Coordinates and constraint values may be expression
@@ -1391,6 +1528,62 @@ class Wright:
         """
         return self._request(
             "export_step", doc=doc, path=path, entities=entities
+        )
+
+    @staticmethod
+    def _drawing_view(value: Any) -> dict[str, Any]:
+        if isinstance(value, str):
+            return {"view": value}
+        if isinstance(value, dict):
+            out = dict(value)
+            if "kind" in out:
+                out["view"] = out.pop("kind")
+            return out
+        raise TypeError(f"drawing view must be a string or dict, got {value!r}")
+
+    def export_drawing(
+        self,
+        doc: int,
+        path: str,
+        format: str = "svg",
+        views: list[Any] | None = None,
+        scale: float | None = None,
+        hidden_lines: bool | None = None,
+        dimensions: bool | None = None,
+        balloons: bool | None = None,
+        bom: bool | None = None,
+        title: str | None = None,
+        annotations: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Write a multi-view engineering drawing — a session command.
+
+        ``views`` defaults to front, top, right and an isometric view, laid
+        out third-angle. A view is ``"front"`` / ``"top"`` / ``"right"`` /
+        ``"left"`` / ``"back"`` / ``"bottom"`` / ``"iso"`` or a dict
+        ``{"view": "front", "at": [x, y], "dimensions": False}`` (sheet
+        millimeters). Orthographic views get overall width/height dimensions
+        (true model lengths even when ``scale`` is not 1) and hidden lines by
+        default. Instances get BOM balloons and the sheet gets a BOM table
+        and title block; ``annotations`` are ``{"text", "at"}`` or
+        ``(text, at)`` pairs in sheet millimeters. ``format`` is ``"svg"`` or
+        ``"dxf"``.
+        """
+        payload = None
+        if views is not None:
+            payload = [self._drawing_view(v) for v in views]
+        notes = None
+        if annotations is not None:
+            notes = []
+            for a in annotations:
+                if isinstance(a, dict):
+                    notes.append({"text": a["text"], "at": list(a["at"])})
+                else:
+                    text_, at = a
+                    notes.append({"text": text_, "at": list(at)})
+        return self._request(
+            "export_drawing", doc=doc, path=path, format=format, views=payload,
+            scale=scale, hidden_lines=hidden_lines, dimensions=dimensions,
+            balloons=balloons, bom=bom, title=title, annotations=notes,
         )
 
     def pick(

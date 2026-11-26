@@ -16,7 +16,9 @@
 //! the user only describes intent.
 
 pub mod boolean;
+pub mod assembly;
 pub mod drawing;
+pub mod drawing_sheet;
 pub mod dxf;
 pub mod edges;
 pub mod expr;
@@ -103,7 +105,10 @@ pub type ParamMap = BTreeMap<String, Param>;
 #[derive(Debug, Clone)]
 struct Snapshot {
     next_entity: EntityId,
+    next_instance: u64,
     entities: BTreeMap<EntityId, Entity>,
+    parts: BTreeMap<String, assembly::Part>,
+    instances: BTreeMap<u64, assembly::Instance>,
     program: Vec<Command>,
     params: ParamMap,
 }
@@ -180,6 +185,10 @@ pub enum Shape {
     /// An imported or client-supplied triangle mesh. The geometry lives in
     /// `Entity::mesh`; this variant only marks it as a standalone solid.
     Mesh,
+    /// One solid of a placed part. The instance owns its placement and moves
+    /// every member together; the mesh is the part's local geometry so
+    /// fillets and booleans still work on it.
+    PartMember { instance: u64, part: String },
 }
 
 impl Shape {
@@ -198,6 +207,7 @@ impl Shape {
             Self::Thread => "thread",
             Self::Copy { kind, .. } => kind.label(),
             Self::Mesh => "mesh",
+            Self::PartMember { .. } => "part",
         }
     }
 }
@@ -220,6 +230,14 @@ impl Entity {
             world_bbox: world_bbox(&self.mesh, &transform),
             color: self.color,
             mesh: self.mesh.clone(),
+            instance: match &self.shape {
+                Shape::PartMember { instance, .. } => Some(*instance),
+                _ => None,
+            },
+            part: match &self.shape {
+                Shape::PartMember { part, .. } => Some(part.clone()),
+                _ => None,
+            },
             sketch: match &self.shape {
                 Shape::Sketch {
                     elements,
@@ -271,6 +289,13 @@ pub struct Document {
     pub name: String,
     next_entity: EntityId,
     entities: BTreeMap<EntityId, Entity>,
+    /// Embedded part definitions, keyed by part name. Rebuilt by replaying
+    /// `AddPart` program steps; derived from the program, never saved
+    /// separately.
+    parts: BTreeMap<String, assembly::Part>,
+    /// Placed parts and their connectors. Also derived from the program.
+    instances: BTreeMap<u64, assembly::Instance>,
+    next_instance: u64,
     /// Raw modeling commands in execution order — the parametric function.
     program: Vec<Command>,
     params: ParamMap,
@@ -299,6 +324,9 @@ impl Document {
             name: name.into(),
             next_entity: 1,
             entities: BTreeMap::new(),
+            parts: BTreeMap::new(),
+            instances: BTreeMap::new(),
+            next_instance: 1,
             program: Vec::new(),
             params: BTreeMap::new(),
             source: None,
@@ -310,10 +338,43 @@ impl Document {
         }
     }
 
-    fn next_entity(&mut self) -> EntityId {
+    pub(crate) fn next_entity(&mut self) -> EntityId {
         let id = self.next_entity;
         self.next_entity += 1;
         id
+    }
+
+    pub(crate) fn next_instance(&mut self) -> u64 {
+        let id = self.next_instance;
+        self.next_instance += 1;
+        id
+    }
+
+    // Accessors for the sibling assembly/drawing modules. They keep document
+    // state private to the engine while still allowing focused modules to
+    // work on it.
+    pub(crate) fn entities(&self) -> &BTreeMap<EntityId, Entity> {
+        &self.entities
+    }
+
+    pub(crate) fn entities_mut(&mut self) -> &mut BTreeMap<EntityId, Entity> {
+        &mut self.entities
+    }
+
+    pub(crate) fn parts(&self) -> &BTreeMap<String, assembly::Part> {
+        &self.parts
+    }
+
+    pub(crate) fn parts_mut(&mut self) -> &mut BTreeMap<String, assembly::Part> {
+        &mut self.parts
+    }
+
+    pub(crate) fn instances(&self) -> &BTreeMap<u64, assembly::Instance> {
+        &self.instances
+    }
+
+    pub(crate) fn instances_mut(&mut self) -> &mut BTreeMap<u64, assembly::Instance> {
+        &mut self.instances
     }
 
     /// Capture state before a mutation; clears the redo stack (standard
@@ -321,7 +382,10 @@ impl Document {
     fn checkpoint(&mut self) {
         self.undo_stack.push(Snapshot {
             next_entity: self.next_entity,
+            next_instance: self.next_instance,
             entities: self.entities.clone(),
+            parts: self.parts.clone(),
+            instances: self.instances.clone(),
             program: self.program.clone(),
             params: self.params.clone(),
         });
@@ -337,7 +401,10 @@ impl Document {
     fn rollback(&mut self) {
         if let Some(snap) = self.undo_stack.pop() {
             self.next_entity = snap.next_entity;
+            self.next_instance = snap.next_instance;
             self.entities = snap.entities;
+            self.parts = snap.parts;
+            self.instances = snap.instances;
             self.program = snap.program;
             self.params = snap.params;
         }
@@ -349,14 +416,14 @@ impl Document {
         self.entities.get_mut(&id).ok_or(Error::UnknownEntity { doc, entity: id })
     }
 
-    fn resolve(&self, s: &Scalar) -> Result<f64> {
+    pub(crate) fn resolve(&self, s: &Scalar) -> Result<f64> {
         match s {
             Scalar::Number(v) => Ok(*v),
             Scalar::Expression(e) => expr::eval(e, &self.params).map_err(Error::Invalid),
         }
     }
 
-    fn resolve3(&self, v: &SVec3) -> Result<Vec3> {
+    pub(crate) fn resolve3(&self, v: &SVec3) -> Result<Vec3> {
         Ok([self.resolve(&v[0])?, self.resolve(&v[1])?, self.resolve(&v[2])?])
     }
 
@@ -372,7 +439,10 @@ impl Document {
     fn replay(&mut self) -> Result<()> {
         let program = self.program.clone();
         self.entities.clear();
+        self.parts.clear();
+        self.instances.clear();
         self.next_entity = 1;
+        self.next_instance = 1;
         self.replaying = true;
         self.cache.begin();
         let mut result = Ok(());
@@ -445,7 +515,7 @@ impl Document {
     /// are rebound to it. Used by `open_document` and by `diff_scene`'s
     /// read-only baseline path (which passes a throwaway id and never inserts
     /// the document into the engine).
-    fn from_snapshot(snapshot: DocumentSnapshot, id: DocId, name: String) -> Result<Self> {
+    pub(crate) fn from_snapshot(snapshot: DocumentSnapshot, id: DocId, name: String) -> Result<Self> {
         let mut d = Document::new(id, name);
         d.params = snapshot
             .parameters
@@ -532,6 +602,15 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Sweep { doc: d, .. }
         | Command::Loft { doc: d, .. }
         | Command::Thread { doc: d, .. }
+        | Command::ImportPart { doc: d, .. }
+        | Command::AddPart { doc: d, .. }
+        | Command::AddInstance { doc: d, .. }
+        | Command::AddConnector { doc: d, .. }
+        | Command::MoveInstance { doc: d, .. }
+        | Command::Mate { doc: d, .. }
+        | Command::BillOfMaterials { doc: d }
+        | Command::CheckInterference { doc: d, .. }
+        | Command::ExportDrawing { doc: d, .. }
         | Command::SetParameter { doc: d, .. }
         | Command::RemoveParameter { doc: d, .. }
         | Command::GetParameters { doc: d }
@@ -572,6 +651,13 @@ impl Engine {
 
     fn doc(&self, id: DocId) -> Result<&Document> {
         self.docs.get(&id).ok_or(Error::UnknownDocument(id))
+    }
+
+    /// Test-only view of a document, for module tests that build drawing
+    /// topology directly instead of going through the bus.
+    #[cfg(test)]
+    pub(crate) fn doc_for_test(&self, id: DocId) -> &Document {
+        self.docs.get(&id).expect("test document exists")
     }
 
     fn doc_mut(&mut self, id: DocId) -> Result<&mut Document> {
@@ -679,6 +765,66 @@ impl Engine {
                 }
             },
 
+            // --- parts: snapshot now, record the embedded definition --------
+            Command::ImportPart { doc, name, path, from } => {
+                self.doc(*doc)?;
+                let snapshot = match (path, from) {
+                    (Some(path), None) => read_snapshot(path)?,
+                    (None, Some(source)) => {
+                        let source_doc = self.doc(*source)?;
+                        source_doc.snapshot(None)
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(Error::Invalid(
+                            "import_part takes either `path` or `from`, not both (hint: use \
+                             `from` for an open document, `path` for a saved .wcad)"
+                                .into(),
+                        ))
+                    }
+                    (None, None) => {
+                        return Err(Error::Invalid(
+                            "import_part needs a source: `path` to a .wcad file or `from` an \
+                             open document id"
+                                .into(),
+                        ))
+                    }
+                };
+                let part_name = name
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| snapshot.name.clone());
+                let bytes = serde_json::to_vec(&snapshot).map(|v| v.len()).unwrap_or(0);
+                let add = Command::AddPart {
+                    doc: *doc,
+                    name: part_name.clone(),
+                    part: snapshot,
+                };
+                let (solids, parameters, description) = match self.execute(add)? {
+                    CommandResult::PartDefined { solids, parameters, .. } => {
+                        let description = self
+                            .doc(*doc)?
+                            .parts
+                            .get(&part_name)
+                            .map(|p| p.description.clone())
+                            .unwrap_or_default();
+                        (solids, parameters, description)
+                    }
+                    other => {
+                        return Err(Error::Invalid(format!(
+                            "part import produced an unexpected result: {other:?}"
+                        )))
+                    }
+                };
+                Ok(CommandResult::PartImported {
+                    doc: *doc,
+                    name: part_name,
+                    description,
+                    solids,
+                    parameters,
+                    bytes,
+                })
+            },
+
             // --- modeling: record into the program, then execute --------
             Command::AddBox { .. }
             | Command::AddSphere { .. }
@@ -711,7 +857,12 @@ impl Engine {
             | Command::Hole { .. }
             | Command::Sweep { .. }
             | Command::Loft { .. }
-            | Command::Thread { .. } => {
+            | Command::Thread { .. }
+            | Command::AddPart { .. }
+            | Command::AddInstance { .. }
+            | Command::AddConnector { .. }
+            | Command::MoveInstance { .. }
+            | Command::Mate { .. } => {
                 let doc = doc_of(&command).expect("modeling commands always carry a doc");
                 let d = self.doc_mut(doc)?;
                 d.checkpoint();
@@ -802,12 +953,18 @@ impl Engine {
                 let snap = d.undo_stack.pop().ok_or(Error::NothingToUndo(*doc))?;
                 d.redo_stack.push(Snapshot {
                     next_entity: d.next_entity,
+                    next_instance: d.next_instance,
                     entities: std::mem::take(&mut d.entities),
+                    parts: std::mem::take(&mut d.parts),
+                    instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
                 });
                 d.next_entity = snap.next_entity;
+                d.next_instance = snap.next_instance;
                 d.entities = snap.entities;
+                d.parts = snap.parts;
+                d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
                 Ok(CommandResult::Undone { doc: *doc })
@@ -818,12 +975,18 @@ impl Engine {
                 let snap = d.redo_stack.pop().ok_or(Error::NothingToRedo(*doc))?;
                 d.undo_stack.push(Snapshot {
                     next_entity: d.next_entity,
+                    next_instance: d.next_instance,
                     entities: std::mem::take(&mut d.entities),
+                    parts: std::mem::take(&mut d.parts),
+                    instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
                 });
                 d.next_entity = snap.next_entity;
+                d.next_instance = snap.next_instance;
                 d.entities = snap.entities;
+                d.parts = snap.parts;
+                d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
                 Ok(CommandResult::Redone { doc: *doc })
@@ -835,6 +998,57 @@ impl Engine {
                     doc: *doc,
                     entities: d.entities.values().map(|e| e.snapshot()).collect(),
                 })
+            },
+
+            Command::BillOfMaterials { doc } => {
+                let d = self.doc(*doc)?;
+                Ok(CommandResult::Bom {
+                    doc: *doc,
+                    rows: assembly::bill_of_materials(d),
+                })
+            },
+
+            Command::CheckInterference { doc, instances, entities, tolerance } => {
+                let d = self.doc(*doc)?;
+                assembly::check_interference(
+                    d,
+                    *doc,
+                    instances.as_deref(),
+                    entities.as_deref(),
+                    *tolerance,
+                )
+            },
+
+            Command::ExportDrawing {
+                doc,
+                path,
+                format,
+                views,
+                scale,
+                hidden_lines,
+                dimensions,
+                balloons,
+                bom,
+                title,
+                annotations,
+            } => {
+                let d = self.doc(*doc)?;
+                drawing_sheet::export(
+                    d,
+                    *doc,
+                    path,
+                    *format,
+                    drawing_sheet::SheetOptions {
+                        title: title.as_deref(),
+                        views: views.as_deref(),
+                        scale: *scale,
+                        hidden_lines: *hidden_lines,
+                        dimensions: *dimensions,
+                        balloons: *balloons,
+                        bom: *bom,
+                        annotations: annotations.as_deref().unwrap_or(&[]),
+                    },
+                )
             },
 
             Command::Pick { doc, ray, tolerance } => {
@@ -1597,6 +1811,11 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Sweep { doc, .. }
         | Command::Loft { doc, .. }
         | Command::Thread { doc, .. }
+        | Command::AddPart { doc, .. }
+        | Command::AddInstance { doc, .. }
+        | Command::AddConnector { doc, .. }
+        | Command::MoveInstance { doc, .. }
+        | Command::Mate { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::GetParameters { doc }
@@ -2473,6 +2692,48 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             })
         },
 
+        Command::AddPart { doc, name, part } => {
+            assembly::register_part(d, *doc, name, part.clone())
+        },
+
+        Command::AddInstance {
+            doc,
+            part,
+            name,
+            translation,
+            rotation_deg,
+            scale,
+            parameters,
+        } => assembly::add_instance(
+            d,
+            *doc,
+            part,
+            name,
+            translation.as_ref(),
+            rotation_deg.as_ref(),
+            scale.as_ref(),
+            parameters.as_ref(),
+        ),
+
+        Command::AddConnector { doc, instance, name, point, axis } => {
+            assembly::add_connector(d, *doc, *instance, name, point, axis.as_ref())
+        },
+
+        Command::MoveInstance { doc, instance, translation, rotation_deg, scale } => {
+            assembly::move_instance(
+                d,
+                *doc,
+                *instance,
+                translation.as_ref(),
+                rotation_deg.as_ref(),
+                scale.as_ref(),
+            )
+        },
+
+        Command::Mate { doc, kind, a, b, offset } => {
+            assembly::mate(d, *doc, *kind, a, b, offset.as_ref())
+        },
+
         Command::Delete { doc, entity } => {
             if d.entities.remove(entity).is_none() {
                 return Err(Error::UnknownEntity { doc: *doc, entity: *entity });
@@ -3299,7 +3560,8 @@ fn add_entity(
         | Shape::Loft { .. }
         | Shape::Thread
         | Shape::Copy { .. }
-        | Shape::Mesh => {
+        | Shape::Mesh
+        | Shape::PartMember { .. } => {
             unreachable!("derived solid shapes are not tessellated here")
         },
     };
@@ -5868,7 +6130,7 @@ mod tests {
 
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"format\": \"wright-document\""));
-        assert!(text.contains("\"version\": 3"));
+        assert!(text.contains("\"version\": 4"));
         assert!(text.contains("print('hi')"), "the embedded source is preserved");
         // The file is the program, not the geometry.
         assert!(!text.contains("\"mesh\""));
@@ -7011,7 +7273,7 @@ mod tests {
         let mut e = engine();
         let source = add_box(&mut e, [10.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
 
-        let mut copies_of = |result: CommandResult| match result {
+        let copies_of = |result: CommandResult| match result {
             CommandResult::EntitiesCreated { entities, tris, .. } => {
                 assert!(tris > 0);
                 entities

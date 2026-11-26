@@ -57,6 +57,87 @@ pub fn rotation_xyz_deg(deg: [f64; 3]) -> Mat4 {
     mul(&rot_z(deg[2]), &mul(&rot_y(deg[1]), &rot_x(deg[0])))
 }
 
+/// Recover extrinsic XYZ angles (degrees) from a pure rotation matrix.
+/// Inverse of [`rotation_xyz_deg`], up to the usual gimbal-lock choice
+/// (when `|sin(y)| ≈ 1`, X is set to 0 and the rotation is carried by Z).
+pub fn euler_xyz_deg(rotation: &Mat4) -> [f64; 3] {
+    fn clean(v: f64) -> f64 {
+        if v == 0.0 || v.abs() < 1e-12 {
+            0.0
+        } else {
+            v
+        }
+    }
+    let m = rotation;
+    // R = Rz·Ry·Rx, so m[col][row]:
+    //   m[0][2] = -sin(y)
+    //   m[2][1] =  cos(y)·sin(x), m[2][2] = cos(y)·cos(x)
+    //   m[1][0] =  cos(y)·sin(z), m[0][0] = cos(y)·cos(z)
+    let sy = (-m[0][2] as f64).clamp(-1.0, 1.0);
+    let cy = (1.0 - sy * sy).sqrt();
+    if cy > 1e-7 {
+        let x = (m[1][2] as f64).atan2(m[2][2] as f64);
+        let y = sy.asin();
+        let z = (m[0][1] as f64).atan2(m[0][0] as f64);
+        [clean(x.to_degrees()), clean(y.to_degrees()), clean(z.to_degrees())]
+    } else {
+        // Looking straight up/down: fix X = 0 and put everything in Z.
+        let z = (-m[1][0] as f64).atan2(m[1][1] as f64);
+        [0.0, clean(sy.asin().to_degrees()), clean(z.to_degrees())]
+    }
+}
+
+fn normalize3(v: [f64; 3]) -> Option<[f64; 3]> {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if !len.is_finite() || len < 1e-12 {
+        None
+    } else {
+        Some([v[0] / len, v[1] / len, v[2] / len])
+    }
+}
+
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Rotation matrix around `axis` (right-hand rule) by `deg`.
+pub fn rotation_axis_angle(axis: [f64; 3], deg: f64) -> Mat4 {
+    let Some(n) = normalize3(axis) else { return identity() };
+    let (s, c) = deg.to_radians().sin_cos();
+    let t = 1.0 - c;
+    let (x, y, z) = (n[0], n[1], n[2]);
+    // Column-major: m[col][row].
+    [
+        [t * x * x + c, t * x * y + s * z, t * x * z - s * y, 0.0],
+        [t * x * y - s * z, t * y * y + c, t * y * z + s * x, 0.0],
+        [t * x * z + s * y, t * y * z - s * x, t * z * z + c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    .map(|col| col.map(|v| v as f32))
+}
+
+/// The shortest rotation that carries direction `from` onto `to` (both need
+/// not be unit length). `None` when either is zero.
+pub fn rotation_between(from: [f64; 3], to: [f64; 3]) -> Option<Mat4> {
+    let a = normalize3(from)?;
+    let b = normalize3(to)?;
+    let d = dot3(a, b).clamp(-1.0, 1.0);
+    if d > 1.0 - 1e-12 {
+        return Some(identity());
+    }
+    let mut axis = cross3(a, b);
+    if normalize3(axis).is_none() {
+        // Opposite directions: any perpendicular axis is a 180° turn.
+        let helper = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        axis = cross3(a, helper);
+    }
+    Some(rotation_axis_angle(axis, d.acos().to_degrees()))
+}
+
 pub fn scale(s: [f64; 3]) -> Mat4 {
     let mut m = identity();
     m[0][0] = s[0] as f32;
@@ -288,6 +369,50 @@ mod tests {
         let near_x = near[0] / near[3];
         let far_x = far[0] / far[3];
         assert!(near_x.abs() > far_x.abs() * 3.0, "{near_x} {far_x}");
+    }
+
+    #[test]
+    fn euler_extraction_round_trips_rotations() {
+        for angles in [
+            [0.0, 0.0, 0.0],
+            [30.0, 0.0, 0.0],
+            [0.0, 45.0, 0.0],
+            [0.0, 0.0, -80.0],
+            [12.0, -35.0, 70.0],
+            [-170.0, 20.0, 130.0],
+        ] {
+            let r = rotation_xyz_deg(angles);
+            let back = euler_xyz_deg(&r);
+            let again = rotation_xyz_deg(back);
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!(
+                        (r[i][j] - again[i][j]).abs() < 1e-5,
+                        "angles {angles:?} -> {back:?}: {:?} vs {:?}",
+                        r,
+                        again
+                    );
+                }
+            }
+        }
+        // Identity is exactly zero, not negative zero.
+        assert_eq!(euler_xyz_deg(&identity()), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn rotation_between_aligns_vectors_and_handles_opposites() {
+        for (from, to) in [
+            ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            ([1.0, 2.0, 3.0], [-2.0, 1.0, 0.5]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]),
+        ] {
+            let r = rotation_between(from, to).unwrap();
+            let got = transform_direction(&r, normalize3(from).unwrap());
+            let want = normalize3(to).unwrap();
+            for i in 0..3 {
+                assert!((got[i] - want[i]).abs() < 1e-5, "{got:?} vs {want:?}");
+            }
+        }
     }
 
     #[test]

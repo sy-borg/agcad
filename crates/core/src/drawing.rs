@@ -19,6 +19,18 @@ pub enum Role {
     Construction,
     /// A closed profile loop.
     Profile,
+    /// Visible edges of a drawing view.
+    Visible,
+    /// Occluded edges, drawn dashed.
+    Hidden,
+    /// Dimension lines, extension lines and their text.
+    Dimension,
+    /// Notes, balloons and view labels.
+    Annotation,
+    /// Border and title block.
+    Sheet,
+    /// Bill-of-materials table.
+    Bom,
 }
 
 /// One named layer. Names are sanitized for DXF on creation.
@@ -51,6 +63,14 @@ pub enum CurveKind {
     Polyline {
         points: Vec<[f64; 2]>,
         closed: bool,
+    },
+    /// A single line of text. `at` is the left end of the baseline, `height`
+    /// the cap height in millimeters. Text is never rotated; callers center
+    /// it themselves when needed.
+    Text {
+        at: [f64; 2],
+        text: String,
+        height: f64,
     },
 }
 
@@ -145,6 +165,10 @@ impl Drawing {
                         grow(*p);
                     }
                 }
+                CurveKind::Text { at, text, height } => {
+                    grow(*at);
+                    grow([at[0] + text_width(text, *height), at[1] + height]);
+                }
             }
         }
 
@@ -165,6 +189,14 @@ pub fn norm360(mut a: f64) -> f64 {
         a += 360.0;
     }
     a
+}
+
+/// Approximate advance width of a line of text at `height` (mm), based on
+/// the monospace 0.6 em ratio both writers use. Approximate on purpose: the
+/// drawing model carries no font metrics, and the estimate only drives
+/// alignment and bounds.
+pub fn text_width(text: &str, height: f64) -> f64 {
+    text.chars().count() as f64 * height * 0.6
 }
 
 /// Format a coordinate deterministically with trailing zeros trimmed.

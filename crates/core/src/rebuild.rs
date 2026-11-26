@@ -517,6 +517,26 @@ pub fn thread_key(spec: &crate::thread::ThreadSpec) -> GeomKey {
     h.finish()
 }
 
+/// One member solid of a placed part. The part definition is embedded in the
+/// program and part names are unique per document, so the name plus the
+/// source entity identifies the recipe; overrides and both placements decide
+/// the resulting geometry and world position.
+pub fn part_member_key(
+    part: &str,
+    source: wright_protocol::EntityId,
+    overrides: &std::collections::BTreeMap<String, f64>,
+) -> GeomKey {
+    let mut h = start("part_member");
+    h.str(part);
+    h.u64(source);
+    h.u64(overrides.len() as u64);
+    for (name, value) in overrides {
+        h.str(name);
+        h.f64(*value);
+    }
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
