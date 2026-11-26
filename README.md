@@ -616,7 +616,8 @@ Two limits worth knowing:
   documents; `scene_changed` for another document is ignored.
 - the viewer is a reference surface, not an editor: the human can orbit,
   zoom, watch live updates, read the corner axis triad and toggle `name #id`
-  labels. A click runs `pick` and the HUD shows the exact JSON selector to
+  labels. Faces are shaded with the same inked feature edges as the PNG
+  renderer. A click runs `pick` and the HUD shows the exact JSON selector to
   hand to the agent (`C` copies edge-if-any, `F` face, `E` edge; the full hit
   is also printed to the terminal). Models are still changed by the agent's
   script, never by dragging geometry in the viewer.
@@ -731,7 +732,9 @@ turns, while the script remains the editing surface.
 - [x] **M5 — Headless rendering**: deterministic software rasterizer in core
       (no GPU; works over SSH/CI), auto-framed 3/4 camera by default, explicit
       `eye`/`target`/`up`/`fov`, `ortho` for parallel views, and the
-      `wright_render` MCP tool that returns the image inline.
+      `wright_render` MCP tool that returns the image inline. A shaded-with-edges
+      pass inks the sharp creases (30° dihedral threshold, anti-aliased,
+      depth-tested) so orthographic front views read like CAD drawings.
 - [x] **M6 — Sketches and constraints**: sketch entities placed by the normal
       transform; `coincident`, `horizontal`, `vertical`, `parallel`,
       `perpendicular`, `distance`, `radius` and `diameter` re-solved after
@@ -850,8 +853,7 @@ turns, while the script remains the editing surface.
 ### Next
 
 - [ ] **Later / UI polish**: `patch_program` for script-less MCP documents,
-      shaded-with-edges rendering (a thin outline where faces meet, so front
-      views read as CAD drawings), a Rust MCP server and PyO3 bindings.
+      a Rust MCP server and PyO3 bindings.
 
 ## Status
 

@@ -22,6 +22,7 @@ mod net;
 
 
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command as Process, Stdio};
@@ -29,7 +30,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use wright_protocol::{DocId, DocInfo, EntitySnapshot, Mat4, PickHit, Ray};
+use wright_protocol::{DocId, DocInfo, EntitySnapshot, Mat4, Mesh, PickHit, Ray, Rgba};
 use font8x8::UnicodeFonts;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -93,6 +94,41 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Flat-coloured feature edges. Reusing the instance buffer lets one edge
+/// draw call share the entity's transform while getting its own ink colour;
+/// the depth test (less-equal, no write) keeps hidden edges hidden.
+const EDGE_WGSL: &str = r#"
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+struct Instance {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+};
+@group(1) @binding(0) var<storage, read> instances: array<Instance>;
+
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>, @location(1) _normal: vec3<f32>, @builtin(instance_index) ii: u32) -> VSOut {
+    let inst = instances[ii];
+    var out: VSOut;
+    out.pos = u.view_proj * inst.model * vec4<f32>(pos, 1.0);
+    out.color = inst.color;
+    return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
 /// Screen-space bitmap text. Positions arrive in physical pixels with the
 /// origin top-left; the shader maps them to clip space. Sampling an R8
 /// glyph atlas with nearest filtering keeps labels crisp at any scale.
@@ -138,6 +174,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 struct DrawRange {
     line: bool,
     overlay: bool,
+    /// A feature-edge line: shaded flat, depth-tested but not depth-written.
+    edge: bool,
     /// First index for triangles, first vertex for lines.
     first_index: u32,
     count: u32,
@@ -165,6 +203,8 @@ struct State {
     surface_format: wgpu::TextureFormat,
     pipeline_tri: wgpu::RenderPipeline,
     pipeline_line: wgpu::RenderPipeline,
+    /// Feature-edge lines: flat colour and less-equal depth.
+    pipeline_edge: wgpu::RenderPipeline,
     /// Line pipeline with depth test disabled, for the corner axis gizmo.
     pipeline_line_overlay: wgpu::RenderPipeline,
     /// Screen-space bitmap text + panels (labels and the pick HUD).
@@ -256,6 +296,10 @@ impl State {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wright shader"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
+        });
+        let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wright edge shader"),
+            source: wgpu::ShaderSource::Wgsl(EDGE_WGSL.into()),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -405,6 +449,42 @@ impl State {
         let pipeline_tri = make_pipeline(wgpu::PrimitiveTopology::TriangleList, false);
         let pipeline_line = make_pipeline(wgpu::PrimitiveTopology::LineList, false);
         let pipeline_line_overlay = make_pipeline(wgpu::PrimitiveTopology::LineList, true);
+
+        let pipeline_edge = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wright feature edges"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &edge_shader,
+                entry_point: Some("vs"),
+                buffers: &vertex_buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &edge_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         // --- screen-space text -------------------------------------------------
         let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -583,6 +663,7 @@ impl State {
             surface_format,
             pipeline_tri,
             pipeline_line,
+            pipeline_edge,
             pipeline_line_overlay,
             pipeline_text,
             bind_group_0,
@@ -759,7 +840,7 @@ impl State {
                 pass.set_bind_group(0, &self.bind_group_0, &[]);
                 pass.set_bind_group(1, &self.bind_group_1, &[]);
                 // Draw the grid first, entities on top.
-                if let Some(grid) = scene.draws.iter().find(|d| d.line && !d.overlay) {
+                if let Some(grid) = scene.draws.iter().find(|d| d.line && !d.overlay && !d.edge) {
                     pass.set_pipeline(&self.pipeline_line);
                     pass.set_vertex_buffer(0, scene.vertex_buf.slice(..));
                     let end = grid.base_instance + 1;
@@ -777,6 +858,15 @@ impl State {
                         d.first_index..d.first_index + d.count,
                         0,
                         first..first + 1,
+                    );
+                }
+                // Shaded with edges: ink the feature lines after the faces.
+                pass.set_pipeline(&self.pipeline_edge);
+                for d in scene.draws.iter().filter(|d| d.edge) {
+                    let end = d.base_instance + 1;
+                    pass.draw(
+                        d.first_index..d.first_index + d.count,
+                        d.base_instance..end,
                     );
                 }
 
@@ -847,10 +937,34 @@ fn build_scene(entities: &[EntitySnapshot]) -> SceneData {
         draws.push(DrawRange {
             line: false,
             overlay: false,
+            edge: false,
             first_index: index_base,
             count: e.mesh.indices.len() as u32,
             base_instance: instance_base,
         });
+
+        // Feature edges: the same snapshot mesh, classified by dihedral
+        // angle. This is presentation geometry only — the engine still owns
+        // the document and the mesh.
+        let edges = feature_edges(&e.mesh, &e.transform);
+        if !edges.is_empty() {
+            let edge_start = (verts.len() / 6) as u32;
+            for (a, b) in &edges {
+                verts.extend_from_slice(&[a[0], a[1], a[2], 0.0, 0.0, 1.0]);
+                verts.extend_from_slice(&[b[0], b[1], b[2], 0.0, 0.0, 1.0]);
+            }
+            let edge_instance = (inst.len() / 20) as u32;
+            inst.extend_from_slice(&flatten_mat(&e.transform));
+            inst.extend_from_slice(&edge_color(e.color));
+            draws.push(DrawRange {
+                line: true,
+                overlay: false,
+                edge: true,
+                first_index: edge_start,
+                count: edges.len() as u32 * 2,
+                base_instance: edge_instance,
+            });
+        }
     }
 
     // Reference grid: XY plane at z=0 (Z-up ground), 10 mm cells, 2 m span.
@@ -871,6 +985,7 @@ fn build_scene(entities: &[EntitySnapshot]) -> SceneData {
     draws.push(DrawRange {
         line: true,
         overlay: false,
+        edge: false,
         first_index: grid_start as u32,
         count: grid_vertex_count,
         base_instance: grid_base_instance,
@@ -898,6 +1013,7 @@ fn build_scene(entities: &[EntitySnapshot]) -> SceneData {
         draws.push(DrawRange {
             line: true,
             overlay: true,
+            edge: false,
             first_index: axis_start,
             count: 2,
             base_instance: axis_instance,
@@ -913,6 +1029,105 @@ fn flatten_mat(m: &Mat4) -> [f32; 16] {
         out[col * 4..col * 4 + 4].copy_from_slice(c);
     }
     out
+}
+
+/// Faces must turn by at least this much for their shared edge to count as a
+/// feature edge; below it is a tessellation seam, not a CAD crease. Same
+/// threshold as the engine's fillet/pick edges and the headless renderer.
+const EDGE_MIN_ANGLE_DEG: f32 = 30.0;
+
+/// Feature edges in entity-local space, ready for the entity's instance
+/// transform. Weld by exact f32 bits (crease normals duplicate positions),
+/// pair the triangles, and keep only edges with two non-degenerate faces
+/// that meet at [`EDGE_MIN_ANGLE_DEG`] or more. Boundary edges are skipped,
+/// so open display ribbons (sketches) contribute nothing.
+fn feature_edges(mesh: &Mesh, model: &Mat4) -> Vec<([f32; 3], [f32; 3])> {
+    if mesh.indices.len() < 3 || mesh.positions.is_empty() {
+        return Vec::new();
+    }
+    let mut ids: BTreeMap<[u32; 3], u32> = BTreeMap::new();
+    let mut rep: Vec<u32> = Vec::new();
+    let mut remap: Vec<u32> = Vec::with_capacity(mesh.positions.len());
+    for (i, p) in mesh.positions.iter().enumerate() {
+        let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+        let id = match ids.get(&key) {
+            Some(&id) => id,
+            None => {
+                let id = rep.len() as u32;
+                ids.insert(key, id);
+                rep.push(i as u32);
+                id
+            },
+        };
+        remap.push(id);
+    }
+
+    struct EdgeRec {
+        count: u32,
+        normals: [[f32; 3]; 2],
+        n: u8,
+    }
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let mut edges: BTreeMap<(u32, u32), EdgeRec> = BTreeMap::new();
+    for tri in mesh.indices.chunks_exact(3) {
+        let (Some(&i0), Some(&i1), Some(&i2)) = (
+            remap.get(tri[0] as usize),
+            remap.get(tri[1] as usize),
+            remap.get(tri[2] as usize),
+        ) else {
+            continue;
+        };
+        let p0 = transform_point(model, mesh.positions[rep[i0 as usize] as usize]);
+        let p1 = transform_point(model, mesh.positions[rep[i1 as usize] as usize]);
+        let p2 = transform_point(model, mesh.positions[rep[i2 as usize] as usize]);
+        let n = cam::normalize(cam::cross(sub(p1, p0), sub(p2, p0)));
+        let degenerate = cam::dot(n, n) < 0.5;
+        for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+            let key = if a < b { (a, b) } else { (b, a) };
+            let rec = edges.entry(key).or_insert(EdgeRec {
+                count: 0,
+                normals: [[0.0; 3]; 2],
+                n: 0,
+            });
+            rec.count += 1;
+            if !degenerate && rec.n < 2 {
+                rec.normals[rec.n as usize] = n;
+                rec.n += 1;
+            }
+        }
+    }
+
+    let min_cos = EDGE_MIN_ANGLE_DEG.to_radians().cos();
+    let mut out = Vec::new();
+    for ((a, b), rec) in edges {
+        if rec.count == 2 && rec.n == 2 && cam::dot(rec.normals[0], rec.normals[1]) < min_cos {
+            out.push((
+                mesh.positions[rep[a as usize] as usize],
+                mesh.positions[rep[b as usize] as usize],
+            ));
+        }
+    }
+    out
+}
+
+fn transform_point(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
+        m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
+        m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
+    ]
+}
+
+/// Ink that contrasts with the shaded face: dark on a bright part, light on
+/// a dark one. The viewer's background stays dark, so bright parts get real
+/// CAD-style black creases.
+fn edge_color(color: Rgba) -> Rgba {
+    let luma = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
+    if luma > 0.55 {
+        [0.09, 0.10, 0.12, 1.0]
+    } else {
+        [0.86, 0.89, 0.93, 1.0]
+    }
 }
 
 // --- screen-space text -------------------------------------------------------
@@ -1943,12 +2158,52 @@ mod tests {
         let grid = data
             .draws
             .iter()
-            .find(|d| d.line && !d.overlay)
+            .find(|d| d.line && !d.overlay && !d.edge)
             .expect("grid draw");
 
         // Entity vertices come first, so the grid must not start at vertex 0.
         assert_eq!(grid.first_index, 3);
         assert_eq!(grid.count, 84); // 21 lines in each direction, two vertices each.
+    }
+
+    fn cube_mesh() -> Mesh {
+        let positions = vec![
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ];
+        let indices = vec![
+            0, 2, 1, 0, 3, 2, // bottom
+            4, 5, 6, 4, 6, 7, // top
+            0, 1, 5, 0, 5, 4, // front
+            3, 7, 6, 3, 6, 2, // back
+            0, 4, 7, 0, 7, 3, // left
+            1, 2, 6, 1, 6, 5, // right
+        ];
+        Mesh { positions, normals: vec![[0.0, 0.0, 1.0]; 8], indices }
+    }
+
+    #[test]
+    fn a_box_snapshot_draws_twelve_feature_edges_before_the_grid() {
+        let mut cube = box_snapshot(1, "cube");
+        cube.mesh = cube_mesh();
+        let data = build_scene(&[cube]);
+        let edge = data.draws.iter().find(|d| d.edge).expect("edge draw");
+        let grid = data
+            .draws
+            .iter()
+            .find(|d| d.line && !d.overlay && !d.edge)
+            .expect("grid draw");
+
+        assert_eq!(edge.count, 24, "12 edges × 2 vertices");
+        assert_eq!(edge.first_index, 8, "edges follow the 8 entity vertices");
+        assert_eq!(grid.first_index, 8 + 24, "grid follows the edge vertices");
+        assert!(edge.line && !edge.overlay);
     }
 
     #[test]
@@ -1957,7 +2212,7 @@ mod tests {
         let grid = data
             .draws
             .iter()
-            .find(|d| d.line && !d.overlay)
+            .find(|d| d.line && !d.overlay && !d.edge)
             .expect("grid draw");
         let gizmo: Vec<_> = data.draws.iter().filter(|d| d.overlay).collect();
 
