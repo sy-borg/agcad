@@ -712,13 +712,16 @@ This session is private. For the human/agent loop, start
 
 Direction: **the script is the source of truth**. The milestones so far make
 the agent-authored script loop faster and more expressive — shape and sketch
-coverage, interoperability — and give the human a concrete way
-to point at geometry, rather than building a GUI feature tree. Validation and
-scene diffs (M14) make a rebuild provable; incremental rebuilds (M15) make it
-fast; interoperability (M18) connects the script to existing meshes, drawings
-and CAD kernels. Next are assemblies and drawings. Feature-history editing is
-deliberately not a goal: replay is deterministic and `set_parameter` covers knob
-turns, while the script remains the editing surface.
+coverage, interoperability, assemblies and drawings — and give the human a
+concrete way to point at geometry, rather than building a GUI feature tree.
+Validation and scene diffs (M14) make a rebuild provable; incremental rebuilds
+(M15) make it fast; interoperability (M18) connects the script to existing
+meshes, drawings and CAD kernels. The next four milestones make geometric
+references survive a knob turn (M20), make the program editable without a
+feature tree (M21), turn imported geometry into an editable sketch (M22), and
+turn "watertight" into "printable" (M23). Feature-history editing is
+deliberately not a goal: replay is deterministic and `set_parameter` covers
+knob turns, while the script remains the editing surface.
 
 ### Shipped
 
@@ -852,8 +855,105 @@ turns, while the script remains the editing surface.
 
 ### Next
 
-- [ ] **Later / UI polish**: `patch_program` for script-less MCP documents,
-      a Rust MCP server and PyO3 bindings.
+The next four milestones attack the parts of the parametric promise that are
+still implicit: which edge a selector actually resolved to, how a feature is
+changed without re-authoring the script, whether imported geometry can become
+a rule again, and whether a validated mesh will print.
+
+- [ ] **M20 — Stable references**: selector resolution becomes a first-class,
+      inspectable operation. `faces{entity}` / `edges{entity}` enumerate the
+      resolved groups of a solid with readable descriptors, candidate counts and
+      deterministic ordering; every selector used by `fillet`, `chamfer`,
+      `add_sketch` face planes, `hole`, `mirror` and mates reports `matched`,
+      `ambiguous` and a fingerprint. Selectors gain ancestry ("the cap created
+      by step 4", "the edge between faces A and B") to disambiguate geometry
+      that no longer looks unique. `validate` reports reference drift after a
+      rebuild, and `diff_scene` names a selector that now binds to different
+      geometry even when the volume barely moved. The goal is a parametric CAD
+      that fails loudly instead of silently re-filleting the wrong edge.
+- [ ] **M21 — Program editing**: `patch_program{ops}` inserts, removes,
+      replaces and reorders program steps, with a dry run that reports
+      surviving and renumbered entity ids plus a `diff_scene` to prove the
+      result; `suppress{steps}` turns a feature off without deleting it for A/B
+      variants and agent experiments; pattern counts (and other repeats) can be
+      driven by parameters instead of being structural; and
+      `batch{commands, atomic:true}` rolls a failed multi-command batch back
+      instead of leaving half a model behind. This makes the bus an editing
+      surface without a GUI feature tree.
+- [ ] **M22 — Import → parametric**: `import_dxf`/`import_svg` bring closed
+      loops in as sketches with optional auto-constraints (coincident,
+      horizontal/vertical, approximate tangency); `section{entity, plane}` and
+      `project{entity, plane}` cut a solid or imported mesh into sketch
+      geometry; `primitives{entity}` lists planar faces, cylinder axes/radii and
+      hole candidates so an agent can re-author an imported part instead of
+      only booleaning onto it; `repair_mesh` fills holes, fixes winding and
+      removes non-manifold junk so a non-watertight import can enter booleans.
+      Together with M18 this closes the loop: mesh in → sketch → parametric
+      part out.
+- [ ] **M23 — Printability preflight**: `validate` grows from mesh integrity to
+      print viability — overhang area at a configurable angle, bridge spans,
+      first-layer contact, minimum feature size, trapped/cupped volumes and
+      drainage holes, and disconnected shells or floating islands.
+      `suggest_orientation` scores stable orientations against support, height
+      and bed footprint; `arrange` lays selected solids out on a bed. Fit
+      compensation (hole shrink, elephant-foot offset, `free`/`sliding`/`snug`/
+      `press` clearance classes) and material presets make `bill_of_materials`
+      report mass and cost. The short answer becomes "this prints", not just
+      "this is watertight".
+
+The remaining milestones, in dependency order:
+
+- [ ] **M24 — Measurement & mass properties**: `measure` answers distance and
+      angle between points, faces and solids, minimum distance (closest
+      approach) and cross-section area; `mass_properties` adds surface area,
+      centroid and inertia per solid and per assembly, with mass from a
+      material density; `clearance` reports the closest approach between two
+      solids with the fit classes M23 uses. Agents stop estimating dimensions
+      and fits, and the BOM finishes with material and mass.
+- [ ] **M25 — Visual verification protocol**:
+      `compare_render{doc, reference, view}` scores a render against a
+      reference image or mesh — silhouette IoU, aspect delta, bbox, per-region
+      mismatch and an optional volumetric comparison — so the picture→part loop
+      is a deterministic number instead of the agent's judgement.
+      `set_calibration` converts a reference scale (two points or a known
+      length) into millimeters, and a "no scale found → ask" convention moves
+      the fragile step out of model cleverness. Multi-view comparison keeps
+      inner features from hiding behind a good silhouette.
+- [ ] **M26 — Variants & expressions**: named configurations (design tables)
+      apply parameter overrides and suppression sets, list and diff them, and
+      export one variant at a time — families like S/M/L or left/right without
+      re-authoring. Parameters gain `min`/`max`/`step`, units and read-only
+      derived values; the expression grammar grows deterministic
+      `sin/cos/sqrt/abs/min/max/clamp/if` and unit suffixes while keeping the
+      no-injection property; and named datum planes, axes and points become
+      first-class references for sketches and mates.
+- [ ] **M27 — Sketch & solid vocabulary**: sketches gain ellipses/conics,
+      points, sketch fillet/chamfer, sketch patterns and 2D profile booleans,
+      plus text as profiles; solids gain split-by-plane, thicken/offset, draft,
+      rib, emboss/engrave, variable and partial fillets, asymmetric chamfers,
+      lofts with inner loops and sweeps with twist/scale. These are the
+      everyday moves a parametric part needs before the script can stay small.
+- [ ] **M28 — Assembly maturity**: mates solve as a system with DOF and
+      conflict reporting instead of only sequentially; gear/rack/cam mates;
+      `refresh_part` re-syncs a snapshot from its source document; exploded
+      views; per-instance material and color; and mass properties roll up
+      through the BOM. The assembly stops being a placement record and becomes
+      a design that can be checked.
+- [ ] **M29 — Drawing maturity**: section, detail and auxiliary views with
+      hatching; per-feature dimensions and hole callouts instead of overall
+      width/height; tolerances and GD&T; revision tables; multi-sheet output;
+      and PDF export. The existing deterministic sheet writer carries the new
+      view types.
+- [ ] **M30 — Interoperability breadth**: PDF, glTF/GLB, OBJ and PLY output;
+      3MF with material assignments and instance structure; STEP with assembly
+      structure and colors (still faceted); the import side stays on meshes plus
+      the new DXF/SVG sketch path.
+- [ ] **M31 — Runtime & scene scaling**: revisioned `get_scene{since}` deltas
+      instead of refetching every mesh, entity visibility/layers/tags for large
+      assemblies and export filters, and job ids with progress and cancellation
+      for long fillets, booleans, renders and drawings. Keeps the bus responsive
+      and the MCP payload small as documents grow.
+- [ ] **Later / UI polish**: a Rust MCP server and PyO3 bindings.
 
 ## Status
 

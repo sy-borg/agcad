@@ -470,7 +470,7 @@ python3 -m venv .venv
 <section id="roadmap" class="alt">
   <div class="wrap">
     <h2>Roadmap</h2>
-    <p class="intro">The script is the source of truth. The next milestones make the agent-authored script loop trustworthy and expressive. A GUI feature tree is deliberately not on the list.</p>
+    <p class="intro">The script is the source of truth. The next milestones make references survive a knob turn, make the program editable without a feature tree, turn imported geometry into editable sketches, and turn watertight meshes into printable parts. A GUI feature tree is deliberately not on the list.</p>
 
     <div class="road">
       <div class="done">
@@ -504,7 +504,19 @@ python3 -m venv .venv
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>Later / UI polish</b> <span>program patches, Rust MCP</span></li>
+          <li><b>M20 Stable references</b> <span>enumerated selectors, ambiguity and drift reports</span></li>
+          <li><b>M21 Program editing</b> <span>patch, suppress, parametric counts, atomic batches</span></li>
+          <li><b>M22 Import to parametric</b> <span>DXF/SVG sketches, sections, mesh repair</span></li>
+          <li><b>M23 Printability preflight</b> <span>overhangs, orientation, bed layout, fit compensation</span></li>
+          <li><b>M24 Measurement and mass</b> <span>distance, clearance, area, centroid, inertia</span></li>
+          <li><b>M25 Visual verification</b> <span><code>compare_render</code>, calibration, multi-view</span></li>
+          <li><b>M26 Variants and expressions</b> <span>configurations, units, functions, named datums</span></li>
+          <li><b>M27 Sketch and solid vocabulary</b> <span>conics, text, split, thicken, draft, variable fillets</span></li>
+          <li><b>M28 Assembly maturity</b> <span>mate solve, DOF, gear mates, exploded views</span></li>
+          <li><b>M29 Drawing maturity</b> <span>sections, feature dimensions, tolerances, PDF</span></li>
+          <li><b>M30 Interoperability breadth</b> <span>PDF, glTF, 3MF materials, STEP assemblies</span></li>
+          <li><b>M31 Runtime and scene scaling</b> <span>delta scenes, jobs, visibility</span></li>
+          <li><b>Later / UI polish</b> <span>Rust MCP server, PyO3 bindings</span></li>
         </ul>
       </div>
     </div>
