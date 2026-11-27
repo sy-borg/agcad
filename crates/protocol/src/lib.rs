@@ -64,7 +64,11 @@ pub const DOCUMENT_FORMAT: &str = "wright-document";
 /// `section`, `project`, `repair_mesh`) carry imported geometry as data, so
 /// an older reader would silently drop the sketch/profile or leave a mesh
 /// unrepaired.
-pub const DOCUMENT_VERSION: u32 = 6;
+///
+/// 7: M23 printability preflight. `set_material` is a new program step; an
+/// older reader would silently drop the material and the bill of materials
+/// would lose its mass and cost.
+pub const DOCUMENT_VERSION: u32 = 7;
 
 pub type DocId = u64;
 pub type EntityId = u64;
@@ -467,6 +471,24 @@ pub enum Command {
         scale: Option<SVec3>,
     },
     SetColor { doc: DocId, entity: EntityId, color: Rgba },
+
+    /// Assign a print material to a solid. `material` is a preset name
+    /// (`pla`, `petg`, `abs`, `asa`, `tpu`, `nylon`, `resin`) or any name with
+    /// explicit `density_g_cm3` and `cost_per_kg`. The bill of materials uses
+    /// it to report mass and cost. Modeling command: recorded in the program
+    /// and replayed.
+    SetMaterial {
+        doc: DocId,
+        entity: EntityId,
+        material: String,
+        /// Override the preset density (g/cm³).
+        #[serde(default)]
+        density_g_cm3: Option<f64>,
+        /// Override the preset price (USD per kg).
+        #[serde(default)]
+        cost_per_kg: Option<f64>,
+    },
+
     Delete { doc: DocId, entity: EntityId },
 
     /// Define or update a parameter. The value itself may be an expression
@@ -880,9 +902,16 @@ pub enum Command {
     /// `missing`, `drift` or `unbound`. A session command: it changes no
     /// state and is not part of the program.
     ///
-    /// `ok` is the short answer: every solid is closed, manifold,
+    /// `ok` is the mesh-trust answer: every solid is closed, manifold,
     /// self-intersection free, has positive volume and meets `min_wall_mm`
     /// when given; every sketch is solved and (if it has elements) closed.
+    ///
+    /// M23 adds a per-solid `print` report (overhangs, bridges, first-layer
+    /// contact, minimum feature, shells/cavities and cups) and a top-level
+    /// `printable` answer. The print report is always computed; print
+    /// warnings are only added when one of the print parameters is supplied,
+    /// so a modeling-only `validate` stays quiet about a scene that is not
+    /// bed-aligned.
     Validate {
         doc: DocId,
         /// Restrict the check to these entities. Omit for the whole scene.
@@ -892,7 +921,106 @@ pub enum Command {
         /// (mm). Omit to report the estimate without failing on it.
         #[serde(default)]
         min_wall_mm: Option<f64>,
+        /// Maximum self-supporting angle from the build plate in degrees
+        /// (default 45). Downward faces within this angle of horizontal are
+        /// reported as overhangs; bed-contact faces are excluded.
+        #[serde(default)]
+        overhang_angle_deg: Option<f64>,
+        /// First-layer height in mm (default 0.2). Faces within this band of
+        /// the lowest point count as bed contact.
+        #[serde(default)]
+        layer_height_mm: Option<f64>,
+        /// Flag estimated features thinner than this value (mm). Uses the
+        /// same inward-ray estimate as `min_wall_mm`; the two thresholds are
+        /// independent.
+        #[serde(default)]
+        min_feature_mm: Option<f64>,
+        /// Downward faces within this angle of horizontal are treated as
+        /// bridge candidates (default 10 degrees).
+        #[serde(default)]
+        bridge_angle_deg: Option<f64>,
     },
+
+    /// Score stable build orientations for one or more solids. Candidate
+    /// down directions are the six machine axes plus each solid's planar
+    /// faces; every candidate is rotated so that face lies on the bed, then
+    /// scored by support area (overhangs), height and bed footprint. A
+    /// session command: it changes no state.
+    SuggestOrientation {
+        doc: DocId,
+        /// Solids to evaluate. Omit for every solid in the document.
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+        #[serde(default)]
+        overhang_angle_deg: Option<f64>,
+        #[serde(default)]
+        layer_height_mm: Option<f64>,
+        /// Build plate width (X) in mm, default 220.
+        #[serde(default)]
+        bed_width_mm: Option<f64>,
+        /// Build plate depth (Y) in mm, default 220.
+        #[serde(default)]
+        bed_height_mm: Option<f64>,
+        /// Maximum candidates returned per solid (default 8).
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+
+    /// Lay selected solids out on a build plate. Each solid is translated so
+    /// its lowest point is z=0 and its world AABB is packed into rows with
+    /// `spacing_mm` between neighbors; the whole arrangement is centered on
+    /// the bed. The moves are recorded as ordinary `transform` program steps,
+    /// so they replay and undo as one action. It adds no `arrange` step of
+    /// its own.
+    Arrange {
+        doc: DocId,
+        /// Solids to arrange. Omit for every solid in the document.
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+        /// Build plate width (X) in mm, default 220.
+        #[serde(default)]
+        bed_width_mm: Option<f64>,
+        /// Build plate depth (Y) in mm, default 220.
+        #[serde(default)]
+        bed_height_mm: Option<f64>,
+        /// Gap between parts in mm (default 2).
+        #[serde(default)]
+        spacing_mm: Option<f64>,
+        /// Center the packed arrangement on the bed (default true).
+        #[serde(default)]
+        center: Option<bool>,
+    },
+
+    /// Translate a nominal shaft or hole into a modeled size for a fit class.
+    /// The class supplies radial clearance (`free` 0.40, `sliding` 0.20,
+    /// `snug` 0.10, `press` -0.05 mm); the material preset adds a hole-shrink
+    /// allowance and an elephant-foot recommendation. A session command: it
+    /// changes no state.
+    Fit {
+        doc: DocId,
+        class: FitClass,
+        /// Nominal shaft diameter (mm); returns the hole to model.
+        #[serde(default)]
+        nominal_mm: Option<f64>,
+        /// Measured hole diameter (mm); returns the shaft it fits.
+        #[serde(default)]
+        hole_mm: Option<f64>,
+        #[serde(default)]
+        material: Option<String>,
+        /// Extra per-side machine tolerance (mm, default 0).
+        #[serde(default)]
+        printer_tolerance_mm: Option<f64>,
+        /// Override the material's hole-shrink allowance (mm per side).
+        #[serde(default)]
+        hole_shrink_mm: Option<f64>,
+        /// Override the material's elephant-foot recommendation (mm).
+        #[serde(default)]
+        elephant_foot_mm: Option<f64>,
+    },
+
+    /// List the built-in print material presets (density and price), the
+    /// vocabulary `set_material` accepts. A session command.
+    ListMaterials,
 
     /// Compare two revisions by entity signature. The baseline is either
     /// another open document (`against`) or a saved `.wcad` file (`path`),
@@ -1730,6 +1858,13 @@ pub struct SolidValidation {
     pub min_wall_at: Option<Vec3>,
     /// Whether `min_wall` fell below the requested `min_wall_mm` threshold.
     pub thin: bool,
+    /// Mesh trust plus the print-specific blockers: `ok` and no feature
+    /// below `min_feature_mm`, no closed trapped cavity and not below the
+    /// build plate.
+    pub printable: bool,
+    /// Printability preflight (overhangs, bridges, bed contact, shells,
+    /// cavities, cups).
+    pub print: PrintReport,
     /// Content signature (name, placement, color and geometry).
     pub signature: String,
 }
@@ -1785,6 +1920,299 @@ pub struct ValidationTotals {
     /// Union of every solid's world bbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bbox: Option<Bbox>,
+}
+
+/// Printability preflight for one solid (see [`Command::Validate`]).
+///
+/// The numbers are deterministic approximations: triangles are welded by
+/// exact bits, faces are judged by their geometric normal, and the cup check
+/// casts vertical rays from sampled upward faces. Sizes are millimeters and
+/// areas mm². `printable` covers hard print blockers (a malformed mesh is
+/// handled by the enclosing `SolidValidation`, a feature below the requested
+/// minimum, a below-bed placement or a closed trapped cavity); overhangs,
+/// bridges, floating islands and cups are reported as advisories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrintReport {
+    pub overhang_angle_deg: f64,
+    pub bridge_angle_deg: f64,
+    pub layer_height_mm: f64,
+    /// Total surface area of the mesh.
+    pub surface_area: f64,
+    /// Downward-facing area whose slope is within `overhang_angle_deg` of
+    /// horizontal, excluding first-layer contact.
+    pub overhang_area: f64,
+    /// `overhang_area / surface_area` in 0..1.
+    pub overhang_fraction: f64,
+    pub overhang_region_count: usize,
+    /// Up to eight largest connected overhang patches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overhang_regions: Vec<OverhangRegion>,
+    /// Downward near-horizontal area above the first layer.
+    pub bridge_area: f64,
+    /// Longest short-axis span of a bridge candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bridge_span: Option<f64>,
+    /// Up to eight largest bridge candidates, longest span first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bridges: Vec<BridgeSpan>,
+    pub first_layer: FirstLayerReport,
+    /// Thinnest feature estimate (the same inward-ray measurement as the
+    /// thinnest wall).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_feature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_feature_at: Option<Vec3>,
+    /// The feature estimate fell below the requested `min_feature_mm`.
+    pub small_feature: bool,
+    /// Connected triangle shells, sorted by descending absolute volume.
+    pub shells: Vec<ShellReport>,
+    /// Extra material shells beyond the outer one.
+    pub island_count: usize,
+    /// Islands whose lowest point is above the first layer.
+    pub floating_island_count: usize,
+    /// Inward-wound inner shells: enclosed volumes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cavities: Vec<CavityReport>,
+    /// Closed cavity volume that needs a drainage hole (mm³).
+    pub trapped_volume: f64,
+    /// Upward faces covered directly above them: resin traps and cups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cups: Vec<CupReport>,
+    /// Approximate cupped volume (mm³).
+    pub cupped_volume: f64,
+    /// No print-specific blocker was found. The enclosing validation's `ok`
+    /// still covers mesh integrity.
+    pub printable: bool,
+}
+
+/// One connected overhang patch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverhangRegion {
+    pub area: f64,
+    pub tris: usize,
+    /// Area-weighted centroid.
+    pub at: Vec3,
+    pub bbox: Bbox,
+}
+
+/// One bridge candidate: a downward near-horizontal patch above the bed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeSpan {
+    pub area: f64,
+    /// Short horizontal extent (the unsupported span).
+    pub span: f64,
+    /// Long horizontal extent.
+    pub length: f64,
+    pub at: Vec3,
+    pub bbox: Bbox,
+}
+
+/// First-layer contact with the build plate (z=0).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirstLayerReport {
+    /// Lowest world Z of the solid.
+    pub z_min: f64,
+    pub layer_height_mm: f64,
+    /// The lowest point is within one layer of the bed.
+    pub on_bed: bool,
+    /// The solid is above the bed by more than one layer.
+    pub floating: bool,
+    /// The solid extends below the bed.
+    pub below_bed: bool,
+    /// Projected bed-contact area, zero when the solid is not on the bed.
+    pub contact_area: f64,
+    /// Projected area of the downward faces at the lowest level, even when
+    /// the solid floats.
+    pub bottom_area: f64,
+    /// XY area of the bottom face's bounding box.
+    pub footprint_area: f64,
+    pub bbox: Bbox,
+}
+
+/// One connected triangle shell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellReport {
+    /// Deterministic 0-based shell index.
+    pub index: usize,
+    /// Signed volume (mm³); outer shells are positive, cavity shells negative.
+    pub volume: f64,
+    pub tris: usize,
+    pub bbox: Bbox,
+    pub open_edges: usize,
+    pub non_manifold_edges: usize,
+    /// The largest positive shell: the part's outside.
+    pub outer: bool,
+    /// An inward-wound inner shell.
+    pub cavity: bool,
+    /// An extra shell whose lowest point is above the first layer.
+    pub floating: bool,
+}
+
+/// One enclosed inner shell (see [`Command::Validate`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CavityReport {
+    /// The [`ShellReport::index`] this cavity describes.
+    pub shell: usize,
+    /// Enclosed volume (mm³, positive).
+    pub volume: f64,
+    pub bbox: Bbox,
+    /// The shell has boundary edges, so the cavity connects to the outside
+    /// through a hole.
+    pub drained: bool,
+    /// Suggested drainage-hole diameter for a closed cavity (mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_hole_mm: Option<f64>,
+}
+
+/// One cup: an upward face covered by material above it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CupReport {
+    pub area: f64,
+    /// Deepest vertical gap between the cup floor and its ceiling.
+    pub depth: f64,
+    /// `area * depth`, a rough trapped-volume estimate.
+    pub volume: f64,
+    pub at: Vec3,
+    pub bbox: Bbox,
+}
+
+/// One scored build orientation (see [`Command::SuggestOrientation`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrientationCandidate {
+    /// 1-based rank, best first.
+    pub rank: usize,
+    /// `"machine -Z"`, `"machine +X"` or `"face #3"`.
+    pub label: String,
+    /// Absolute extrinsic XYZ rotation to apply to the entity.
+    pub rotation_deg: Vec3,
+    /// Absolute translation that centers the oriented solid on the bed with
+    /// its lowest point at z=0.
+    pub translation: Vec3,
+    /// Lower is better: overhang percentage + height + footprint/1000, with
+    /// penalties for no stable contact and not fitting the bed.
+    pub score: f64,
+    /// The down face has real contact area.
+    pub stable: bool,
+    /// Oriented Z extent (mm).
+    pub height: f64,
+    /// Oriented XY bounding-box footprint (mm²).
+    pub footprint: f64,
+    pub contact_area: f64,
+    pub overhang_area: f64,
+    pub overhang_fraction: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bridge_span: Option<f64>,
+    pub fits_bed: bool,
+}
+
+/// Orientation report for one solid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrientationReport {
+    pub entity: EntityId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best: Option<OrientationCandidate>,
+    pub candidates: Vec<OrientationCandidate>,
+}
+
+/// One solid's bed-layout result (see [`Command::Arrange`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Arrangement {
+    pub entity: EntityId,
+    pub name: String,
+    pub from: Bbox,
+    pub to: Bbox,
+    /// World translation applied to the entity.
+    pub translation: Vec3,
+}
+
+/// How tightly a shaft and hole fit (see [`Command::Fit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FitClass {
+    /// Loose, drop-together fit.
+    Free,
+    /// Moves by hand with a little play.
+    Sliding,
+    /// Locates firmly, assembled by hand.
+    Snug,
+    /// Interference fit; needs force or thermal expansion.
+    Press,
+}
+
+impl FitClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Sliding => "sliding",
+            Self::Snug => "snug",
+            Self::Press => "press",
+        }
+    }
+
+    /// Recommended radial clearance in mm.
+    pub fn radial_clearance_mm(&self) -> f64 {
+        match self {
+            Self::Free => 0.40,
+            Self::Sliding => 0.20,
+            Self::Snug => 0.10,
+            Self::Press => -0.05,
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Free => "loose, drops together",
+            Self::Sliding => "moves by hand without wobble",
+            Self::Snug => "locates firmly, hand assembly",
+            Self::Press => "interference fit, needs force or heat",
+        }
+    }
+
+    pub fn all() -> [Self; 4] {
+        [Self::Free, Self::Sliding, Self::Snug, Self::Press]
+    }
+}
+
+/// One row of the fit-class table in a [`FitReport`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FitClassInfo {
+    pub class: FitClass,
+    pub radial_clearance_mm: f64,
+    pub diametral_clearance_mm: f64,
+    pub description: String,
+}
+
+/// Result of [`Command::Fit`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FitReport {
+    pub class: FitClass,
+    pub radial_clearance_mm: f64,
+    pub diametral_clearance_mm: f64,
+    pub printer_tolerance_mm: f64,
+    /// Material allowance for hole shrink, per side (mm).
+    pub hole_shrink_mm: f64,
+    /// Recommended elephant-foot removal at the bottom edge (mm).
+    pub elephant_foot_mm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modeled_hole_mm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modeled_shaft_mm: Option<f64>,
+    pub classes: Vec<FitClassInfo>,
+    pub notes: Vec<String>,
+}
+
+/// A print material preset or a `set_material` value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaterialSpec {
+    /// Preset key (`pla`, `petg`, ...) or the custom name given.
+    pub name: String,
+    /// Density in g/cm³.
+    pub density_g_cm3: f64,
+    /// Price in USD per kilogram.
+    pub cost_per_kg: f64,
 }
 
 /// Compact entity description used by [`Command::DiffScene`].
@@ -2056,6 +2484,16 @@ pub struct BomRow {
     pub entities: usize,
     /// Total signed world volume of the present members (mm³).
     pub volume: f64,
+    /// Material name when every member uses the same one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    /// Distinct materials among the members, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<String>,
+    /// Mass in grams (volume × density); zero for unassigned members.
+    pub mass_g: f64,
+    /// Cost in the BOM currency; zero for unassigned members.
+    pub cost: f64,
     /// Instance names, in creation order.
     pub instances: Vec<String>,
 }
@@ -2226,7 +2664,16 @@ pub enum CommandResult {
         reference: Option<ReferenceReport>,
     },
     /// Bill of materials (see [`Command::BillOfMaterials`]).
-    Bom { doc: DocId, rows: Vec<BomRow> },
+    Bom {
+        doc: DocId,
+        rows: Vec<BomRow>,
+        /// Sum of `rows.mass_g`.
+        total_mass_g: f64,
+        /// Sum of `rows.cost`.
+        total_cost: f64,
+        /// Currency code for cost values (USD).
+        currency: String,
+    },
     /// Interference report (see [`Command::CheckInterference`]). `ok` is true
     /// when no pair overlapped above the tolerance. `checked` counts the pairs
     /// whose world AABBs overlapped and therefore reached the kernel.
@@ -2413,11 +2860,15 @@ pub enum CommandResult {
         edges: Vec<EdgeGroupInfo>,
     },
     /// Trust report for the document's solids and sketches (see
-    /// [`Command::Validate`]). `ok` is false when any solid is not printable
-    /// or any sketch is unsolved/open; the per-entity reports say why.
+    /// [`Command::Validate`]). `ok` is false when any solid fails mesh trust
+    /// or any sketch is unsolved/open; `printable` adds the print-specific
+    /// checks. The per-entity reports say why.
     Validated {
         doc: DocId,
+        /// Mesh-trust answer (see [`Command::Validate`]).
         ok: bool,
+        /// Every solid passed the print-specific checks too.
+        printable: bool,
         solids: Vec<SolidValidation>,
         sketches: Vec<SketchValidation>,
         totals: ValidationTotals,
@@ -2426,6 +2877,39 @@ pub enum CommandResult {
         /// Stored selectors re-resolved against the current geometry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         references: Vec<ReferenceCheck>,
+    },
+    /// Stable orientations (see [`Command::SuggestOrientation`]).
+    OrientationSuggested {
+        doc: DocId,
+        overhang_angle_deg: f64,
+        layer_height_mm: f64,
+        reports: Vec<OrientationReport>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+    },
+    /// Bed layout (see [`Command::Arrange`]).
+    Arranged {
+        doc: DocId,
+        bed: [f64; 2],
+        spacing_mm: f64,
+        placements: Vec<Arrangement>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        used_bbox: Option<Bbox>,
+        /// The packed arrangement fits inside the requested bed.
+        fits: bool,
+    },
+    /// A fit calculation (see [`Command::Fit`]).
+    FitComputed { doc: DocId, report: FitReport },
+    /// Material presets (see [`Command::ListMaterials`]).
+    Materials {
+        materials: Vec<MaterialSpec>,
+        currency: String,
+    },
+    /// A material was assigned (see [`Command::SetMaterial`]).
+    MaterialSet {
+        doc: DocId,
+        entity: EntityId,
+        material: MaterialSpec,
     },
     /// Revision comparison by entity signature (see [`Command::DiffScene`]).
     SceneDiff(SceneDiffReport),

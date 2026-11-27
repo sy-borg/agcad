@@ -869,6 +869,32 @@ class Wright:
     def set_color(self, doc: int, entity: int, color: tuple[float, float, float, float]) -> dict[str, Any]:
         return self._request("set_color", doc=doc, entity=entity, color=color)
 
+    def set_material(
+        self,
+        doc: int,
+        entity: int,
+        material: str,
+        density_g_cm3: float | None = None,
+        cost_per_kg: float | None = None,
+    ) -> dict[str, Any]:
+        """Assign a print material to one solid.
+
+        ``material`` is a preset (``pla``, ``petg``, ``abs``, ``asa``,
+        ``tpu``, ``nylon``, ``resin``) or a custom name with
+        ``density_g_cm3`` and ``cost_per_kg``. The assignment is a program
+        step, so it survives save/open and parameter rebuilds; the bill of
+        materials reports mass and cost from it.
+        """
+        return self._request(
+            "set_material", doc=doc, entity=entity, material=material,
+            density_g_cm3=density_g_cm3, cost_per_kg=cost_per_kg,
+        )
+
+    def list_materials(self) -> list[dict[str, Any]]:
+        """Built-in print material presets with density (g/cm³) and price
+        (USD/kg)."""
+        return self._request("list_materials")["materials"]
+
     def delete(self, doc: int, entity: int) -> dict[str, Any]:
         return self._request("delete", doc=doc, entity=entity)
 
@@ -985,8 +1011,11 @@ class Wright:
         )
 
     def bill_of_materials(self, doc: int) -> list[dict[str, Any]]:
-        """One row per part: item number, quantity, current members and total
-        world volume. A session query — changes no state."""
+        """One row per part: item number, quantity, current members, total
+        world volume, material(s), mass in grams and cost. Rows with a
+        ``set_material`` assignment carry mass and cost; the server also
+        returns document totals (the client method returns the rows). A
+        session query — changes no state."""
         return self._request("bill_of_materials", doc=doc)["rows"]
 
     def check_interference(
@@ -1582,6 +1611,10 @@ class Wright:
         doc: int,
         entities: list[int] | None = None,
         min_wall_mm: float | None = None,
+        overhang_angle_deg: float | None = None,
+        layer_height_mm: float | None = None,
+        min_feature_mm: float | None = None,
+        bridge_angle_deg: float | None = None,
     ) -> dict[str, Any]:
         """Check that the document is printable.
 
@@ -1590,10 +1623,19 @@ class Wright:
         volume, world bbox and an approximate thinnest wall; for every
         sketch it reports solver status and whether the profile is closed.
 
-        ``ok`` is the short answer: all solids are closed, manifold,
+        ``ok`` is the mesh-trust answer: all solids are closed, manifold,
         self-intersection free, have positive volume and are at least
         ``min_wall_mm`` thick when that threshold is given; all sketches are
         solved and (when non-empty) closed. ``entities`` restricts the check.
+
+        Every solid also carries a ``print`` report: overhang area and
+        regions at ``overhang_angle_deg`` (default 45), bridge spans, first
+        layer contact at ``layer_height_mm`` (default 0.2), minimum feature
+        at ``min_feature_mm``, connected shells/islands, closed cavities with
+        a suggested drainage hole, and cups. The top-level ``printable`` is
+        true only when every solid passes the print-specific checks. Print
+        warnings appear when any print parameter is supplied, so a plain
+        modeling check stays quiet about a scene that is not bed-aligned.
 
         A session command: it changes no state and is not part of the
         program. The wall estimate casts one inward ray per sampled triangle,
@@ -1606,7 +1648,85 @@ class Wright:
         logical feature — the failure a parametric rebuild must not hide.
         """
         return self._request(
-            "validate", doc=doc, entities=entities, min_wall_mm=min_wall_mm
+            "validate", doc=doc, entities=entities, min_wall_mm=min_wall_mm,
+            overhang_angle_deg=overhang_angle_deg,
+            layer_height_mm=layer_height_mm,
+            min_feature_mm=min_feature_mm,
+            bridge_angle_deg=bridge_angle_deg,
+        )
+
+    def suggest_orientation(
+        self,
+        doc: int,
+        entities: list[int] | None = None,
+        overhang_angle_deg: float | None = None,
+        layer_height_mm: float | None = None,
+        bed: tuple[float, float] = (220.0, 220.0),
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Score stable build orientations, best first, per solid.
+
+        Candidates are the six machine axes plus each solid's planar faces.
+        Each candidate carries an absolute ``rotation_deg`` and
+        ``translation`` — pass both straight to :meth:`transform` to apply
+        it — plus support/overhang area, height, footprint, contact area,
+        bridge span and a lower-is-better ``score``.
+        """
+        return self._request(
+            "suggest_orientation", doc=doc, entities=entities,
+            overhang_angle_deg=overhang_angle_deg,
+            layer_height_mm=layer_height_mm,
+            bed_width_mm=bed[0], bed_height_mm=bed[1], limit=limit,
+        )["reports"]
+
+    def arrange(
+        self,
+        doc: int,
+        entities: list[int] | None = None,
+        bed: tuple[float, float] = (220.0, 220.0),
+        spacing_mm: float = 2.0,
+        center: bool = True,
+    ) -> dict[str, Any]:
+        """Lay selected solids out on the bed.
+
+        Each solid is translated so its lowest point is z=0 and its world
+        AABB is packed into rows with ``spacing_mm`` between neighbors; the
+        arrangement is centered when ``center`` is true. Moves are recorded
+        as ordinary ``transform`` steps, so they replay and undo as one
+        action. Returns per-solid ``from``/``to`` boxes, the used bed bbox and
+        ``fits``.
+        """
+        return self._request(
+            "arrange", doc=doc, entities=entities,
+            bed_width_mm=bed[0], bed_height_mm=bed[1],
+            spacing_mm=spacing_mm, center=center,
+        )
+
+    def fit(
+        self,
+        doc: int,
+        class_: str = "snug",
+        nominal_mm: float | None = None,
+        hole_mm: float | None = None,
+        material: str | None = None,
+        printer_tolerance_mm: float | None = None,
+        hole_shrink_mm: float | None = None,
+        elephant_foot_mm: float | None = None,
+    ) -> dict[str, Any]:
+        """Translate a nominal shaft or hole into a modeled size.
+
+        ``class_`` is ``free``, ``sliding``, ``snug`` or ``press``. Give
+        ``nominal_mm`` (shaft) to get ``modeled_hole_mm``, or ``hole_mm`` to
+        get ``modeled_shaft_mm``. The material preset adds its hole-shrink
+        allowance; the report also recommends an elephant-foot offset and
+        includes the full class table.
+        """
+        return self._request(
+            "fit", doc=doc, **{"class": class_},
+            nominal_mm=nominal_mm, hole_mm=hole_mm, material=material,
+            printer_tolerance_mm=printer_tolerance_mm,
+            hole_shrink_mm=hole_shrink_mm,
+            elephant_foot_mm=elephant_foot_mm,
         )
 
     def diff_scene(

@@ -159,6 +159,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::AddMesh { doc, .. }
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
+        | Command::SetMaterial { doc, .. }
         | Command::Delete { doc, .. }
         | Command::Fillet { doc, .. }
         | Command::Chamfer { doc, .. }
@@ -208,6 +209,9 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Edges { doc, .. }
         | Command::Primitives { doc, .. }
         | Command::Validate { doc, .. }
+        | Command::SuggestOrientation { doc, .. }
+        | Command::Arrange { doc, .. }
+        | Command::Fit { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::GetParameters { doc }
         | Command::ExportStl { doc, .. }
@@ -225,6 +229,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         Command::CreateDocument { .. }
         | Command::OpenDocument { .. }
         | Command::ListDocuments
+        | Command::ListMaterials
         | Command::Initialize => None,
     }
 }

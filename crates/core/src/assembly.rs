@@ -285,6 +285,7 @@ pub fn add_instance(
         String,
         wright_protocol::Rgba,
         Mesh,
+        Option<wright_protocol::MaterialSpec>,
     )> = private
         .entities()
         .values()
@@ -298,12 +299,13 @@ pub fn add_instance(
                 e.name.clone(),
                 e.color,
                 e.mesh.clone(),
+                private.materials().get(&e.id).cloned(),
             )
         })
         .collect();
 
     let mut entities = Vec::with_capacity(solids.len());
-    for (source, lt, lr, ls, member_name, color, mesh) in solids {
+    for (source, lt, lr, ls, member_name, color, mesh, material) in solids {
         let member = Member {
             entity: 0, // filled below
             source,
@@ -329,6 +331,9 @@ pub fn add_instance(
             geom_key: key,
         };
         d.entities_mut().insert(id, entity);
+        if let Some(material) = material {
+            d.materials_mut().insert(id, material);
+        }
         instance.members.push(Member {
             entity: id,
             ..member
@@ -650,18 +655,32 @@ pub fn bill_of_materials(d: &Document) -> Vec<BomRow> {
     }
     let mut rows = Vec::with_capacity(by_part.len());
     for (item, (part_name, instances)) in by_part.iter().enumerate() {
-        let (entities, volume) = instances.iter().fold((0usize, 0.0), |(n, v), inst| {
-            let mut count = n;
-            let mut volume = v;
+        let mut entities = 0usize;
+        let mut volume = 0.0;
+        let mut mass_g = 0.0;
+        let mut cost = 0.0;
+        let mut materials = std::collections::BTreeSet::new();
+        for inst in instances {
             for m in &inst.members {
                 if let Some(e) = d.entities().get(&m.entity) {
-                    count += 1;
-                    volume += world_volume(e);
+                    entities += 1;
+                    let member_volume = world_volume(e);
+                    volume += member_volume;
+                    if let Some(material) = d.materials().get(&m.entity) {
+                        let mass = member_volume / 1000.0 * material.density_g_cm3;
+                        mass_g += mass;
+                        cost += mass / 1000.0 * material.cost_per_kg;
+                        materials.insert(material.name.clone());
+                    }
                 }
             }
-            (count, volume)
-        });
+        }
         let description = d.parts().get(part_name).map(|p| p.description.clone());
+        let material = if materials.len() == 1 {
+            materials.iter().next().cloned()
+        } else {
+            None
+        };
         rows.push(BomRow {
             item: item as u32 + 1,
             part: part_name.clone(),
@@ -669,6 +688,10 @@ pub fn bill_of_materials(d: &Document) -> Vec<BomRow> {
             quantity: instances.len() as u32,
             entities,
             volume,
+            material,
+            materials: materials.into_iter().collect(),
+            mass_g,
+            cost,
             instances: instances.iter().map(|i| i.name.clone()).collect(),
         });
     }

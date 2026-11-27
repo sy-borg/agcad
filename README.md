@@ -103,8 +103,8 @@ Commands, grouped by intent:
 - **Documents**: `initialize`, `list_documents`, `create_document`,
   `close_document`
 - **Primitives**: `add_box`, `add_sphere`, `add_cylinder`
-- **Modelling**: `boolean`, `transform`, `set_color`, `delete`, `fillet`,
-  `chamfer`
+- **Modelling**: `boolean`, `transform`, `set_color`, `set_material`, `delete`,
+  `fillet`, `chamfer`
 - **Shape leverage**: `linear_pattern`, `circular_pattern`, `mirror`,
   `shell`, `hole`, `sweep`, `loft`, `thread`
 - **Assemblies**: `import_part`, `add_part`, `add_instance`, `add_connector`,
@@ -123,7 +123,8 @@ Commands, grouped by intent:
   `add_sketch_curves` (baked sketch step), `section`/`project` (solid → sketch
   geometry), `primitives` (planar faces, cylinders, holes), `repair_mesh`
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `faces`, `edges`,
-  `validate`, `diff_scene`, `export_stl`, `export_3mf`, `export_step`,
+  `validate`, `suggest_orientation`, `arrange`, `fit`, `list_materials`,
+  `diff_scene`, `export_stl`, `export_3mf`, `export_step`,
   `export_dxf`, `export_svg`, `export_drawing`, `render_offscreen`,
   `save_document`, `open_document`
 - **History**: `undo`, `redo`
@@ -526,7 +527,8 @@ replay deterministically rather than solving a global system. `move_instance` is
 the direct placement override.
 
 `bill_of_materials` groups instances by part into item-numbered rows with
-quantity, current member count, total world volume and instance names.
+quantity, current member count, total world volume, material(s), mass and cost
+(once `set_material` assigned a material), plus instance names.
 `check_interference` checks placed instances against each other by default (or
 explicit `entities`), pruning by AABB and measuring the boolean intersection;
 `ok` is the short answer and each hit carries its volume and world bounds.
@@ -595,6 +597,64 @@ fillet, a resize (`moved`), and a broad filter (`ambiguous`).
 M21 extends that proof to edits: `patch_program{dry_run:true}` returns the same
 `diff_scene` report shape against the current scene, so an insertion's id shift
 is inspectable before it is committed.
+
+## Printability preflight (M23)
+
+Watertight is necessary but not sufficient. `validate` now always returns a
+per-solid **`print`** report and a top-level `printable` answer, while its
+existing `ok` stays the mesh-trust answer:
+
+- **Overhangs** — downward-facing area within `overhang_angle_deg` of horizontal
+  (default 45), split into connected patches with area, centroid and bbox.
+  First-layer contact is excluded, so the bottom of a box on the bed is not an
+  overhang.
+- **Bridges** — connected downward patches that contain near-horizontal faces
+  (`bridge_angle_deg`, default 10). The span is the patch's short horizontal
+  extent: the distance a slicer has to bridge between supports.
+- **First layer** — projected contact area within `layer_height_mm` (default
+  0.2) of the lowest point, the bottom footprint, and whether the solid is on,
+  above (`floating`) or below the bed.
+- **Minimum feature** — the inward-ray wall estimate, flagged against
+  `min_feature_mm`. Thin walls and thin pins both reduce the estimate.
+- **Shells and islands** — a union-find over welded vertices separates the outer
+  shell from extra positive shells (islands), and inward-wound inner shells
+  (cavities). Floating islands are called out separately.
+- **Cavities and cups** — closed cavities carry their volume and a suggested
+  drainage-hole diameter; upward faces with material directly above them are
+  cups with an approximate trapped volume.
+
+Print warnings only appear when a print parameter is supplied, so a modeling-only
+`validate` stays quiet about a scene that is not bed-aligned. `printable` is
+false for a malformed mesh, a feature below the requested minimum, a below-bed
+placement, or a closed trapped cavity; overhangs, bridges, floating islands and
+cups are advisories because supports, drainage or orientation can solve them.
+
+The rest of the preflight is action, not just diagnosis:
+
+```python
+best = cad.suggest_orientation(doc, entities=[post])[0]["best"]
+cad.transform(doc, post, translation=best["translation"],
+              rotation_deg=best["rotation_deg"])
+cad.arrange(doc, entities=[part, post], bed=(120, 120), spacing_mm=4)
+site = cad.fit(doc, "sliding", nominal_mm=8.0, material="petg")
+cad.set_material(doc, part, "pla")
+```
+
+`suggest_orientation` scores the six machine axes plus every planar face as a
+down face, and returns absolute `rotation_deg`/`translation` ready for
+`transform`; its lower-is-better `score` combines overhang percentage, height,
+bed footprint and stability/fit penalties. `arrange` shelf-packs selected solids
+with their lowest point at z=0, centers the result on the bed, and records
+ordinary `transform` steps, so the layout replays and undoes as one action.
+
+`fit` turns a nominal shaft or hole into a modeled size for the `free`,
+`sliding`, `snug` and `press` classes. The report includes radial/diametral
+clearance, a material hole-shrink allowance per side, the modeled hole/shaft,
+an elephant-foot removal recommendation, and the full class table. `set_material`
+accepts the built-in `pla`, `petg`, `abs`, `asa`, `tpu`, `nylon` and `resin`
+presets (or a custom density/price); it is a program step, so it replays, and
+`bill_of_materials` rows gain materials, mass in grams and cost. `list_materials`
+exposes the presets.
 
 ## Live preview: MCP agent + viewer, one shared scene
 
@@ -746,8 +806,8 @@ Validation and scene diffs (M14) make a rebuild provable; incremental rebuilds
 (M15) make it fast; interoperability (M18) connects the script to existing
 meshes, drawings and CAD kernels. Program editing (M21) makes the program
 editable without a feature tree, import → parametric (M22) turns drawings and
-imported meshes back into sketches and rules, and the next milestone turns
-"watertight" into "printable" (M23). Feature-history
+imported meshes back into sketches and rules, and printability preflight (M23)
+turns "watertight" into "printable". Feature-history
 editing is deliberately not a goal: replay is deterministic and
 `set_parameter` covers knob turns, while the script remains the editing surface.
 
@@ -824,22 +884,22 @@ editing is deliberately not a goal: replay is deterministic and
       removes non-manifold junk so a non-watertight import can enter booleans.
       Together with M18 this closes the loop: mesh in → sketch → parametric
       part out.
+- [x] **M23 — Printability preflight**: `validate`'s per-solid `print` report
+      covers overhang area/regions at a configurable angle, bridge spans,
+      first-layer contact, minimum feature size, disconnected shells/floating
+      islands, closed cavities with a suggested drainage hole, and cups;
+      `printable` is the new short answer. `suggest_orientation` scores machine
+      axes and planar faces against support, height and bed footprint and
+      returns rotation/translation ready for `transform`; `arrange` shelf-packs
+      solids onto a bed as one undoable layout. `fit` maps `free`/`sliding`/
+      `snug`/`press` to modeled hole/shaft sizes with material hole-shrink and
+      elephant-foot compensation, and `set_material` presets turn
+      `bill_of_materials` into mass and cost.
 
 ### Next
 
-The next milestone attacks the other half of the parametric promise: whether a
-validated mesh will print.
-
-- [ ] **M23 — Printability preflight**: `validate` grows from mesh integrity to
-      print viability — overhang area at a configurable angle, bridge spans,
-      first-layer contact, minimum feature size, trapped/cupped volumes and
-      drainage holes, and disconnected shells or floating islands.
-      `suggest_orientation` scores stable orientations against support, height
-      and bed footprint; `arrange` lays selected solids out on a bed. Fit
-      compensation (hole shrink, elephant-foot offset, `free`/`sliding`/`snug`/
-      `press` clearance classes) and material presets make `bill_of_materials`
-      report mass and cost. The short answer becomes "this prints", not just
-      "this is watertight".
+The next milestone closes the measurement gap: an agent should be able to ask
+"how far apart are these?", "how big is this?" and "what does it weigh?"
 
 The remaining milestones, in dependency order:
 
@@ -897,24 +957,26 @@ The remaining milestones, in dependency order:
 
 ## Status
 
-Milestone 22 is complete: drawings and imported meshes feed the same
-program/replay substrate as authored geometry. The suite is **297 tests** (281
-engine + 1 server + 15 viewer), covering the solver and sketches,
+Milestone 23 is complete: the engine answers "will this print?" as well as
+"is this watertight?". The suite is **309 tests** (293 engine + 1 server + 15
+viewer), covering the solver and sketches,
 solids/booleans/edges, persistence and export, picking and script-as-source,
 validation and scene diffs, stable face/edge references, incremental rebuilds,
 program patching and suppression, parametric pattern counts, shape leverage,
 interoperability (STL/OBJ/3MF, DXF/SVG import and export, STEP), import →
 parametric (DXF/SVG sketches with inferred constraints, sections,
-projections, primitive discovery and mesh repair), and assemblies and drawing
-sheets — including byte-stable saves and exports, cold-replay determinism, and
-self-contained assemblies that reopen without their part files.
+projections, primitive discovery and mesh repair), assemblies and drawing
+sheets, and printability preflight (overhangs, bridges, bed contact, shells,
+cavities/cups, orientation scoring, bed layout, fit compensation and material
+mass/cost) — including byte-stable saves and exports, cold-replay determinism,
+and self-contained assemblies that reopen without their part files.
 
 End-to-end printable examples: `examples/printable_bracket.py`,
 `revolve_bushing.py`, `face_sketch.py`, `sketch_complete.py`, `pick.py`,
-`validate.py`, `stable_references.py`, `program_edit.py`, `shape_leverage.py`,
-`cross_block.py`, `save_load.py`, `incremental_rebuild.py`, `import_mesh.py`,
-`import_parametric.py`, `export_2d.py`, `step_export.py`, and
-`assembly_drawing.py`. Each runs profile
+`validate.py`, `print_preflight.py`, `stable_references.py`, `program_edit.py`,
+`shape_leverage.py`, `cross_block.py`, `save_load.py`,
+`incremental_rebuild.py`, `import_mesh.py`, `import_parametric.py`,
+`export_2d.py`, `step_export.py`, and `assembly_drawing.py`. Each runs profile
 → solid → validate → render → export; `cross_block.py` is the picture-to-part
 loop above.
 

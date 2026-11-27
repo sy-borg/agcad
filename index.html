@@ -405,7 +405,8 @@ footer{padding:0 0 48px}
 
     <div class="rules">
       <div><h3>Sketch completeness</h3><p>Arcs and interpolating splines, tangent/equal/concentric/symmetric/angle/point-on-line constraints, construction geometry, and <code>trim_sketch</code>/<code>extend_sketch</code>/<code>offset_sketch</code>. Every solve names an unsatisfied or redundant constraint by id.</p></div>
-      <div><h3>Trust loop</h3><p><code>validate</code> checks watertightness, non-manifold edges, self-intersections, volume and thinnest wall; <code>diff_scene</code> compares two revisions by entity signature and names what changed. <code>faces</code>/<code>edges</code> enumerate the groups a selector can address, and <code>validate</code> reports whether each stored reference is still the same feature (<code>moved</code>) or has drifted. All are read-only queries.</p></div>
+      <div><h3>Trust loop</h3><p><code>validate</code> checks watertightness, non-manifold edges, self-intersections, volume, thinnest wall and printability; <code>diff_scene</code> compares two revisions by entity signature and names what changed. <code>faces</code>/<code>edges</code> enumerate the groups a selector can address, and <code>validate</code> reports whether each stored reference is still the same feature (<code>moved</code>) or has drifted. All are read-only queries.</p></div>
+      <div><h3>Printability preflight</h3><p><code>validate</code> adds overhangs, bridge spans, first-layer contact, minimum feature, shells/floating islands, trapped cavities with drainage suggestions and cups. <code>suggest_orientation</code> scores faces and axes, <code>arrange</code> packs the bed, <code>fit</code> maps clearance classes to modeled holes/shafts, and material presets give the BOM mass and cost.</p></div>
       <div><h3>Program editing</h3><p><code>patch_program</code> inserts, removes, replaces and reorders steps; its dry run reports surviving and renumbered ids plus a scene diff. <code>suppress</code> flips features for A/B variants, pattern counts are parameter-driven, and <code>batch{atomic:true}</code> never leaves half a model behind.</p></div>
       <div><h3>Shape leverage</h3><p>Patterns, <code>mirror</code>, <code>shell</code>, <code>hole</code>, <code>sweep</code>, <code>loft</code> and <code>thread</code> cover the repetitive printable moves without manual copies.</p></div>
       <div><h3>Interoperability</h3><p><code>import_mesh</code> reads STL/OBJ/3MF, welds and repairs the mesh, and bakes it into an <code>add_mesh</code> step so the <code>.wcad</code> reopens without the source file.</p></div>
@@ -475,14 +476,14 @@ python3 -m venv .venv
 # R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, an import → parametric loop (DXF/SVG sketches, section/project, primitive discovery and mesh repair), and an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a printability preflight (overhangs, bridges, orientation, bed layout, fits and BOM mass), a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, an import → parametric loop (DXF/SVG sketches, section/project, primitive discovery and mesh repair), and an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet.</p>
   </div>
 </section>
 
 <section id="roadmap" class="alt">
   <div class="wrap">
     <h2>Roadmap</h2>
-    <p class="intro">The script is the source of truth. The program is editable without a feature tree, imported drawings and meshes become parametric sketches again, and the next milestone turns watertight meshes into printable parts. A GUI feature tree is deliberately not on the list.</p>
+    <p class="intro">The script is the source of truth. The program is editable without a feature tree, imported drawings and meshes become parametric sketches again, and validated solids become printable parts with orientation, bed layout, fits and material mass. A GUI feature tree is deliberately not on the list.</p>
 
     <div class="road">
       <div class="done">
@@ -514,12 +515,12 @@ python3 -m venv .venv
           <li><b>M20 Stable references</b> <span>enumerated faces and edges, ambiguity and drift reports</span></li>
           <li><b>M21 Program editing</b> <span>patch with a dry-run id map, suppress, parametric counts, atomic batches</span></li>
           <li><b>M22 Import → parametric</b> <span>DXF/SVG sketches with auto-constraints, section/project, primitives, mesh repair</span></li>
+          <li><b>M23 Printability preflight</b> <span>overhangs, bridges, cavities, orientation, bed layout, fits, material mass</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M23 Printability preflight</b> <span>overhangs, orientation, bed layout, fit compensation</span></li>
           <li><b>M24 Measurement and mass</b> <span>distance, clearance, area, centroid, inertia</span></li>
           <li><b>M25 Visual verification</b> <span><code>compare_render</code>, calibration, multi-view</span></li>
           <li><b>M26 Variants and expressions</b> <span>configurations, units, functions, named datums</span></li>
@@ -542,7 +543,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">Wright CAD</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/wright-cad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/wright-cad">sy-borg/wright-cad</a></div>
-      <div><small>Status</small>Milestone 22 · Import → parametric</div>
+      <div><small>Status</small>Milestone 23 · Printability preflight</div>
     </div>
   </div>
 </footer>

@@ -44,7 +44,8 @@ optional explicit `doc` id, so create-then-populate fits in one batch.
 Workflow: create_document -> set_parameter(...) -> add primitives with expression
 dimensions -> transform -> boolean ops for printable solids -> wright_scene to
 verify -> validate to prove watertightness/printability and diff_scene to see
-exactly what a knob changed -> wright_render to SEE the result -> export_stl/
+exactly what a knob changed -> suggest_orientation/arrange to put a part on the
+bed -> wright_render to SEE the result -> export_stl/
 export_3mf for slicing, export_step for a faceted STEP B-rep in other CAD, and
 export_dxf/export_svg for 2D sketch drawings.
 Sketches are
@@ -82,6 +83,13 @@ overrides), add_connector names attachment points and mate joins two instances
 (coincident/distance/parallel/angle). bill_of_materials and check_interference
 answer the assembly questions, and export_drawing writes an SVG or DXF sheet
 with front/top/right/iso views, hidden lines, dimensions, balloons and a BOM.
+Printability preflight: validate also reports overhang area, bridge spans,
+first-layer contact, minimum feature, shells/floating islands, closed cavities
+with a suggested drainage hole, and cups; suggest_orientation scores stable
+build orientations from planar faces, arrange shelf-packs solids onto the bed,
+set_material assigns a preset/custom material, and fit turns a nominal shaft or
+hole into a modeled size (free/sliding/snug/press) with hole-shrink and
+elephant-foot compensation.
 Import → parametric: import_dxf/import_svg bring a drawing in as a
 constraint-solved sketch, section/project cut or project a solid into sketch
 geometry, primitives lists planar faces, cylinder axes/radii and hole
@@ -169,6 +177,10 @@ chamfer{doc,entity,distance,edges?,min_angle_deg?} (flat bevel, same in-place
   vertical fillet trims the rim band cleanly, while re-cutting an already
   rounded rim is slow and noisy.
 set_color{doc,entity,color}, delete{doc,entity}, undo{doc}, redo{doc},
+set_material{doc,entity,material,density_g_cm3?,cost_per_kg?} (assign a print
+  material; presets pla/petg/abs/asa/tpu/nylon/resin, or a custom name with
+  density and price; a program step, so it replays and feeds BOM mass/cost),
+list_materials{} (built-in density (g/cm^3) and price (USD/kg) presets),
 add_sketch{doc,name,plane?} (empty 2D sketch; plane may be omitted for the XY
   datum plane at the origin. Other forms:
     {datum:{plane:"xy"|"xz"|"yz",offset?}} — a standard datum plane
@@ -265,7 +277,8 @@ mate{doc,kind:"coincident"|"distance"|"parallel"|"angle",a:{instance,connector},
   along a's axis (mm); parallel = align axes only; angle = points together and
   b's axis offset degrees from a's. Mates solve sequentially in program order),
 bill_of_materials{doc} (rows per part: item number, quantity, current entities,
-  total world volume, instance names; session query),
+  total world volume, materials, mass_g and cost (USD); plus document totals;
+  session query),
 check_interference{doc,instances?,entities?,tolerance?=0.001} (pairwise
   volumetric overlap: by default across placed instances; or pass `entities`
   to check specific solids. Returns ok, checked and hits with intersection
@@ -319,18 +332,36 @@ edges{doc,entity,min_angle_deg?} (list logical sharp edges: collinear/tangent
   candidates. Each carries endpoints/direction or midpoint, adjacent face ids,
   fingerprint/geometry and a selector ready for fillet/chamfer{edges:...};
   session query),
-validate{doc,entities?,min_wall_mm?} (trust check, changes no state). For every
-  solid: watertight/open/non-manifold edges, degenerate triangles,
-  self-intersections, signed world volume, world bbox and an approximate
-  thinnest wall (inward rays; sub-0.05 mm contact is treated as numerical
-  noise); for every sketch: solver status, over-constrained/diagnostics and
-  whether the profile is closed.
-  Returns ok + per-entity reports + totals + warnings + references. Each stored
-  selector (fillet, chamfer, face sketch plane, hole, mirror, mate) is
-  re-checked: ok, moved (same feature, new coordinates), ambiguous, missing,
-  drift (now binds a different feature) or unbound. entities restricts the
-  check; min_wall_mm sets the thin-wall pass/fail threshold (omit to report
-  the estimate without failing),
+validate{doc,entities?,min_wall_mm?,overhang_angle_deg?,layer_height_mm?,
+  min_feature_mm?,bridge_angle_deg?} (trust + printability check, changes no
+  state). For every solid: watertight/open/non-manifold edges, degenerate
+  triangles, self-intersections, signed world volume, world bbox and an
+  approximate thinnest wall (inward rays; sub-0.05 mm contact is treated as
+  numerical noise). Its `print` report adds overhang area/regions at
+  overhang_angle_deg (default 45), bridge spans (bridge_angle_deg, default 10),
+  first-layer contact (layer_height_mm, default 0.2), minimum feature, connected
+  shells/islands, closed cavities with a suggested drainage-hole size, and cups.
+  For every sketch: solver status, over-constrained/diagnostics and whether the
+  profile is closed.
+  Returns ok (mesh trust), printable (print checks), per-entity reports, totals,
+  warnings and references. Print warnings appear only when a print parameter is
+  supplied. Each stored selector (fillet, chamfer, face sketch plane, hole,
+  mirror, mate) is re-checked: ok, moved (same feature, new coordinates),
+  ambiguous, missing, drift (now binds a different feature) or unbound.
+  entities restricts the check; min_wall_mm sets the thin-wall pass/fail
+  threshold (omit to report the estimate without failing),
+suggest_orientation{doc,entities?,overhang_angle_deg?,layer_height_mm?,
+  bed_width_mm?,bed_height_mm?,limit?} (score stable orientations: machine axes
+  + planar faces; each candidate carries absolute rotation_deg and translation
+  for transform, height, footprint, contact/overhang area, bridge span and a
+  lower-is-better score; session query),
+arrange{doc,entities?,bed_width_mm?,bed_height_mm?,spacing_mm?,center?} (lay
+  solids on the bed with their lowest point at z=0, shelf-packed with spacing and
+  centered; records ordinary transform steps, so it undoes as one action),
+fit{doc,class:"free"|"sliding"|"snug"|"press",nominal_mm?,hole_mm?,material?,
+  printer_tolerance_mm?,hole_shrink_mm?,elephant_foot_mm?} (convert a nominal
+  shaft or hole into a modeled hole/shaft with clearance, material hole-shrink
+  and an elephant-foot recommendation; session query),
 diff_scene{doc,against?:doc_id,path?:".wcad"} (compare two revisions by
   entity signature; pass exactly one baseline: another open document or a
   saved file, which is replayed read-only and not added to the document list.

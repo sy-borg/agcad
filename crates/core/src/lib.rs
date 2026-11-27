@@ -33,6 +33,7 @@ pub mod pattern;
 pub mod pick;
 pub mod plane;
 pub mod primitives;
+pub mod print;
 mod rebuild;
 pub mod refs;
 pub mod render;
@@ -53,13 +54,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use wright_protocol::{
-    Bbox, BooleanOp, Command, CommandResult, CurveMode, DocId, DocInfo, DocumentSnapshot,
-    DrawingFormat, EdgeFilter, EntityChange, EntityId, EntitySnapshot, EntitySummary, IdChange,
-    Mat4, Mesh, MirrorPlane, ParamInfo, ParameterChange, ProgramOp, ReferenceChange,
-    ReferenceCheck, ReferenceReport, Rgba, RevolveAxis, SavedParameter, Scalar, SceneDiffReport,
-    SketchConstraint, SketchElement, SketchPlane, SketchValidation, SolidValidation, SourceDoc,
-    SVec3, ValidationTotals, Vec3, WorkPlane, DOCUMENT_FORMAT, DOCUMENT_VERSION,
-    PROTOCOL_VERSION, SERVER_NAME,
+    Arrangement, Bbox, BooleanOp, Command, CommandResult, CurveMode, DocId, DocInfo,
+    DocumentSnapshot, DrawingFormat, EdgeFilter, EntityChange, EntityId, EntitySnapshot,
+    EntitySummary, IdChange, Mat4, MaterialSpec, Mesh, MirrorPlane,
+    OrientationCandidate, OrientationReport, ParamInfo, ParameterChange, ProgramOp,
+    ReferenceChange, ReferenceCheck, ReferenceReport, Rgba, RevolveAxis, SavedParameter, Scalar,
+    SceneDiffReport, SketchConstraint, SketchElement, SketchPlane, SketchValidation,
+    SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3, WorkPlane, DOCUMENT_FORMAT,
+    DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -118,6 +120,9 @@ struct Snapshot {
     instances: BTreeMap<u64, assembly::Instance>,
     program: Vec<Command>,
     params: ParamMap,
+    /// Print materials by entity id, rebuilt by replaying `set_material`
+    /// steps. Derived from the program, never saved separately.
+    materials: BTreeMap<EntityId, MaterialSpec>,
     /// Steps that replay skips.
     suppressed: std::collections::BTreeSet<usize>,
     /// Id span (next_entity before, after) of each program step in the last
@@ -322,6 +327,9 @@ pub struct Document {
     /// toggled for an A/B variant without rewriting the steps.
     suppressed: std::collections::BTreeSet<usize>,
     params: ParamMap,
+    /// Print materials by entity id, rebuilt by replaying `set_material`
+    /// steps. Derived from the program, never saved separately.
+    materials: BTreeMap<EntityId, MaterialSpec>,
     /// Provenance only: the script that produced this program, if any.
     /// Saved back out with the document; never executed on open.
     source: Option<SourceDoc>,
@@ -363,6 +371,7 @@ impl Document {
             program: Vec::new(),
             suppressed: std::collections::BTreeSet::new(),
             params: BTreeMap::new(),
+            materials: BTreeMap::new(),
             source: None,
             replaying: false,
             step: None,
@@ -414,6 +423,14 @@ impl Document {
         &mut self.instances
     }
 
+    pub(crate) fn materials(&self) -> &BTreeMap<EntityId, MaterialSpec> {
+        &self.materials
+    }
+
+    pub(crate) fn materials_mut(&mut self) -> &mut BTreeMap<EntityId, MaterialSpec> {
+        &mut self.materials
+    }
+
     /// Capture state before a mutation; clears the redo stack (standard
     /// linear-history semantics).
     fn checkpoint(&mut self) {
@@ -426,6 +443,7 @@ impl Document {
             program: self.program.clone(),
             suppressed: self.suppressed.clone(),
             params: self.params.clone(),
+            materials: self.materials.clone(),
             step_entity_ranges: self.step_entity_ranges.clone(),
             step_instance_ranges: self.step_instance_ranges.clone(),
             reference_bindings: self.reference_bindings.clone(),
@@ -449,6 +467,7 @@ impl Document {
             self.program = snap.program;
             self.suppressed = snap.suppressed;
             self.params = snap.params;
+            self.materials = snap.materials;
             self.step_entity_ranges = snap.step_entity_ranges;
             self.step_instance_ranges = snap.step_instance_ranges;
             self.reference_bindings = snap.reference_bindings;
@@ -524,6 +543,7 @@ impl Document {
         self.entities.clear();
         self.parts.clear();
         self.instances.clear();
+        self.materials.clear();
         self.next_entity = 1;
         self.next_instance = 1;
         self.replaying = true;
@@ -791,6 +811,7 @@ fn remap_command(
     match command {
         Command::Transform { entity, .. }
         | Command::SetColor { entity, .. }
+        | Command::SetMaterial { entity, .. }
         | Command::Delete { entity, .. }
         | Command::Fillet { entity, .. }
         | Command::Chamfer { entity, .. }
@@ -937,6 +958,7 @@ fn is_modeling_command(command: &Command) -> bool {
             | Command::AddMesh { .. }
             | Command::Transform { .. }
             | Command::SetColor { .. }
+            | Command::SetMaterial { .. }
             | Command::Delete { .. }
             | Command::Fillet { .. }
             | Command::Chamfer { .. }
@@ -1105,6 +1127,7 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::AddMesh { doc: d, .. }
         | Command::Transform { doc: d, .. }
         | Command::SetColor { doc: d, .. }
+        | Command::SetMaterial { doc: d, .. }
         | Command::Delete { doc: d, .. }
         | Command::Fillet { doc: d, .. }
         | Command::Chamfer { doc: d, .. }
@@ -1157,6 +1180,9 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Edges { doc: d, .. }
         | Command::Primitives { doc: d, .. }
         | Command::Validate { doc: d, .. }
+        | Command::SuggestOrientation { doc: d, .. }
+        | Command::Arrange { doc: d, .. }
+        | Command::Fit { doc: d, .. }
         | Command::DiffScene { doc: d, .. }
         | Command::GetProgram { doc: d }
         | Command::ExportStl { doc: d, .. }
@@ -1169,6 +1195,7 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::CloseDocument { doc: d } => *d = doc,
         Command::Initialize
         | Command::ListDocuments
+        | Command::ListMaterials
         | Command::CreateDocument { .. }
         | Command::OpenDocument { .. } => {},
         Command::Batch { commands, .. } => {
@@ -1225,6 +1252,11 @@ impl Engine {
                         entity_count: d.entities.len(),
                     })
                     .collect(),
+            }),
+
+            Command::ListMaterials => Ok(CommandResult::Materials {
+                materials: print::material_presets(),
+                currency: print::CURRENCY.to_string(),
             }),
 
             Command::CreateDocument { name, doc: wanted } => {
@@ -1406,6 +1438,7 @@ impl Engine {
             | Command::AddMesh { .. }
             | Command::Transform { .. }
             | Command::SetColor { .. }
+            | Command::SetMaterial { .. }
             | Command::Delete { .. }
             | Command::Fillet { .. }
             | Command::Chamfer { .. }
@@ -1443,26 +1476,7 @@ impl Engine {
             | Command::Mate { .. } => {
                 let doc = doc_of(&command).expect("modeling commands always carry a doc");
                 let d = self.doc_mut(doc)?;
-                d.checkpoint();
-                let step = d.program.len();
-                d.program.push(command.clone());
-                d.suppressed.remove(&step);
-                d.step_entity_ranges.resize(step + 1, (0, 0));
-                d.step_instance_ranges.resize(step + 1, (0, 0));
-                let before_entity = d.next_entity;
-                let before_instance = d.next_instance;
-                d.step = Some(step);
-                let result = exec(d, &command);
-                d.step = None;
-                d.step_entity_ranges[step] = (before_entity, d.next_entity);
-                d.step_instance_ranges[step] = (before_instance, d.next_instance);
-                match result {
-                    Ok(result) => Ok(result),
-                    Err(e) => {
-                        d.rollback();
-                        Err(e)
-                    },
-                }
+                execute_modeling(d, &command)
             },
 
             // --- parameters: change value, replay the program -----------
@@ -1554,6 +1568,7 @@ impl Engine {
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
+                    materials: std::mem::take(&mut d.materials),
                     suppressed: std::mem::take(&mut d.suppressed),
                     step_entity_ranges: std::mem::take(&mut d.step_entity_ranges),
                     step_instance_ranges: std::mem::take(&mut d.step_instance_ranges),
@@ -1566,6 +1581,7 @@ impl Engine {
                 d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
+                d.materials = snap.materials;
                 d.suppressed = snap.suppressed;
                 d.step_entity_ranges = snap.step_entity_ranges;
                 d.step_instance_ranges = snap.step_instance_ranges;
@@ -1584,6 +1600,7 @@ impl Engine {
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
+                    materials: std::mem::take(&mut d.materials),
                     suppressed: std::mem::take(&mut d.suppressed),
                     step_entity_ranges: std::mem::take(&mut d.step_entity_ranges),
                     step_instance_ranges: std::mem::take(&mut d.step_instance_ranges),
@@ -1596,6 +1613,7 @@ impl Engine {
                 d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
+                d.materials = snap.materials;
                 d.suppressed = snap.suppressed;
                 d.step_entity_ranges = snap.step_entity_ranges;
                 d.step_instance_ranges = snap.step_instance_ranges;
@@ -1613,9 +1631,15 @@ impl Engine {
 
             Command::BillOfMaterials { doc } => {
                 let d = self.doc(*doc)?;
+                let rows = assembly::bill_of_materials(d);
+                let total_mass_g = rows.iter().map(|r| r.mass_g).sum();
+                let total_cost = rows.iter().map(|r| r.cost).sum();
                 Ok(CommandResult::Bom {
                     doc: *doc,
-                    rows: assembly::bill_of_materials(d),
+                    rows,
+                    total_mass_g,
+                    total_cost,
+                    currency: print::CURRENCY.to_string(),
                 })
             },
 
@@ -1723,7 +1747,15 @@ impl Engine {
                 })
             },
 
-            Command::Validate { doc, entities, min_wall_mm } => {
+            Command::Validate {
+                doc,
+                entities,
+                min_wall_mm,
+                overhang_angle_deg,
+                layer_height_mm,
+                min_feature_mm,
+                bridge_angle_deg,
+            } => {
                 if let Some(threshold) = min_wall_mm {
                     if !threshold.is_finite() || *threshold <= 0.0 {
                         return Err(Error::Invalid(
@@ -1733,6 +1765,37 @@ impl Engine {
                         ));
                     }
                 }
+                let settings = print::Settings {
+                    overhang_angle_deg: validate_print_angle(
+                        "overhang_angle_deg",
+                        *overhang_angle_deg,
+                        print::DEFAULT_OVERHANG_DEG,
+                    )?,
+                    bridge_angle_deg: validate_print_angle(
+                        "bridge_angle_deg",
+                        *bridge_angle_deg,
+                        print::DEFAULT_BRIDGE_DEG,
+                    )?,
+                    layer_height_mm: validate_positive(
+                        "layer_height_mm",
+                        *layer_height_mm,
+                        print::DEFAULT_LAYER_MM,
+                    )?,
+                    min_feature_mm: *min_feature_mm,
+                };
+                if let Some(t) = min_feature_mm {
+                    if !t.is_finite() || *t <= 0.0 {
+                        return Err(Error::Invalid(
+                            "min_feature_mm must be a finite value > 0 (hint: omit it to report \
+                             the estimate without a pass/fail threshold)"
+                                .into(),
+                        ));
+                    }
+                }
+                let print_requested = overhang_angle_deg.is_some()
+                    || layer_height_mm.is_some()
+                    || min_feature_mm.is_some()
+                    || bridge_angle_deg.is_some();
                 let d = self.doc(*doc)?;
                 let ids: Vec<EntityId> = match entities {
                     Some(ids) => ids.clone(),
@@ -1762,7 +1825,7 @@ impl Engine {
                         }
                         sketches.push(report);
                     } else {
-                        let report = solid_validation(e, *min_wall_mm);
+                        let report = solid_validation(e, *min_wall_mm, &settings);
                         if !report.watertight {
                             warnings.push(format!(
                                 "solid {} '{}' is not watertight ({} open, {} non-manifold \
@@ -1809,6 +1872,94 @@ impl Engine {
                                 report.entity, report.name
                             ));
                         }
+                        if print_requested {
+                            let p = &report.print;
+                            if p.overhang_area > 0.0 {
+                                warnings.push(format!(
+                                    "solid {} '{}': {:.2} mm^2 of overhang at {} deg ({:.1}% of \
+                                     the surface; hint: reorient with suggest_orientation or add \
+                                     supports)",
+                                    report.entity,
+                                    report.name,
+                                    p.overhang_area,
+                                    fmt_num(p.overhang_angle_deg),
+                                    p.overhang_fraction * 100.0
+                                ));
+                            }
+                            if let Some(span) = p.max_bridge_span {
+                                warnings.push(format!(
+                                    "solid {} '{}': bridge span {:.2} mm across {:.2} mm^2 of \
+                                     ceiling (hint: keep it below the printer's bridging limit or \
+                                     add supports)",
+                                    report.entity, report.name, span, p.bridge_area
+                                ));
+                            }
+                            if p.first_layer.below_bed {
+                                warnings.push(format!(
+                                    "solid {} '{}': lowest point is {:.2} mm below the bed (hint: \
+                                     translate it up, or arrange it on the bed)",
+                                    report.entity,
+                                    report.name,
+                                    -p.first_layer.z_min
+                                ));
+                            } else if p.first_layer.floating {
+                                warnings.push(format!(
+                                    "solid {} '{}': floats {:.2} mm above the bed with no first-layer \
+                                     contact (hint: supports, or arrange it on the bed)",
+                                    report.entity, report.name, p.first_layer.z_min
+                                ));
+                            } else if p.first_layer.contact_area <= 0.0 {
+                                warnings.push(format!(
+                                    "solid {} '{}': no downward first-layer area; it meets the bed \
+                                     only at an edge or point",
+                                    report.entity, report.name
+                                ));
+                            }
+                            if p.island_count > 0 {
+                                warnings.push(format!(
+                                    "solid {} '{}': {} extra shell(s), {} floating island(s) \
+                                     (hint: boolean the pieces together, or orient so each island \
+                                     is supported)",
+                                    report.entity,
+                                    report.name,
+                                    p.island_count,
+                                    p.floating_island_count
+                                ));
+                            }
+                            if p.trapped_volume > 0.0 {
+                                let hole = p
+                                    .cavities
+                                    .iter()
+                                    .filter_map(|c| c.drain_hole_mm)
+                                    .fold(0.0_f64, f64::max);
+                                warnings.push(format!(
+                                    "solid {} '{}': {:.2} mm^3 trapped in a closed cavity (hint: \
+                                     add a drainage hole, about {:.1} mm diameter, to the cavity \
+                                     wall)",
+                                    report.entity, report.name, p.trapped_volume, hole
+                                ));
+                            }
+                            if p.cupped_volume > 0.0 {
+                                warnings.push(format!(
+                                    "solid {} '{}': {:.2} mm^3 sits in {} cup(s) (hint: for resin, \
+                                     add drainage or reorient; FDM can print cups)",
+                                    report.entity,
+                                    report.name,
+                                    p.cupped_volume,
+                                    p.cups.len()
+                                ));
+                            }
+                            if p.small_feature {
+                                warnings.push(format!(
+                                    "solid {} '{}' has a feature thinner than {} mm (estimated \
+                                     {:.3} mm; hint: thicken it or lower min_feature_mm)",
+                                    report.entity,
+                                    report.name,
+                                    fmt_num(min_feature_mm.unwrap_or(0.0)),
+                                    p.min_feature.unwrap_or(0.0)
+                                ));
+                            }
+                        }
                         solids.push(report);
                     }
                 }
@@ -1821,15 +1972,194 @@ impl Engine {
                     }
                 }
                 let ok = solids.iter().all(|s| s.ok) && sketches.iter().all(|s| s.ok);
+                let printable = solids.iter().all(|s| s.printable);
                 Ok(CommandResult::Validated {
                     doc: *doc,
                     ok,
+                    printable,
                     solids,
                     sketches,
                     totals,
                     warnings,
                     references,
                 })
+            },
+
+            Command::SuggestOrientation {
+                doc,
+                entities,
+                overhang_angle_deg,
+                layer_height_mm,
+                bed_width_mm,
+                bed_height_mm,
+                limit,
+            } => {
+                let settings = print::Settings {
+                    overhang_angle_deg: validate_print_angle(
+                        "overhang_angle_deg",
+                        *overhang_angle_deg,
+                        print::DEFAULT_OVERHANG_DEG,
+                    )?,
+                    layer_height_mm: validate_positive(
+                        "layer_height_mm",
+                        *layer_height_mm,
+                        print::DEFAULT_LAYER_MM,
+                    )?,
+                    ..print::Settings::default()
+                };
+                let bed = [
+                    validate_positive(
+                        "bed_width_mm",
+                        *bed_width_mm,
+                        print::DEFAULT_BED_MM[0],
+                    )?,
+                    validate_positive(
+                        "bed_height_mm",
+                        *bed_height_mm,
+                        print::DEFAULT_BED_MM[1],
+                    )?,
+                ];
+                let limit = limit.unwrap_or(8);
+                if limit == 0 {
+                    return Err(Error::Invalid(
+                        "limit must be at least 1 (hint: 8 shows the useful alternatives)"
+                            .into(),
+                    ));
+                }
+                let limit = limit.min(32);
+                let d = self.doc(*doc)?;
+                let ids = selected_solids(d, *doc, entities.as_deref())?;
+                let mut reports = Vec::with_capacity(ids.len());
+                let mut warnings = Vec::new();
+                for id in ids {
+                    let e = d
+                        .entities
+                        .get(&id)
+                        .ok_or(Error::UnknownEntity { doc: *doc, entity: id })?;
+                    if matches!(e.shape, Shape::PartMember { .. }) {
+                        warnings.push(format!(
+                            "entity {id} '{}' is an instance member; transform the instance with \
+                             move_instance instead of applying this orientation directly",
+                            e.name
+                        ));
+                    }
+                    reports.push(suggest_for_entity(e, &settings, bed, limit));
+                }
+                Ok(CommandResult::OrientationSuggested {
+                    doc: *doc,
+                    overhang_angle_deg: settings.overhang_angle_deg,
+                    layer_height_mm: settings.layer_height_mm,
+                    reports,
+                    warnings,
+                })
+            },
+
+            Command::Arrange {
+                doc,
+                entities,
+                bed_width_mm,
+                bed_height_mm,
+                spacing_mm,
+                center,
+            } => {
+                let bed = [
+                    validate_positive(
+                        "bed_width_mm",
+                        *bed_width_mm,
+                        print::DEFAULT_BED_MM[0],
+                    )?,
+                    validate_positive(
+                        "bed_height_mm",
+                        *bed_height_mm,
+                        print::DEFAULT_BED_MM[1],
+                    )?,
+                ];
+                let spacing = spacing_mm.unwrap_or(2.0);
+                if !spacing.is_finite() || spacing < 0.0 {
+                    return Err(Error::Invalid(
+                        "spacing_mm must be a finite value >= 0".into(),
+                    ));
+                }
+                let center = center.unwrap_or(true);
+                let plans = {
+                    let d = self.doc(*doc)?;
+                    arrange_plans(
+                        d,
+                        *doc,
+                        entities.as_deref(),
+                        bed,
+                        spacing,
+                        center,
+                    )?
+                };
+                if !plans.is_empty() {
+                    let d = self.doc_mut(*doc)?;
+                    d.checkpoint();
+                    for plan in &plans {
+                        append_modeling(
+                            d,
+                            &Command::Transform {
+                                doc: *doc,
+                                entity: plan.entity,
+                                translation: Some([
+                                    Scalar::Number(plan.translation[0]),
+                                    Scalar::Number(plan.translation[1]),
+                                    Scalar::Number(plan.translation[2]),
+                                ]),
+                                rotation_deg: None,
+                                scale: None,
+                            },
+                        )?;
+                    }
+                }
+                let placements: Vec<Arrangement> = plans
+                    .iter()
+                    .map(|p| Arrangement {
+                        entity: p.entity,
+                        name: p.name.clone(),
+                        from: p.from,
+                        to: p.to,
+                        translation: p.translation,
+                    })
+                    .collect();
+                let used_bbox = union_bbox(placements.iter().map(|p| p.to));
+                let fits = used_bbox.is_none_or(|b| {
+                    b.min[0] >= -1e-6
+                        && b.min[1] >= -1e-6
+                        && b.max[0] <= bed[0] + 1e-6
+                        && b.max[1] <= bed[1] + 1e-6
+                        && b.min[2] >= -1e-6
+                });
+                Ok(CommandResult::Arranged {
+                    doc: *doc,
+                    bed,
+                    spacing_mm: spacing,
+                    placements,
+                    used_bbox,
+                    fits,
+                })
+            },
+
+            Command::Fit {
+                doc,
+                class,
+                nominal_mm,
+                hole_mm,
+                material,
+                printer_tolerance_mm,
+                hole_shrink_mm,
+                elephant_foot_mm,
+            } => {
+                let report = print::fit(
+                    *class,
+                    *nominal_mm,
+                    *hole_mm,
+                    material.as_deref(),
+                    *printer_tolerance_mm,
+                    *hole_shrink_mm,
+                    *elephant_foot_mm,
+                )?;
+                Ok(CommandResult::FitComputed { doc: *doc, report })
             },
 
             Command::DiffScene { doc, against, path } => {
@@ -2299,8 +2629,43 @@ impl Engine {
     }
 }
 
+/// Checkpoint, append a modeling command to the program, run it, and roll
+/// back the whole step if it fails.
+fn execute_modeling(d: &mut Document, command: &Command) -> Result<CommandResult> {
+    d.checkpoint();
+    append_modeling(d, command)
+}
+
+/// Append and run one modeling command against the current checkpoint.
+/// The caller owns the checkpoint so several steps can undo as one action.
+fn append_modeling(d: &mut Document, command: &Command) -> Result<CommandResult> {
+    let step = d.program.len();
+    d.program.push(command.clone());
+    d.suppressed.remove(&step);
+    d.step_entity_ranges.resize(step + 1, (0, 0));
+    d.step_instance_ranges.resize(step + 1, (0, 0));
+    let before_entity = d.next_entity;
+    let before_instance = d.next_instance;
+    d.step = Some(step);
+    let result = exec(d, command);
+    d.step = None;
+    d.step_entity_ranges[step] = (before_entity, d.next_entity);
+    d.step_instance_ranges[step] = (before_instance, d.next_instance);
+    match result {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            d.rollback();
+            Err(e)
+        },
+    }
+}
+
 /// One solid's trust report (see [`Command::Validate`]).
-fn solid_validation(entity: &Entity, min_wall_mm: Option<f64>) -> SolidValidation {
+fn solid_validation(
+    entity: &Entity,
+    min_wall_mm: Option<f64>,
+    settings: &print::Settings,
+) -> SolidValidation {
     let world = transform_mesh(&entity.mesh, &entity.transform());
     let check = validate::check_solid(&world);
     let thin = min_wall_mm.is_some_and(|t| check.min_wall.is_some_and(|w| w < t));
@@ -2309,6 +2674,11 @@ fn solid_validation(entity: &Entity, min_wall_mm: Option<f64>) -> SolidValidatio
         && check.self_intersections == 0
         && check.volume > 0.0
         && !thin;
+    let print = print::with_feature_at(
+        print::analyze(&world, check.min_wall, settings),
+        check.min_wall_at,
+    );
+    let printable = ok && print.printable;
     SolidValidation {
         entity: entity.id,
         name: entity.name.clone(),
@@ -2326,8 +2696,288 @@ fn solid_validation(entity: &Entity, min_wall_mm: Option<f64>) -> SolidValidatio
         min_wall: check.min_wall,
         min_wall_at: check.min_wall_at,
         thin,
+        printable,
+        print,
         signature: validate::entity_signature(entity),
     }
+}
+
+fn validate_print_angle(name: &str, value: Option<f64>, default: f64) -> Result<f64> {
+    let v = value.unwrap_or(default);
+    if !v.is_finite() || !(0.0..=90.0).contains(&v) {
+        return Err(Error::Invalid(format!(
+            "{name} must be between 0 and 90 degrees (hint: 45 is the usual FDM overhang limit)"
+        )));
+    }
+    Ok(v)
+}
+
+fn validate_positive(name: &str, value: Option<f64>, default: f64) -> Result<f64> {
+    let v = value.unwrap_or(default);
+    if !v.is_finite() || v <= 0.0 {
+        return Err(Error::Invalid(format!(
+            "{name} must be a finite value > 0 (hint: layer_height_mm is 0.2 for a typical FDM \
+             printer)"
+        )));
+    }
+    Ok(v)
+}
+
+fn fmt_num(v: f64) -> String {
+    let s = format!("{v:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// One solid selected for orientation or bed layout.
+fn selected_solids(
+    d: &Document,
+    doc: DocId,
+    entities: Option<&[EntityId]>,
+) -> Result<Vec<EntityId>> {
+    let ids: Vec<EntityId> = match entities {
+        Some(ids) => ids.to_vec(),
+        None => d
+            .entities
+            .iter()
+            .filter(|(_, e)| !matches!(e.shape, Shape::Sketch { .. }))
+            .map(|(id, _)| *id)
+            .collect(),
+    };
+    for id in &ids {
+        let e = d
+            .entities
+            .get(id)
+            .ok_or(Error::UnknownEntity { doc, entity: *id })?;
+        if matches!(e.shape, Shape::Sketch { .. }) {
+            return Err(Error::Invalid(format!(
+                "entity {id} ('{}') is a sketch, not a printable solid (hint: extrude or revolve \
+                 it first)",
+                e.name
+            )));
+        }
+    }
+    Ok(ids)
+}
+
+/// Score the six machine axes plus every planar face as a candidate down
+/// direction. Returning absolute rotation/translation lets the caller apply
+/// the result with one `transform` command.
+fn suggest_for_entity(
+    e: &Entity,
+    settings: &print::Settings,
+    bed: [f64; 2],
+    limit: usize,
+) -> OrientationReport {
+    let world = transform_mesh(&e.mesh, &e.transform());
+    let mut directions: Vec<(Vec3, String)> = Vec::new();
+    for (d, label) in [
+        ([0.0, 0.0, -1.0], "machine -Z"),
+        ([0.0, 0.0, 1.0], "machine +Z"),
+        ([1.0, 0.0, 0.0], "machine +X"),
+        ([-1.0, 0.0, 0.0], "machine -X"),
+        ([0.0, 1.0, 0.0], "machine +Y"),
+        ([0.0, -1.0, 0.0], "machine -Y"),
+    ] {
+        push_direction(&mut directions, d, label);
+    }
+    if let Ok(topology) = refs::topology(&world, e.id, 30.0) {
+        let mut faces: Vec<_> = topology.faces.iter().collect();
+        faces.sort_by(|a, b| {
+            b.area
+                .total_cmp(&a.area)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        for face in faces {
+            push_direction(
+                &mut directions,
+                face.normal,
+                format!("face #{}", face.id).as_str(),
+            );
+        }
+    }
+
+    let current = mat4::rotation_xyz_deg(e.rotation_deg);
+    let mut candidates = Vec::new();
+    for (down, label) in directions {
+        let Some(align) = mat4::rotation_between(down, [0.0, 0.0, -1.0]) else {
+            continue;
+        };
+        let rotation = mat4::mul(&align, &current);
+        let rotation_deg = mat4::euler_xyz_deg(&rotation);
+        let oriented = transform_mesh(
+            &e.mesh,
+            &mat4::compose([0.0; 3], rotation_deg, e.scale),
+        );
+        let bbox = world_bbox(&oriented, &mat4::identity());
+        let width = (bbox.max[0] - bbox.min[0]).max(0.0);
+        let depth = (bbox.max[1] - bbox.min[1]).max(0.0);
+        let height = (bbox.max[2] - bbox.min[2]).max(0.0);
+        let translation = [
+            bed[0] / 2.0 - (bbox.min[0] + bbox.max[0]) / 2.0,
+            bed[1] / 2.0 - (bbox.min[1] + bbox.max[1]) / 2.0,
+            -bbox.min[2],
+        ];
+        // Analyze with the lowest point on the bed so "contact" is real.
+        let placed = transform_mesh(&oriented, &mat4::translation([0.0, 0.0, -bbox.min[2]]));
+        let report = print::analyze(&placed, None, settings);
+        let footprint = width * depth;
+        let stable = report.first_layer.contact_area > (footprint * 0.01).max(1e-3);
+        let fits_bed = width <= bed[0] + 1e-6 && depth <= bed[1] + 1e-6;
+        let score = report.overhang_fraction * 100.0
+            + height
+            + footprint / 1000.0
+            + if stable { 0.0 } else { 100.0 }
+            + if fits_bed { 0.0 } else { 100.0 };
+        candidates.push(OrientationCandidate {
+            rank: 0,
+            label,
+            rotation_deg,
+            translation,
+            score,
+            stable,
+            height,
+            footprint,
+            contact_area: report.first_layer.contact_area,
+            overhang_area: report.overhang_area,
+            overhang_fraction: report.overhang_fraction,
+            max_bridge_span: report.max_bridge_span,
+            fits_bed,
+        });
+    }
+    candidates.sort_by(|a, b| {
+        a.score
+            .total_cmp(&b.score)
+            .then_with(|| a.height.total_cmp(&b.height))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    candidates.truncate(limit);
+    for (i, c) in candidates.iter_mut().enumerate() {
+        c.rank = i + 1;
+    }
+    let best = candidates.first().cloned();
+    OrientationReport {
+        entity: e.id,
+        name: e.name.clone(),
+        best,
+        candidates,
+    }
+}
+
+fn push_direction(directions: &mut Vec<(Vec3, String)>, normal: Vec3, label: &str) {
+    let n = edges::normalize(normal);
+    if edges::dot(n, n) < 0.5 {
+        return;
+    }
+    if directions
+        .iter()
+        .any(|(existing, _)| edges::dot(edges::normalize(*existing), n) > 0.9995)
+    {
+        return;
+    }
+    directions.push((normal, label.to_string()));
+}
+
+struct PlannedMove {
+    entity: EntityId,
+    name: String,
+    from: Bbox,
+    to: Bbox,
+    translation: Vec3,
+}
+
+/// Pack selected solids into rows on the bed. Placement only translates;
+/// rotation stays the caller's choice (use `suggest_orientation` first).
+fn arrange_plans(
+    d: &Document,
+    doc: DocId,
+    entities: Option<&[EntityId]>,
+    bed: [f64; 2],
+    spacing: f64,
+    center: bool,
+) -> Result<Vec<PlannedMove>> {
+    let ids = selected_solids(d, doc, entities)?;
+    let mut items: Vec<(EntityId, String, Bbox)> = Vec::with_capacity(ids.len());
+    for id in ids {
+        let e = d
+            .entities
+            .get(&id)
+            .ok_or(Error::UnknownEntity { doc, entity: id })?;
+        items.push((
+            id,
+            e.name.clone(),
+            world_bbox(&e.mesh, &e.transform()),
+        ));
+    }
+    // Larger footprints first reads as a shelf packer and is deterministic.
+    items.sort_by(|a, b| {
+        let aw = a.2.max[0] - a.2.min[0];
+        let bw = b.2.max[0] - b.2.min[0];
+        bw.total_cmp(&aw)
+            .then_with(|| {
+                let ad = a.2.max[1] - a.2.min[1];
+                let bd = b.2.max[1] - b.2.min[1];
+                bd.total_cmp(&ad)
+            })
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut row_depth = 0.0;
+    let mut plans = Vec::with_capacity(items.len());
+    for (id, name, from) in items {
+        let w = (from.max[0] - from.min[0]).max(0.0);
+        let depth = (from.max[1] - from.min[1]).max(0.0);
+        if x > 0.0 && x + w > bed[0] + 1e-9 {
+            x = 0.0;
+            y += row_depth + spacing;
+            row_depth = 0.0;
+        }
+        let translation = [x - from.min[0], y - from.min[1], -from.min[2]];
+        let to = translate_bbox(from, translation);
+        x += w + spacing;
+        row_depth = row_depth.max(depth);
+        plans.push(PlannedMove {
+            entity: id,
+            name,
+            from,
+            to,
+            translation,
+        });
+    }
+    if center {
+        if let Some(used) = union_bbox(plans.iter().map(|p| p.to)) {
+            let dx = (bed[0] - (used.max[0] - used.min[0])) / 2.0 - used.min[0];
+            let dy = (bed[1] - (used.max[1] - used.min[1])) / 2.0 - used.min[1];
+            for plan in &mut plans {
+                plan.translation[0] += dx;
+                plan.translation[1] += dy;
+                plan.to = translate_bbox(plan.to, [dx, dy, 0.0]);
+            }
+        }
+    }
+    Ok(plans)
+}
+
+fn translate_bbox(b: Bbox, by: Vec3) -> Bbox {
+    Bbox {
+        min: [b.min[0] + by[0], b.min[1] + by[1], b.min[2] + by[2]],
+        max: [b.max[0] + by[0], b.max[1] + by[1], b.max[2] + by[2]],
+    }
+}
+
+fn union_bbox(items: impl Iterator<Item = Bbox>) -> Option<Bbox> {
+    let mut out: Option<Bbox> = None;
+    for b in items {
+        out = Some(match out {
+            None => b,
+            Some(u) => Bbox {
+                min: [u.min[0].min(b.min[0]), u.min[1].min(b.min[1]), u.min[2].min(b.min[2])],
+                max: [u.max[0].max(b.max[0]), u.max[1].max(b.max[1]), u.max[2].max(b.max[2])],
+            },
+        });
+    }
+    out
 }
 
 /// One sketch's trust report: solver status and whether it can be extruded.
@@ -2748,6 +3398,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::AddMesh { doc, .. }
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
+        | Command::SetMaterial { doc, .. }
         | Command::Delete { doc, .. }
         | Command::Fillet { doc, .. }
         | Command::Chamfer { doc, .. }
@@ -2796,6 +3447,9 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Edges { doc, .. }
         | Command::Primitives { doc, .. }
         | Command::Validate { doc, .. }
+        | Command::SuggestOrientation { doc, .. }
+        | Command::Arrange { doc, .. }
+        | Command::Fit { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::ExportStl { doc, .. }
         | Command::Export3mf { doc, .. }
@@ -2917,6 +3571,29 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
         Command::SetColor { doc, entity, color } => {
             d.entity_mut(*entity)?.color = *color;
             Ok(CommandResult::Transformed { doc: *doc, entity: *entity })
+        },
+
+        Command::SetMaterial {
+            doc,
+            entity,
+            material,
+            density_g_cm3,
+            cost_per_kg,
+        } => {
+            let spec = print::resolve_material(material, *density_g_cm3, *cost_per_kg)?;
+            {
+                let e = d
+                    .entities
+                    .get(entity)
+                    .ok_or(Error::UnknownEntity { doc: *doc, entity: *entity })?;
+                ensure_solid(e, "set_material")?;
+            }
+            d.materials.insert(*entity, spec.clone());
+            Ok(CommandResult::MaterialSet {
+                doc: *doc,
+                entity: *entity,
+                material: spec,
+            })
         },
 
         Command::Boolean { doc, op, entities, name, color } => {
@@ -3882,6 +4559,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             if d.entities.remove(entity).is_none() {
                 return Err(Error::UnknownEntity { doc: *doc, entity: *entity });
             }
+            d.materials.remove(entity);
             // Deleting a sketch also removes the solids built from it, and
             // deleting a solid removes its pattern/mirror copies — otherwise
             // replay would hit a dangling reference.
@@ -3900,6 +4578,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 .collect();
             for id in dependents {
                 d.entities.remove(&id);
+                d.materials.remove(&id);
             }
             Ok(CommandResult::Deleted { doc: *doc, entity: *entity })
         },
@@ -7531,7 +8210,7 @@ mod tests {
 
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"format\": \"wright-document\""));
-        assert!(text.contains("\"version\": 6"));
+        assert!(text.contains("\"version\": 7"));
         assert!(text.contains("print('hi')"), "the embedded source is preserved");
         // The file is the program, not the geometry.
         assert!(!text.contains("\"mesh\""));
@@ -8097,7 +8776,7 @@ mod tests {
         };
 
         match e
-            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(5.0) })
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(5.0), overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None })
             .unwrap()
         {
             CommandResult::Validated { ok, solids, sketches, totals, warnings, .. } => {
@@ -8142,7 +8821,7 @@ mod tests {
         let mut e = engine();
         let id = add_box(&mut e, [0.0, 0.0, 0.0], [20.0, 20.0, 1.0]);
         match e
-            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(2.0) })
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(2.0), overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None })
             .unwrap()
         {
             CommandResult::Validated { ok, solids, warnings, .. } => {
@@ -8161,7 +8840,7 @@ mod tests {
         }
 
         let err = e
-            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(0.0) })
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(0.0), overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None })
             .unwrap_err();
         assert!(err.to_string().contains("min_wall_mm"), "{err}");
     }
@@ -8171,7 +8850,7 @@ mod tests {
         let mut e = engine();
         let (sketch, lines) = rect_sketch(&mut e, 40.0, 30.0);
         match e
-            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None })
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None })
             .unwrap()
         {
             CommandResult::Validated { ok, solids, sketches, .. } => {
@@ -8191,7 +8870,7 @@ mod tests {
         e.execute(Command::DeleteSketchElement { doc: 1, sketch, element: lines[2] })
             .unwrap();
         match e
-            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None })
+            .execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None })
             .unwrap()
         {
             CommandResult::Validated { ok, sketches, warnings, .. } => {
@@ -8250,7 +8929,7 @@ mod tests {
         .unwrap();
 
         match e
-            .execute(Command::Validate { doc: 1, entities: Some(vec![fused]), min_wall_mm: Some(1.5) })
+            .execute(Command::Validate { doc: 1, entities: Some(vec![fused]), min_wall_mm: Some(1.5), overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None })
             .unwrap()
         {
             CommandResult::Validated { ok, solids, warnings, .. } => {
@@ -8261,6 +8940,289 @@ mod tests {
                 assert!(wall > 1.5, "min wall {wall} should ignore fin slivers");
                 assert!(!s.thin);
                 assert!(ok, "{warnings:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_reports_print_preflight_for_a_bed_aligned_box() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0, 0.0, 5.0], [20.0, 20.0, 10.0]);
+        match e
+            .execute(Command::Validate {
+                doc: 1,
+                entities: None,
+                min_wall_mm: None,
+                overhang_angle_deg: Some(45.0),
+                layer_height_mm: Some(0.2),
+                min_feature_mm: Some(5.0),
+                bridge_angle_deg: None,
+            })
+            .unwrap()
+        {
+            CommandResult::Validated { ok, printable, solids, warnings, .. } => {
+                assert!(ok && printable, "{warnings:?}");
+                let s = &solids[0];
+                assert_eq!(s.entity, id);
+                assert!(s.print.first_layer.on_bed);
+                assert!((s.print.first_layer.contact_area - 400.0).abs() < 0.01);
+                assert_eq!(s.print.overhang_area, 0.0);
+                assert_eq!(s.print.trapped_volume, 0.0);
+                assert!(warnings.is_empty(), "{warnings:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn orientation_prefers_the_largest_face_and_applies_with_transform() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0, 0.0, 15.0], [10.0, 20.0, 30.0]);
+        let best = match e
+            .execute(Command::SuggestOrientation {
+                doc: 1,
+                entities: None,
+                overhang_angle_deg: None,
+                layer_height_mm: None,
+                bed_width_mm: None,
+                bed_height_mm: None,
+                limit: None,
+            })
+            .unwrap()
+        {
+            CommandResult::OrientationSuggested { reports, .. } => {
+                let report = &reports[0];
+                assert_eq!(report.entity, id);
+                assert!(report.candidates.len() > 1);
+                let best = report.best.clone().expect("at least one candidate");
+                assert!(best.stable);
+                assert!((best.height - 10.0).abs() < 1e-3, "{best:?}");
+                assert!((best.contact_area - 600.0).abs() < 0.1, "{best:?}");
+                best
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::Transform {
+            doc: 1,
+            entity: id,
+            translation: Some([
+                num(best.translation[0]),
+                num(best.translation[1]),
+                num(best.translation[2]),
+            ]),
+            rotation_deg: Some([
+                num(best.rotation_deg[0]),
+                num(best.rotation_deg[1]),
+                num(best.rotation_deg[2]),
+            ]),
+            scale: None,
+        })
+        .unwrap();
+        let snap = entity_snapshot(&mut e, id);
+        let height = snap.world_bbox.max[2] - snap.world_bbox.min[2];
+        assert!((height - 10.0).abs() < 1e-2, "{:?}", snap.world_bbox);
+        assert!(snap.world_bbox.min[2].abs() < 1e-2);
+    }
+
+    #[test]
+    fn arrange_packs_the_bed_and_undoes_as_one_action() {
+        let mut e = engine();
+        let ids = [
+            add_box(&mut e, [0.0, 0.0, 5.0], [10.0, 10.0, 10.0]),
+            add_box(&mut e, [0.0, 0.0, 5.0], [10.0, 10.0, 10.0]),
+            add_box(&mut e, [0.0, 0.0, 5.0], [10.0, 10.0, 10.0]),
+        ];
+        let before: Vec<_> = ids.iter().map(|&id| entity_snapshot(&mut e, id).world_bbox).collect();
+        let placements = match e
+            .execute(Command::Arrange {
+                doc: 1,
+                entities: None,
+                bed_width_mm: Some(100.0),
+                bed_height_mm: Some(100.0),
+                spacing_mm: Some(2.0),
+                center: Some(true),
+            })
+            .unwrap()
+        {
+            CommandResult::Arranged { placements, fits, used_bbox, .. } => {
+                assert!(fits, "{used_bbox:?}");
+                assert_eq!(placements.len(), 3);
+                placements
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        for p in &placements {
+            assert!(p.to.min[2].abs() < 1e-6, "{p:?}");
+        }
+        for (i, a) in placements.iter().enumerate() {
+            for b in &placements[i + 1..] {
+                let overlap = a.to.min[0] < b.to.max[0] - 1e-6
+                    && b.to.min[0] < a.to.max[0] - 1e-6
+                    && a.to.min[1] < b.to.max[1] - 1e-6
+                    && b.to.min[1] < a.to.max[1] - 1e-6;
+                assert!(!overlap, "{a:?} overlaps {b:?}");
+            }
+        }
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        for (id, want) in ids.iter().zip(before) {
+            let got = entity_snapshot(&mut e, *id).world_bbox;
+            assert!((got.min[0] - want.min[0]).abs() < 1e-6, "{got:?} vs {want:?}");
+            assert!((got.min[1] - want.min[1]).abs() < 1e-6, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn validate_finds_a_closed_cavity_and_suggests_drainage() {
+        let mut e = engine();
+        let outer = add_box(&mut e, [0.0, 0.0, 20.0], [40.0, 40.0, 40.0]);
+        let inner = add_box(&mut e, [0.0, 0.0, 20.0], [20.0, 20.0, 20.0]);
+        let hollow = match e
+            .execute(Command::Boolean {
+                doc: 1,
+                op: BooleanOp::Difference,
+                entities: vec![outer, inner],
+                name: Some("hollow".into()),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        match e
+            .execute(Command::Validate {
+                doc: 1,
+                entities: Some(vec![hollow]),
+                min_wall_mm: None,
+                overhang_angle_deg: Some(45.0),
+                layer_height_mm: None,
+                min_feature_mm: None,
+                bridge_angle_deg: None,
+            })
+            .unwrap()
+        {
+            CommandResult::Validated { ok, printable, solids, warnings, .. } => {
+                assert!(ok);
+                assert!(!printable, "a closed cavity needs a drainage hole");
+                let p = &solids[0].print;
+                assert_eq!(p.shells.len(), 2, "{p:?}");
+                assert_eq!(p.cavities.len(), 1, "{p:?}");
+                assert!((p.trapped_volume - 8000.0).abs() < 1.0, "{p:?}");
+                assert!(p.cavities[0].drain_hole_mm.is_some());
+                assert!(warnings.iter().any(|w| w.contains("trapped")), "{warnings:?}");
+                assert!(p.cupped_volume > 0.0, "the inner floor is a cup: {p:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn set_material_feeds_bom_mass_and_cost() {
+        let mut e = engine();
+        e.execute(Command::CreateDocument { name: "cube".into(), doc: Some(2) }).unwrap();
+        let cube = match e
+            .execute(Command::AddBox {
+                doc: 2,
+                name: "cube".into(),
+                center: [num(0.0), num(0.0), num(5.0)],
+                size: [num(10.0), num(10.0), num(10.0)],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        match e
+            .execute(Command::SetMaterial {
+                doc: 2,
+                entity: cube,
+                material: "pla".into(),
+                density_g_cm3: None,
+                cost_per_kg: None,
+            })
+            .unwrap()
+        {
+            CommandResult::MaterialSet { material, .. } => {
+                assert!((material.density_g_cm3 - 1.24).abs() < 1e-9);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        // A replay (any parameter change) re-runs the set_material step.
+        e.execute(Command::SetParameter {
+            doc: 2,
+            name: "unused".into(),
+            value: num(1.0),
+            description: None,
+        })
+        .unwrap();
+        assert_eq!(
+            e.doc_for_test(2).materials().get(&cube).map(|m| m.name.as_str()),
+            Some("pla")
+        );
+        e.execute(Command::ImportPart {
+            doc: 1,
+            name: Some("cube".into()),
+            path: None,
+            from: Some(2),
+        })
+        .unwrap();
+        e.execute(Command::AddInstance {
+            doc: 1,
+            part: "cube".into(),
+            name: "c1".into(),
+            translation: None,
+            rotation_deg: None,
+            scale: None,
+            parameters: None,
+        })
+        .unwrap();
+        match e.execute(Command::BillOfMaterials { doc: 1 }).unwrap() {
+            CommandResult::Bom { rows, total_mass_g, total_cost, currency, .. } => {
+                assert_eq!(currency, "USD");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].material.as_deref(), Some("pla"));
+                assert_eq!(rows[0].materials, vec!["pla".to_string()]);
+                assert!((rows[0].mass_g - 1.24).abs() < 1e-6, "{rows:?}");
+                assert!((rows[0].cost - 0.0248).abs() < 1e-9, "{rows:?}");
+                assert!((total_mass_g - 1.24).abs() < 1e-6);
+                assert!((total_cost - 0.0248).abs() < 1e-9);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn fit_and_material_presets_are_agent_readable() {
+        let mut e = engine();
+        match e.execute(Command::ListMaterials).unwrap() {
+            CommandResult::Materials { materials, currency } => {
+                assert_eq!(currency, "USD");
+                assert!(materials.iter().any(|m| m.name == "pla"));
+                assert!(materials.iter().any(|m| m.name == "resin"));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        match e
+            .execute(Command::Fit {
+                doc: 1,
+                class: wright_protocol::FitClass::Free,
+                nominal_mm: Some(10.0),
+                hole_mm: None,
+                material: Some("pla".into()),
+                printer_tolerance_mm: None,
+                hole_shrink_mm: None,
+                elephant_foot_mm: None,
+            })
+            .unwrap()
+        {
+            CommandResult::FitComputed { report, .. } => {
+                assert_eq!(report.classes.len(), 4);
+                assert!((report.radial_clearance_mm - 0.40).abs() < 1e-9);
+                assert!((report.hole_shrink_mm - 0.05).abs() < 1e-9);
+                assert!((report.modeled_hole_mm.unwrap() - 10.9).abs() < 1e-9);
+                assert!((report.elephant_foot_mm - 0.20).abs() < 1e-9);
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -8737,7 +9699,7 @@ mod tests {
 
         // The copies are ordinary solids: a union of the pattern is printable.
         let union_id = union(&mut e, &[source, line[0], line[1]]);
-        match e.execute(Command::Validate { doc: 1, entities: Some(vec![union_id]), min_wall_mm: None }).unwrap() {
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![union_id]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { ok, solids, .. } => {
                 assert!(ok, "{:?}", solids[0]);
             },
@@ -8826,7 +9788,7 @@ mod tests {
             CommandResult::Scene { entities, .. } => assert_eq!(entities.len(), 1),
             r => panic!("unexpected result {r:?}"),
         }
-        match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(1.0) }).unwrap() {
+        match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: Some(1.0), overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
             r => panic!("unexpected result {r:?}"),
         }
@@ -8922,7 +9884,7 @@ mod tests {
             },
             r => panic!("unexpected result {r:?}"),
         };
-        match e.execute(Command::Validate { doc: 1, entities: Some(vec![spring]), min_wall_mm: None }).unwrap() {
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![spring]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
             r => panic!("unexpected result {r:?}"),
         }
@@ -8973,7 +9935,7 @@ mod tests {
             },
             r => panic!("unexpected result {r:?}"),
         };
-        match e.execute(Command::Validate { doc: 1, entities: Some(vec![lofted]), min_wall_mm: None }).unwrap() {
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![lofted]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
             r => panic!("unexpected result {r:?}"),
         }
@@ -9002,7 +9964,7 @@ mod tests {
             },
             r => panic!("unexpected result {r:?}"),
         };
-        match e.execute(Command::Validate { doc: 1, entities: Some(vec![threaded]), min_wall_mm: None }).unwrap() {
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![threaded]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { ok, solids, .. } => assert!(ok, "{:?}", solids[0]),
             r => panic!("unexpected result {r:?}"),
         }
@@ -9136,7 +10098,7 @@ mod tests {
         assert_eq!(bbox.min, [-5.0, -10.0, -15.0]);
         assert_eq!(bbox.max, [5.0, 10.0, 15.0]);
 
-        match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { ok, solids, .. } => {
                 assert!(ok, "welded STL box must validate: {solids:?}");
             },
@@ -9249,7 +10211,7 @@ mod tests {
             },
             other => panic!("boolean on an imported mesh failed: {other:?}"),
         }
-        match e.execute(Command::Validate { doc: 1, entities: Some(vec![3]), min_wall_mm: None }).unwrap() {
+        match e.execute(Command::Validate { doc: 1, entities: Some(vec![3]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { ok, .. } => assert!(ok, "boolean result must stay printable"),
             r => panic!("unexpected result {r:?}"),
         }
@@ -9443,7 +10405,7 @@ mod tests {
             other => panic!("unexpected program step {other:?}"),
         }
 
-        let ok = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        let ok = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { references, .. } => references,
             r => panic!("unexpected result {r:?}"),
         };
@@ -9458,7 +10420,7 @@ mod tests {
             description: None,
         })
         .unwrap();
-        let moved = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        let moved = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { references, .. } => references,
             r => panic!("unexpected result {r:?}"),
         };
@@ -9497,7 +10459,7 @@ mod tests {
             }
             d.replay().unwrap();
         }
-        let checks = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        let checks = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { references, .. } => references,
             r => panic!("unexpected result {r:?}"),
         };
@@ -9628,7 +10590,7 @@ mod tests {
             },
             r => panic!("unexpected result {r:?}"),
         }
-        let checks = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        let checks = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { references, .. } => references,
             r => panic!("unexpected result {r:?}"),
         };
@@ -9662,7 +10624,7 @@ mod tests {
 
         let mut b = Engine::new();
         b.execute(Command::OpenDocument { path: p1s.clone(), name: None }).unwrap();
-        match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { references, .. } => {
                 let fillet = references.iter().find(|r| r.method == "fillet").expect("reference");
                 assert_eq!(fillet.status, "ok", "{fillet:?}");
@@ -10264,7 +11226,7 @@ mod tests {
 
         let (solid, volume, _) = extrude(&mut e, sketch, num(5.0));
         assert!((volume - 1000.0).abs() < 1e-6, "{volume}");
-        let trust = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        let trust = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { solids, sketches, .. } => (solids, sketches),
             r => panic!("unexpected result {r:?}"),
         };
@@ -10277,7 +11239,7 @@ mod tests {
         let mut b = Engine::new();
         let opened = b.execute(Command::OpenDocument { path: wcad_s.clone(), name: None }).unwrap();
         assert!(matches!(opened, CommandResult::DocumentOpened { .. }), "{opened:?}");
-        let trust = match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        let trust = match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { solids, .. } => solids,
             r => panic!("unexpected result {r:?}"),
         };
@@ -10371,7 +11333,7 @@ mod tests {
         })
         .unwrap();
         let report = match e
-            .execute(Command::Validate { doc: 1, entities: Some(vec![solid]), min_wall_mm: None })
+            .execute(Command::Validate { doc: 1, entities: Some(vec![solid]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None })
             .unwrap()
         {
             CommandResult::Validated { solids, .. } => solids[0].volume,
@@ -10536,7 +11498,7 @@ mod tests {
             CommandResult::EntityCreated { entity, .. } => entity,
             r => panic!("unexpected result {r:?}"),
         };
-        let before = match e.execute(Command::Validate { doc: 1, entities: Some(vec![mesh_id]), min_wall_mm: None }).unwrap() {
+        let before = match e.execute(Command::Validate { doc: 1, entities: Some(vec![mesh_id]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { solids, .. } => solids[0].clone(),
             r => panic!("unexpected result {r:?}"),
         };
@@ -10560,7 +11522,7 @@ mod tests {
             },
             r => panic!("unexpected result {r:?}"),
         }
-        let after = match e.execute(Command::Validate { doc: 1, entities: Some(vec![mesh_id]), min_wall_mm: None }).unwrap() {
+        let after = match e.execute(Command::Validate { doc: 1, entities: Some(vec![mesh_id]), min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { solids, .. } => solids[0].clone(),
             r => panic!("unexpected result {r:?}"),
         };
@@ -10571,7 +11533,7 @@ mod tests {
         e.execute(Command::SaveDocument { doc: 1, path: wcad_s.clone(), source: None }).unwrap();
         let mut b = Engine::new();
         b.execute(Command::OpenDocument { path: wcad_s, name: None }).unwrap();
-        let trust = match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+        let trust = match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None, overhang_angle_deg: None, layer_height_mm: None, min_feature_mm: None, bridge_angle_deg: None }).unwrap() {
             CommandResult::Validated { solids, .. } => solids,
             r => panic!("unexpected result {r:?}"),
         };
