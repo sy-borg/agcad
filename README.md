@@ -110,6 +110,9 @@ Commands, grouped by intent:
 - **Assemblies**: `import_part`, `add_part`, `add_instance`, `add_connector`,
   `move_instance`, `mate`, `bill_of_materials`, `check_interference`
 - **Parameters**: `set_parameter`, `remove_parameter`, `get_parameters`
+- **Program editing**: `patch_program` (insert/remove/replace/reorder, dry run
+  with an id map and scene diff), `suppress` (turn steps off without deleting
+  them), `batch` (run commands as one unit, optionally atomic)
 - **Sketches and solids**: `add_sketch`, `add_sketch_line`,
   `add_sketch_circle`, `add_sketch_arc`, `add_sketch_spline`, `constrain`,
   `remove_constraint`, `move_sketch_point`, `delete_sketch_element`,
@@ -122,8 +125,9 @@ Commands, grouped by intent:
   `save_document`, `open_document`
 - **History**: `undo`, `redo`
 
-`get_program` returns the program, the parameters and any embedded authoring
-source — the complete handoff for the script-as-source workflow.
+`get_program` returns the program, the parameters, the suppressed step indexes
+and any embedded authoring source — the complete handoff for the
+script-as-source workflow.
 
 `fillet{entity,radius,edges?}` and `chamfer{entity,distance,edges?}` reshape a
 solid **in place** (same id, name, color, transform) and replay with the
@@ -213,7 +217,9 @@ The user describes intent; **the agent authors a parametric program**:
    other parameters.
 2. Modeling commands with dimensions as expressions:
    `size = [80, 40, "wall*2"]`.
-3. `set_parameter` re-executes the program with **entity ids preserved**.
+3. `set_parameter` re-executes the program with **entity ids preserved** for
+   ordinary knobs (and remapped by feature identity when a pattern count
+   changes the structure).
    Geometry is content-memoized per feature: a knob change regenerates only
    the features downstream of it, while independent features reuse their
    cached meshes. The full replay stays the correctness oracle.
@@ -261,6 +267,72 @@ part.py ──run──► wright bus ──save_document──► part.wcad
 There is intentionally no GUI-style feature tree: the agent edits the script and
 replays. The program is the intermediate representation; the script is the
 editing surface. `set_parameter` covers the common "turn a knob" change.
+
+## Editing the program without a feature tree
+
+The script is the editing surface, but an agent also needs to make a surgical
+change without re-authoring the whole file. `patch_program` edits the program
+in place:
+
+```json
+{"method":"patch_program","params":{"doc":1,"dry_run":true,"ops":[
+  {"op":"insert","at":0,"command":{"method":"add_box","doc":1,"name":"foot",...}},
+  {"op":"remove","at":4},
+  {"op":"replace","at":2,"command":{"method":"fillet","doc":1,"entity":3,...}},
+  {"op":"reorder","from":5,"to":1}
+]}}
+```
+
+Indexes are 0-based and match `get_program`. Ops apply in order, so later
+indexes see earlier edits. Commands inside the ops address entities by their
+**current** ids. The engine replays the patched program and rewrites numeric
+references by feature identity whenever id allocation moves: insert a box
+before everything and the boolean step's `[1,2]` becomes `[2,3]` instead of
+silently fusing the new box. A `replace` keeps the step's identity (a downstream
+fillet follows the replacement); a `remove` that still has users fails with the
+referencing step named. The result reports `surviving`, `renumbered` (old id →
+new id and name), `removed` and `created`.
+
+A dry run is the proof: `dry_run:true` replays a scratch copy, reports those
+ids and a full `diff` object against the current scene, and changes nothing.
+Committing the same ops is one undo step. Newly inserted selectors get the same
+stored binding a live command would, so a later knob turn reports `moved`
+rather than `unbound`.
+
+Direct program edits do not rewrite the embedded authoring script: it still
+describes the source that produced the pre-edit document. `export_python`
+reconstructs a runnable script from the current program (and emits the
+`suppress` call for a variant), so the handoff is to regenerate and re-embed it
+with `save_document(source=...)` when the edit should become the new source.
+
+`suppress{steps,suppress?}` is the A/B switch: it turns steps off without
+deleting them. Suppression is saved with the document (an empty set is not
+written), and `get_program` returns it. Ids before the suppressed step are
+unchanged; ids after it may shift and the result reports the map. A step that
+later steps still reference cannot be suppressed alone — suppress those steps
+too, and the replay stays valid.
+
+`batch{commands,atomic:true}` runs several bus commands as one unit. A failure
+rolls every document, parameter, program and undo-history change back; files
+already written are not retracted. Without `atomic` the successful prefix
+stays, which is useful when a long import batch should keep what it got.
+
+```python
+# Insert a feature, preview the id shift, then commit it.
+ops = [{
+    "op": "insert", "at": 0,
+    "command": {"method": "add_box", "doc": doc, "name": "foot",
+                "center": [0, 0, 2], "size": [20, 20, 4]},
+}]
+preview = cad.patch_program(doc, ops, dry_run=True)
+assert preview["diff"]["changed"]
+cad.patch_program(doc, ops)                  # one undo step
+
+# A/B variant: the last fillet is off, then on.
+cad.suppress(doc, [3])
+cad.validate(doc)
+cad.suppress(doc, [3], suppress=False)
+```
 
 ## Sketches
 
@@ -330,9 +402,9 @@ knob still replays them.
 
 - **Patterns.** `linear_pattern{entities, direction, spacing, count}` and
   `circular_pattern{entities, count, center?, axis?, angle_deg?}` repeat solids
-  in world space. `count` includes the original; new ids come back in
-  `entities`. Circular copies rotate, so bolt circles and gear teeth keep their
-  orientation. Dimensions may be expressions.
+  in world space. `count` includes the original and may be an expression; new
+  ids come back in `entities`. Circular copies rotate, so bolt circles and gear
+  teeth keep their orientation. Dimensions may be expressions.
 - **Mirror.** `mirror{entities, plane}` creates one reflected copy per source
   (originals kept). `plane` is a datum or any plane; the reflection is baked
   with winding and normals kept outward.
@@ -365,10 +437,13 @@ cad.shell(doc, tray, "wall", open=[(0, 0, 1)])
 cad.thread(doc, major_diameter=8, pitch=1.25, length=12, name="m8")
 ```
 
-`count` is structural, not a knob: it allocates a fixed number of entities in
-the program. Change it by editing the script and replaying, or turn the
-expressions that position those entities. That keeps downstream ids
-predictable.
+`count` may be an expression, so a parameter drives the number of copies:
+`linear_pattern{count:"n"}` regrows a bolt row from one knob. Increasing or
+decreasing the count is a **structural** change — it moves where later ids are
+allocated. The replay remaps every later reference by feature identity (a fillet
+after the pattern keeps filleting the same solid), `set_parameter` returns a
+`renumbered` map, and `patch_program`'s dry run predicts the same shift before
+you commit. `spacing`, direction and angle were already expressions.
 
 ## Assemblies and drawings
 
@@ -478,6 +553,10 @@ script meant? `validate` returns `references` for every stored selector and
 revisions. `faces`/`edges` hand out the ids, descriptors and fingerprints those
 reports use; `stable_references.py` walks the loop from a listed edge to a
 fillet, a resize (`moved`), and a broad filter (`ambiguous`).
+
+M21 extends that proof to edits: `patch_program{dry_run:true}` returns the same
+`diff_scene` report shape against the current scene, so an insertion's id shift
+is inspectable before it is committed.
 
 ## Live preview: MCP agent + viewer, one shared scene
 
@@ -627,9 +706,10 @@ coverage, interoperability, assemblies and drawings — and give the human a
 concrete way to point at geometry, rather than building a GUI feature tree.
 Validation and scene diffs (M14) make a rebuild provable; incremental rebuilds
 (M15) make it fast; interoperability (M18) connects the script to existing
-meshes, drawings and CAD kernels. The next three milestones make the program
-editable without a feature tree (M21), turn imported geometry into an editable
-sketch (M22), and turn "watertight" into "printable" (M23). Feature-history
+meshes, drawings and CAD kernels. Program editing (M21) makes the program
+editable without a feature tree, while the next two milestones turn imported
+geometry into an editable sketch (M22) and turn "watertight" into "printable"
+(M23). Feature-history
 editing is deliberately not a goal: replay is deterministic and
 `set_parameter` covers knob turns, while the script remains the editing surface.
 
@@ -687,23 +767,22 @@ editing is deliberately not a goal: replay is deterministic and
       `matched`, `ambiguous` and a binding fingerprint; selectors remember what
       they bound to and `validate`/`diff_scene` report `moved`, `missing` and
       drift after a rebuild.
+- [x] **M21 — Program editing**: `patch_program{ops}` inserts, removes,
+      replaces and reorders program steps, with a dry run that reports
+      surviving and renumbered entity ids plus a `diff_scene`-shaped report to
+      prove the result; `suppress{steps}` turns a feature off without deleting
+      it for A/B variants and agent experiments; pattern counts (and other
+      repeats) are parameters rather than structure, with references remapped
+      by feature identity through the shift; and `batch{commands, atomic:true}`
+      rolls a failed multi-command batch back instead of leaving half a model
+      behind. This makes the bus an editing surface without a GUI feature tree.
 
 ### Next
 
-The next three milestones attack the parts of the parametric promise that are
-still implicit: how a feature is changed without re-authoring the script,
-whether imported geometry can become a rule again, and whether a validated mesh
-will print.
+The next two milestones attack the parts of the parametric promise that are
+still implicit: whether imported geometry can become a rule again, and whether
+a validated mesh will print.
 
-- [ ] **M21 — Program editing**: `patch_program{ops}` inserts, removes,
-      replaces and reorders program steps, with a dry run that reports
-      surviving and renumbered entity ids plus a `diff_scene` to prove the
-      result; `suppress{steps}` turns a feature off without deleting it for A/B
-      variants and agent experiments; pattern counts (and other repeats) can be
-      driven by parameters instead of being structural; and
-      `batch{commands, atomic:true}` rolls a failed multi-command batch back
-      instead of leaving half a model behind. This makes the bus an editing
-      surface without a GUI feature tree.
 - [ ] **M22 — Import → parametric**: `import_dxf`/`import_svg` bring closed
       loops in as sketches with optional auto-constraints (coincident,
       horizontal/vertical, approximate tangency); `section{entity, plane}` and
@@ -781,22 +860,23 @@ The remaining milestones, in dependency order:
 
 ## Status
 
-Milestone 20 is complete: stable references now sit on the same
-program/replay substrate as everything else. The suite is **269 tests**
-(253 engine + 1 server + 15 viewer), covering the solver and sketches,
-solids/booleans/edges, persistence and export, picking and script-as-source,
-validation and scene diffs, stable face/edge references, incremental rebuilds,
-shape leverage, interoperability (STL/OBJ/3MF, DXF/SVG, STEP), and assemblies
-and drawing sheets — including byte-stable saves and exports, cold-replay
-determinism, and self-contained assemblies that reopen without their part
-files.
+Milestone 21 is complete: program editing sits on the same program/replay
+substrate as everything else. The suite is **277 tests** (261 engine + 1 server
++ 15 viewer), covering the solver and sketches, solids/booleans/edges,
+persistence and export, picking and script-as-source, validation and scene
+diffs, stable face/edge references, incremental rebuilds, program patching and
+suppression, parametric pattern counts, shape leverage, interoperability
+(STL/OBJ/3MF, DXF/SVG, STEP), and assemblies and drawing sheets — including
+byte-stable saves and exports, cold-replay determinism, and self-contained
+assemblies that reopen without their part files.
 
 End-to-end printable examples: `examples/printable_bracket.py`,
 `revolve_bushing.py`, `face_sketch.py`, `sketch_complete.py`, `pick.py`,
-`validate.py`, `stable_references.py`, `shape_leverage.py`, `cross_block.py`,
-`save_load.py`, `incremental_rebuild.py`, `import_mesh.py`, `export_2d.py`,
-`step_export.py`, and `assembly_drawing.py`. Each runs profile → solid →
-validate → render → export; `cross_block.py` is the picture-to-part loop above.
+`validate.py`, `stable_references.py`, `program_edit.py`, `shape_leverage.py`,
+`cross_block.py`, `save_load.py`, `incremental_rebuild.py`, `import_mesh.py`,
+`export_2d.py`, `step_export.py`, and `assembly_drawing.py`. Each runs profile
+→ solid → validate → render → export; `cross_block.py` is the picture-to-part
+loop above.
 
 ## What agents say
 

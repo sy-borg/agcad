@@ -452,10 +452,11 @@ class Wright:
     ) -> dict[str, Any]:
         """Define or update a named parameter. ``value`` may be an
         expression over other parameters ("wall*2"). Changing a parameter
-        re-executes the document program: entity ids are preserved and only
-        geometry downstream of the change is regenerated. The result reports
-        ``rebuilt`` and ``reused`` feature counts plus the number of program
-        ``steps``."""
+        re-executes the document program: entity ids are preserved for
+        ordinary knobs and remapped by feature identity when a structural
+        change (a pattern count) moves them. The result reports ``rebuilt``
+        and ``reused`` feature counts, the number of program ``steps``, and
+        any ``renumbered``/``created``/``removed`` entities."""
         return self._request("set_parameter", doc=doc, name=name, value=value, description=description)
 
     def remove_parameter(self, doc: int, name: str) -> dict[str, Any]:
@@ -1094,7 +1095,7 @@ class Wright:
         entities: list[int],
         direction: tuple[float | str, float | str, float | str],
         spacing: float | str,
-        count: int,
+        count: int | str,
         name: str | None = None,
         color: tuple[float, float, float, float] | None = None,
     ) -> dict[str, Any]:
@@ -1103,8 +1104,10 @@ class Wright:
         Creates ``count - 1`` copies per source and returns their ids in
         ``entities``. The copies are new solids, so a pattern of hole cutters
         is one ``boolean("difference", ...)`` away from a perforated part.
-        ``spacing`` may be an expression. Sketches are display-only: extrude
-        first.
+        ``count`` and ``spacing`` may be expressions, so a parameter can drive
+        the number of copies. A structural count change renumbers downstream
+        entities; the result reports the shift and ``set_parameter`` returns a
+        ``renumbered`` map. Sketches are display-only: extrude first.
         """
         return self._request(
             "linear_pattern", doc=doc, entities=list(entities), direction=direction,
@@ -1115,7 +1118,7 @@ class Wright:
         self,
         doc: int,
         entities: list[int],
-        count: int,
+        count: int | str,
         center: tuple[float | str, float | str, float | str] = (0.0, 0.0, 0.0),
         axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
         angle_deg: float | str | None = 360.0,
@@ -1126,7 +1129,8 @@ class Wright:
 
         Copies are spread evenly over ``angle_deg`` (step = angle / count) and
         rotate with the pattern, so gear teeth and bolt circles keep their
-        orientation. ``center`` and ``angle_deg`` may be expressions.
+        orientation. ``count``, ``center`` and ``angle_deg`` may be
+        expressions.
         """
         return self._request(
             "circular_pattern", doc=doc, entities=list(entities), center=center,
@@ -1282,6 +1286,64 @@ class Wright:
     def redo(self, doc: int) -> dict[str, Any]:
         return self._request("redo", doc=doc)
 
+    # -- program editing -----------------------------------------------------
+
+    def patch_program(
+        self,
+        doc: int,
+        ops: list[dict[str, Any]],
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Edit the program in place: insert, remove, replace or reorder steps.
+
+        ``ops`` are applied in order to the current program (0-based indexes,
+        as :meth:`get_program` returns them)::
+
+            {"op": "insert",  "at": 0, "command": {"method": "add_box", ...}}
+            {"op": "remove",  "at": 3}
+            {"op": "replace", "at": 2, "command": {...}}
+            {"op": "reorder", "from": 4, "to": 1}
+
+        Commands inside the ops address entities by their current ids. The
+        engine replays the patched program and rewrites references when id
+        allocation moves, so an inserted step does not retarget a downstream
+        fillet. ``dry_run=True`` reports ``surviving``, ``renumbered``,
+        ``removed``, ``created`` and a full ``diff`` against the current scene
+        without changing anything. A real patch is one undo step.
+        """
+        return self._request("patch_program", doc=doc, ops=ops, dry_run=dry_run)
+
+    def suppress(
+        self,
+        doc: int,
+        steps: list[int],
+        suppress: bool = True,
+    ) -> dict[str, Any]:
+        """Turn program steps off (or back on) without deleting them.
+
+        Suppression is saved with the document. Entity ids before the
+        suppressed step are unchanged; later ids may shift and the result
+        reports the ``renumbered`` mapping and any ``removed`` entities.
+        Suppressing a feature that later steps still use is rejected with a
+        hint to suppress those steps too.
+        """
+        return self._request("suppress", doc=doc, steps=steps, suppress=suppress)
+
+    def batch(
+        self,
+        commands: list[dict[str, Any]],
+        atomic: bool = True,
+    ) -> dict[str, Any]:
+        """Run several raw bus commands as one unit.
+
+        With ``atomic=True`` (the default) a failing command rolls every
+        document, parameter and program change back before it returns; files
+        already written are not retracted. ``commands`` are raw command
+        objects such as ``{"method": "add_box", "doc": 1, ...}``. The result's
+        ``results`` list holds each command's result in order.
+        """
+        return self._request("batch", commands=commands, atomic=atomic)
+
     def get_scene(self, doc: int, meshes: bool = True) -> dict[str, Any]:
         """Scene snapshot: entities with transforms, colors and meshes."""
         return self._request("get_scene", doc=doc)
@@ -1407,10 +1469,10 @@ class Wright:
         """Read-only view of the program, parameters and embedded source.
 
         Returns ``name``, ``params``, ``program`` (the modeling commands with
-        expression arguments intact) and, when the document was saved with
-        one, ``source`` — the authoring script that rode along in the
-        ``.wcad`` snapshot. This is exactly what :meth:`save_document`
-        writes, available to any client.
+        expression arguments intact), ``suppressed`` (step indexes replay
+        skips) and, when the document was saved with one, ``source`` — the
+        authoring script that rode along in the ``.wcad`` snapshot. This is
+        exactly what :meth:`save_document` writes, available to any client.
 
         The script on disk is the source of truth. ``source`` is how a
         handoff recovers it without executing anything; use :meth:`get_script`
@@ -1500,6 +1562,11 @@ class Wright:
                 out.append("        doc,")
                 out.extend(f"        {k}={v!r}," for k, v in args)
                 out.append("    )")
+        suppressed = snap.get("suppressed") or []
+        if suppressed:
+            out.append("")
+            out.append("    # A/B variant: these program steps are off")
+            out.append(f"    cad.suppress(doc, {suppressed!r})")
         out += ["", "    cad.close()", "", "", 'if __name__ == "__main__":', "    main()"]
 
         text = "\n".join(out) + "\n"

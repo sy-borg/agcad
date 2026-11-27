@@ -136,6 +136,9 @@ fn is_mutating(command: &Command) -> bool {
             | Command::CloseDocument { .. }
             | Command::Undo { .. }
             | Command::Redo { .. }
+            | Command::PatchProgram { .. }
+            | Command::Suppress { .. }
+            | Command::Batch { .. }
     )
 }
 
@@ -202,7 +205,10 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::SaveDocument { doc, .. }
         | Command::GetProgram { doc }
         | Command::RenderOffscreen { doc, .. }
+        | Command::PatchProgram { doc, .. }
+        | Command::Suppress { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
+        Command::Batch { commands, .. } => commands.iter().find_map(doc_of),
         Command::CreateDocument { .. }
         | Command::OpenDocument { .. }
         | Command::ListDocuments

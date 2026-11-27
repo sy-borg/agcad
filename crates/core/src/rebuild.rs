@@ -52,7 +52,7 @@ impl CachedGeometry {
 /// Geometry results indexed by program step. One entry per feature: a knob
 /// change replaces only the entries whose key moved, so memory is bounded by
 /// the program size, not by the number of knob turns.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct GeometryCache {
     entries: Vec<Option<(GeomKey, CachedGeometry)>>,
     /// Features whose geometry was regenerated during the current replay.

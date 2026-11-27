@@ -54,7 +54,12 @@ pub const DOCUMENT_FORMAT: &str = "wright-document";
 /// `mate`, `move_instance`). `add_part` embeds a complete part document in
 /// the program, so an assembly is self-contained just like an imported mesh;
 /// older readers cannot parse the step and would silently drop the parts.
-pub const DOCUMENT_VERSION: u32 = 4;
+///
+/// 5: M21 program editing. Pattern `count` may be an expression (older
+/// readers reject a string there), and the snapshot carries the suppressed
+/// program steps. An older reader would run suppressed features, so the
+/// omission is not downgrade-safe.
+pub const DOCUMENT_VERSION: u32 = 5;
 
 pub type DocId = u64;
 pub type EntityId = u64;
@@ -130,6 +135,30 @@ impl RpcResponse {
     pub fn err(id: u64, error: RpcError) -> Self {
         Self { jsonrpc: "2.0".into(), id, result: None, error: Some(error) }
     }
+}
+
+/// One edit to a document's program (see [`Command::PatchProgram`]).
+///
+/// Steps are 0-based indexes into the current program, exactly as
+/// `get_program` returns them. Ops are applied in order to a working copy, so
+/// later indexes see the effect of earlier ones. Commands inserted or
+/// replaced address entities by their **current** ids; the engine replays the
+/// patch and rewrites every reference when id allocation shifts, so a program
+/// keeps its meaning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ProgramOp {
+    /// Insert `command` before step `at` (`at == steps` appends).
+    Insert { at: usize, command: Command },
+    /// Remove the step at `at`.
+    Remove { at: usize },
+    /// Replace the step at `at`. The step keeps its suppression flag and is
+    /// treated as the same feature for id remapping, so a downstream fillet
+    /// follows the replacement.
+    Replace { at: usize, command: Command },
+    /// Move the step at `from` so it ends up at index `to` (0-based, in the
+    /// patched program). Suppression follows the step.
+    Reorder { from: usize, to: usize },
 }
 
 /// Every operation the bus understands. `method` is the JSON-RPC method
@@ -639,6 +668,52 @@ pub enum Command {
     /// language-agnostic.
     GetProgram { doc: DocId },
 
+    /// Edit the program in place: insert, remove, replace or reorder steps.
+    ///
+    /// Commands inside the ops address entities by their current ids. The
+    /// engine replays the patched program against the current parameters and
+    /// rewrites references whenever id allocation moves, so an inserted step
+    /// that shifts later ids does not silently retarget a downstream fillet.
+    /// The result reports surviving and renumbered entity ids, entities the
+    /// edit removed, entities it created, and (for a dry run) a
+    /// [`SceneDiffReport`] against the pre-edit scene. A dry run changes
+    /// nothing; a real patch is one undo step.
+    ///
+    /// `suppressed` steps are carried through the edit as step properties, and
+    /// a removed step's flag disappears with it.
+    PatchProgram {
+        doc: DocId,
+        ops: Vec<ProgramOp>,
+        /// Replay the patched program and report, but do not commit.
+        #[serde(default)]
+        dry_run: bool,
+    },
+
+    /// Turn program steps on or off without deleting them. A suppressed step
+    /// is skipped by replay but keeps its place, so a variant can be flipped
+    /// back with `suppress{suppress:false}`. Entity ids before the suppressed
+    /// step are unchanged; ids after it may shift and the result reports the
+    /// remapping. Suppressing a feature that later steps use is rejected with
+    /// the referencing step named (suppress those too for an A/B variant).
+    Suppress {
+        doc: DocId,
+        /// 0-based program step indexes, as `get_program` returns them.
+        steps: Vec<usize>,
+        /// `true` turns suppression on (the default), `false` clears it.
+        #[serde(default = "default_true")]
+        suppress: bool,
+    },
+
+    /// Run several commands as one unit. With `atomic: true` a failing
+    /// command rolls every document, parameter and program change back to the
+    /// state before the batch (undo history included); files already written
+    /// are not retracted. Results come back in execution order.
+    Batch {
+        commands: Vec<Command>,
+        #[serde(default)]
+        atomic: bool,
+    },
+
     /// Enumerate the planar faces of one solid with readable descriptors,
     /// stable ids, fingerprints and ready-made `add_sketch` selectors. A
     /// session command: it changes no state and is not part of the program.
@@ -941,8 +1016,10 @@ pub enum Command {
         direction: SVec3,
         /// Distance between adjacent copies (mm). May be an expression.
         spacing: Scalar,
-        /// Number of instances including the original (≥ 2).
-        count: u32,
+        /// Number of instances including the original (2..=1000). May be an
+        /// expression, so a knob changes the number of copies. A structural
+        /// change renumbers downstream entities; the result reports the map.
+        count: Scalar,
         #[serde(default)]
         name: Option<String>,
         #[serde(default)]
@@ -965,7 +1042,9 @@ pub enum Command {
         /// expression.
         #[serde(default)]
         angle_deg: Option<Scalar>,
-        count: u32,
+        /// Number of instances including the original (2..=1000). May be an
+        /// expression.
+        count: Scalar,
         #[serde(default)]
         name: Option<String>,
         #[serde(default)]
@@ -1112,6 +1191,10 @@ pub enum Command {
 
 fn default_up() -> [f64; 3] {
     [0.0, 0.0, 1.0]
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Which sharp edges a fillet/chamfer applies to, in **world space**.
@@ -1521,6 +1604,46 @@ pub struct EntitySummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tris: Option<usize>,
     pub world_bbox: Bbox,
+}
+
+/// The full revision comparison behind `diff_scene` and the dry run of
+/// `patch_program`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneDiffReport {
+    pub doc: DocId,
+    /// The baseline document id, when compared with `against`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub against: Option<DocId>,
+    /// Baseline name (document name or `.wcad` path).
+    pub against_name: String,
+    /// True when anything differs (entities, parameters or program).
+    pub changed: bool,
+    /// Content fingerprint of the current scene.
+    pub scene_signature: String,
+    /// Content fingerprint of the baseline scene.
+    pub against_signature: String,
+    pub added: Vec<EntitySummary>,
+    pub removed: Vec<EntitySummary>,
+    pub modified: Vec<EntityChange>,
+    /// Entities present in both revisions with identical signatures.
+    pub unchanged: usize,
+    pub parameters: Vec<ParameterChange>,
+    pub program_changed: bool,
+    pub commands_from: usize,
+    pub commands_to: usize,
+    /// Selectors whose binding changed between the revisions, even when the
+    /// volume barely moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<ReferenceChange>,
+}
+
+/// One entity id that moved because a program edit changed id allocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdChange {
+    pub from: EntityId,
+    pub to: EntityId,
+    /// The entity's name after the change, for readable reports.
+    pub name: String,
 }
 
 /// One entity that exists in both revisions but differs.
@@ -2005,6 +2128,16 @@ pub enum CommandResult {
         /// (M20). Inspect `validate` for the details and descriptors.
         #[serde(default)]
         references_drifted: usize,
+        /// Entities renumbered by a structural change (a pattern count
+        /// expression that changed). Empty for ordinary knob turns.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        renumbered: Vec<IdChange>,
+        /// Entities a structural change added (extra pattern copies).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        created: Vec<EntityId>,
+        /// Entities a structural change removed (fewer pattern copies).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<EntityId>,
     },
     ParameterRemoved { doc: DocId, name: String },
     Parameters { doc: DocId, params: Vec<ParamInfo> },
@@ -2040,33 +2173,53 @@ pub enum CommandResult {
         references: Vec<ReferenceCheck>,
     },
     /// Revision comparison by entity signature (see [`Command::DiffScene`]).
-    SceneDiff {
+    SceneDiff(SceneDiffReport),
+    /// A program edit (see [`Command::PatchProgram`]). `diff` is present on a
+    /// dry run: the patched scene compared with the current one, so an agent
+    /// can prove the edit before committing it.
+    ProgramPatched {
         doc: DocId,
-        /// The baseline document id, when compared with `against`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        against: Option<DocId>,
-        /// Baseline name (document name or `.wcad` path).
-        against_name: String,
-        /// True when anything differs (entities, parameters or program).
-        changed: bool,
-        /// Content fingerprint of the current scene.
-        scene_signature: String,
-        /// Content fingerprint of the baseline scene.
-        against_signature: String,
-        added: Vec<EntitySummary>,
-        removed: Vec<EntitySummary>,
-        modified: Vec<EntityChange>,
-        /// Entities present in both revisions with identical signatures.
-        unchanged: usize,
-        parameters: Vec<ParameterChange>,
-        program_changed: bool,
-        commands_from: usize,
-        commands_to: usize,
-        /// Selectors whose binding changed between the revisions, even when
-        /// the volume barely moved.
+        dry_run: bool,
+        /// Steps in the patched program.
+        steps: usize,
+        /// Suppressed step indexes after the edit.
+        #[serde(default)]
+        suppressed: Vec<usize>,
+        /// Entities that still exist after the edit.
+        surviving: usize,
+        /// Old ids that now answer to a different id, with the entity name.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        references: Vec<ReferenceChange>,
+        renumbered: Vec<IdChange>,
+        /// Old entities the edit took out of the scene.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<EntityId>,
+        /// New entities the edit added.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        created: Vec<EntityId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<SceneDiffReport>,
     },
+    /// Suppression changed (see [`Command::Suppress`]).
+    SuppressionChanged {
+        doc: DocId,
+        /// Suppressed step indexes, ascending.
+        suppressed: Vec<usize>,
+        /// Program steps replayed (every step still exists; `steps - suppressed`
+        /// execute).
+        steps: usize,
+        /// Entities that disappeared because their step is now suppressed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<EntityId>,
+        /// Entities that came back or moved id.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        renumbered: Vec<IdChange>,
+        /// Entities that reappeared when a step was switched back on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        created: Vec<EntityId>,
+    },
+    /// A batch ran (see [`Command::Batch`]). `results` are the individual
+    /// command results, in execution order.
+    BatchExecuted { commands: usize, atomic: bool, results: Vec<CommandResult> },
     StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
     /// A 3MF package was written. `objects` is how many build items it
     /// contains, `tris` the total triangle count.
@@ -2126,6 +2279,10 @@ pub enum CommandResult {
         name: String,
         params: Vec<ParamInfo>,
         program: Vec<Command>,
+        /// Program steps skipped on replay, ascending (see
+        /// [`Command::Suppress`]).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suppressed: Vec<usize>,
         /// The authoring source embedded in the document, when it was saved
         /// with one. The script on disk is the source of truth; this is the
         /// copy that rode along in the `.wcad` snapshot, so a handoff can
@@ -2225,6 +2382,10 @@ pub struct DocumentSnapshot {
     /// Modeling commands in execution order.
     #[serde(default)]
     pub program: Vec<Command>,
+    /// Program steps that replay skips, by 0-based index. Kept sorted; an
+    /// empty set is not written, so unchanged documents keep their shape.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub suppressed: std::collections::BTreeSet<usize>,
     /// Authoring source: the canonical recipe that produced this instance.
     /// Opening a document replays `program`; it never executes `source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

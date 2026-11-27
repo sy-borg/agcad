@@ -379,7 +379,7 @@ footer{padding:0 0 48px}
 {"jsonrpc":"2.0","id":1,
  "result":{"entity_created":
   {"doc":1,"entity":1,"mesh":{...}}}}</pre>
-        <p>Commands cover documents, primitives, booleans, sketches with arcs, splines and construction geometry, constraints (including tangent, equal, symmetric and angle), trim, extend, offset, extrude, revolve, patterns and mirror, shell, holes, sweep, loft, threads, fillet, chamfer, picking, face/edge enumeration, validation, scene diff, export, undo and redo, and rendering.</p>
+        <p>Commands cover documents, primitives, booleans, sketches with arcs, splines and construction geometry, constraints (including tangent, equal, symmetric and angle), trim, extend, offset, extrude, revolve, patterns and mirror, shell, holes, sweep, loft, threads, fillet, chamfer, picking, face/edge enumeration, validation, scene diff, program patching and suppression, atomic batches, export, undo and redo, and rendering.</p>
       </div>
       <div>
         <h3>From Python</h3>
@@ -406,6 +406,7 @@ footer{padding:0 0 48px}
     <div class="rules">
       <div><h3>Sketch completeness</h3><p>Arcs and interpolating splines, tangent/equal/concentric/symmetric/angle/point-on-line constraints, construction geometry, and <code>trim_sketch</code>/<code>extend_sketch</code>/<code>offset_sketch</code>. Every solve names an unsatisfied or redundant constraint by id.</p></div>
       <div><h3>Trust loop</h3><p><code>validate</code> checks watertightness, non-manifold edges, self-intersections, volume and thinnest wall; <code>diff_scene</code> compares two revisions by entity signature and names what changed. <code>faces</code>/<code>edges</code> enumerate the groups a selector can address, and <code>validate</code> reports whether each stored reference is still the same feature (<code>moved</code>) or has drifted. All are read-only queries.</p></div>
+      <div><h3>Program editing</h3><p><code>patch_program</code> inserts, removes, replaces and reorders steps; its dry run reports surviving and renumbered ids plus a scene diff. <code>suppress</code> flips features for A/B variants, pattern counts are parameter-driven, and <code>batch{atomic:true}</code> never leaves half a model behind.</p></div>
       <div><h3>Shape leverage</h3><p>Patterns, <code>mirror</code>, <code>shell</code>, <code>hole</code>, <code>sweep</code>, <code>loft</code> and <code>thread</code> cover the repetitive printable moves without manual copies.</p></div>
       <div><h3>Interoperability</h3><p><code>import_mesh</code> reads STL/OBJ/3MF, welds and repairs the mesh, and bakes it into an <code>add_mesh</code> step so the <code>.wcad</code> reopens without the source file.</p></div>
       <div><h3>2D and STEP output</h3><p><code>export_dxf</code>/<code>export_svg</code> write sketch-local drawings and cutter profiles; <code>export_step</code> writes an honest AP214 faceted B-rep, with open pieces as surface models. STEP import stays out of scope.</p></div>
@@ -510,12 +511,12 @@ python3 -m venv .venv
           <li><b>M19 Assemblies</b> <span>embedded parts, instances, mates, interference, BOM</span></li>
           <li><b>M19b Drawings</b> <span>multi-view SVG/DXF, hidden lines, dimensions, balloons</span></li>
           <li><b>M20 Stable references</b> <span>enumerated faces and edges, ambiguity and drift reports</span></li>
+          <li><b>M21 Program editing</b> <span>patch with a dry-run id map, suppress, parametric counts, atomic batches</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M21 Program editing</b> <span>patch, suppress, parametric counts, atomic batches</span></li>
           <li><b>M22 Import to parametric</b> <span>DXF/SVG sketches, sections, mesh repair</span></li>
           <li><b>M23 Printability preflight</b> <span>overhangs, orientation, bed layout, fit compensation</span></li>
           <li><b>M24 Measurement and mass</b> <span>distance, clearance, area, centroid, inertia</span></li>

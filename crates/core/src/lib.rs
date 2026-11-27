@@ -50,11 +50,11 @@ use std::fmt;
 
 use wright_protocol::{
     Bbox, BooleanOp, Command, CommandResult, CurveMode, DocId, DocInfo, DocumentSnapshot,
-    EdgeFilter, EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, MirrorPlane,
-    ParamInfo, ParameterChange, ReferenceChange, ReferenceCheck, ReferenceReport, Rgba,
-    RevolveAxis, SavedParameter, Scalar, SketchElement, SketchPlane, SketchValidation,
-    SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION,
-    PROTOCOL_VERSION, SERVER_NAME,
+    EdgeFilter, EntityChange, EntityId, EntitySnapshot, EntitySummary, IdChange, Mat4, Mesh,
+    MirrorPlane, ParamInfo, ParameterChange, ProgramOp, ReferenceChange, ReferenceCheck,
+    ReferenceReport, Rgba, RevolveAxis, SavedParameter, Scalar, SceneDiffReport, SketchElement,
+    SketchPlane, SketchValidation, SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3,
+    DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -113,6 +113,14 @@ struct Snapshot {
     instances: BTreeMap<u64, assembly::Instance>,
     program: Vec<Command>,
     params: ParamMap,
+    /// Steps that replay skips.
+    suppressed: std::collections::BTreeSet<usize>,
+    /// Id span (next_entity before, after) of each program step in the last
+    /// replay. Used to remap numeric references when an edit changes how many
+    /// entities a step allocates. Derived, but snapshot it with the state it
+    /// describes so undo keeps the mapping honest.
+    step_entity_ranges: Vec<(EntityId, EntityId)>,
+    step_instance_ranges: Vec<(u64, u64)>,
     /// Resolution result of each selector-carrying step, captured when that
     /// step ran. Derived from the program + geometry, but kept in undo
     /// snapshots so `validate` can report references without a replay.
@@ -289,7 +297,7 @@ fn world_bbox(mesh: &Mesh, transform: &Mat4) -> Bbox {
     Bbox { min: lo, max: hi }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Document {
     pub id: DocId,
     pub name: String,
@@ -304,6 +312,10 @@ pub struct Document {
     next_instance: u64,
     /// Raw modeling commands in execution order — the parametric function.
     program: Vec<Command>,
+    /// Program steps replay skips, by index. Suppression is durable document
+    /// state (saved with the program), not a program command, so it can be
+    /// toggled for an A/B variant without rewriting the steps.
+    suppressed: std::collections::BTreeSet<usize>,
     params: ParamMap,
     /// Provenance only: the script that produced this program, if any.
     /// Saved back out with the document; never executed on open.
@@ -319,6 +331,12 @@ pub struct Document {
     /// Per-feature geometry memo, keyed by content. Derived state: not saved,
     /// not part of undo snapshots, safe to clear at any time.
     cache: rebuild::GeometryCache,
+    /// Id span of each program step from the last replay (next_entity before,
+    /// next_entity after; next_instance likewise). Derived, but kept across
+    /// replays so a structural edit can remap numeric references by feature
+    /// identity instead of by luck.
+    step_entity_ranges: Vec<(EntityId, EntityId)>,
+    step_instance_ranges: Vec<(u64, u64)>,
     /// How each selector-carrying program step resolved when it last ran.
     /// Derived from the program and geometry; used by `validate`/`diff_scene`
     /// to report references without re-resolving them against a later state.
@@ -338,11 +356,14 @@ impl Document {
             instances: BTreeMap::new(),
             next_instance: 1,
             program: Vec::new(),
+            suppressed: std::collections::BTreeSet::new(),
             params: BTreeMap::new(),
             source: None,
             replaying: false,
             step: None,
             cache: rebuild::GeometryCache::default(),
+            step_entity_ranges: Vec::new(),
+            step_instance_ranges: Vec::new(),
             reference_bindings: BTreeMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -398,7 +419,10 @@ impl Document {
             parts: self.parts.clone(),
             instances: self.instances.clone(),
             program: self.program.clone(),
+            suppressed: self.suppressed.clone(),
             params: self.params.clone(),
+            step_entity_ranges: self.step_entity_ranges.clone(),
+            step_instance_ranges: self.step_instance_ranges.clone(),
             reference_bindings: self.reference_bindings.clone(),
         });
         if self.undo_stack.len() > MAX_HISTORY {
@@ -418,7 +442,10 @@ impl Document {
             self.parts = snap.parts;
             self.instances = snap.instances;
             self.program = snap.program;
+            self.suppressed = snap.suppressed;
             self.params = snap.params;
+            self.step_entity_ranges = snap.step_entity_ranges;
+            self.step_instance_ranges = snap.step_instance_ranges;
             self.reference_bindings = snap.reference_bindings;
         }
         self.redo_stack.clear();
@@ -449,8 +476,46 @@ impl Document {
     /// move reuses its previous mesh instead of calling the kernel. That is
     /// what makes a knob change incremental while keeping this full replay as
     /// the correctness oracle.
+    ///
+    /// A structural change (a pattern count expression, a patch, a
+    /// suppression) can move where ids are allocated. The replay remembers
+    /// which step allocated which id span and rewrites later numeric
+    /// references through that mapping, so features keep pointing at the same
+    /// logical entity instead of at whatever now happens to own the old id.
     fn replay(&mut self) -> Result<()> {
-        let program = self.program.clone();
+        self.replay_with_report().map(|_| ())
+    }
+
+    fn replay_with_report(&mut self) -> Result<ReplayReport> {
+        let plan = ReplayPlan {
+            program: self.program.clone(),
+            origins: (0..self.program.len()).map(Some).collect(),
+            suppressed: (0..self.program.len())
+                .map(|step| self.suppressed.contains(&step))
+                .collect(),
+        };
+        self.replay_plan(plan)
+    }
+
+    /// Replay `plan` against the current parameters, returning what happened
+    /// to entity ids. `origins` pairs each new step with the previous program
+    /// step it came from (`None` for an inserted step), which is how a
+    /// reordered or patched program still maps its entities by feature.
+    fn replay_plan(&mut self, plan: ReplayPlan) -> Result<ReplayReport> {
+        let previous_entity_ranges = std::mem::take(&mut self.step_entity_ranges);
+        let previous_instance_ranges = std::mem::take(&mut self.step_instance_ranges);
+        // A cold replay (new document, open, part snapshot) starts with no
+        // previous id allocation; the program's numeric references already
+        // address the ids this replay will hand out, so nothing is remapped.
+        let remap_enabled = !previous_entity_ranges.is_empty();
+        let old_ids: std::collections::BTreeSet<EntityId> =
+            self.entities.keys().copied().collect();
+        let old_names: BTreeMap<EntityId, String> = self
+            .entities
+            .iter()
+            .map(|(id, e)| (*id, e.name.clone()))
+            .collect();
+
         self.entities.clear();
         self.parts.clear();
         self.instances.clear();
@@ -459,17 +524,117 @@ impl Document {
         self.replaying = true;
         self.reference_bindings.clear();
         self.cache.begin();
+
+        let mut program = Vec::with_capacity(plan.program.len());
+        let mut entity_ranges = vec![(0, 0); plan.program.len()];
+        let mut instance_ranges = vec![(0, 0); plan.program.len()];
+        let mut old_to_new: BTreeMap<EntityId, EntityId> = BTreeMap::new();
+        let mut new_to_old: BTreeMap<EntityId, EntityId> = BTreeMap::new();
+        let mut old_to_new_instance: BTreeMap<u64, u64> = BTreeMap::new();
         let mut result = Ok(());
-        for (step, cmd) in program.iter().enumerate() {
+
+        let suppressed_steps = plan.suppressed.clone();
+        for (step, ((mut command, origin), suppressed)) in plan
+            .program
+            .into_iter()
+            .zip(plan.origins)
+            .zip(suppressed_steps.iter().copied())
+            .enumerate()
+        {
             self.step = Some(step);
-            if let Err(e) = exec(self, cmd) {
-                result = Err(Error::Replay { step, source: e.to_string() });
-                break;
+            let before_entity = self.next_entity;
+            let before_instance = self.next_instance;
+            if suppressed {
+                // Keep the step's own references current so it is usable if
+                // it is switched back on; unresolved ids are left alone (the
+                // entity it would point at is suppressed too).
+                let _ = remap_command(
+                    &mut command,
+                    &old_to_new,
+                    &old_to_new_instance,
+                    true,
+                );
+            } else {
+                if let Err(e) = remap_command(
+                    &mut command,
+                    &old_to_new,
+                    &old_to_new_instance,
+                    !remap_enabled,
+                ) {
+                    result = Err(Error::Replay { step, source: e.to_string() });
+                    break;
+                }
+                if let Err(e) = exec(self, &command) {
+                    result = Err(Error::Replay { step, source: e.to_string() });
+                    break;
+                }
+            }
+            entity_ranges[step] = (before_entity, self.next_entity);
+            instance_ranges[step] = (before_instance, self.next_instance);
+            program.push(command);
+
+            if let Some(origin) = origin {
+                if let Some((old_lo, old_hi)) = previous_entity_ranges.get(origin).copied() {
+                    let new = entity_ranges[step];
+                    for (old, new) in (old_lo..old_hi).zip(new.0..new.1) {
+                        old_to_new.insert(old, new);
+                        new_to_old.insert(new, old);
+                    }
+                }
+                if let Some((old_lo, old_hi)) = previous_instance_ranges.get(origin).copied() {
+                    let new = instance_ranges[step];
+                    for (old, new) in (old_lo..old_hi).zip(new.0..new.1) {
+                        old_to_new_instance.insert(old, new);
+                    }
+                }
             }
         }
+
         self.step = None;
         self.replaying = false;
-        result
+        self.program = program;
+        self.suppressed = plan
+            .suppressed
+            .iter()
+            .enumerate()
+            .filter(|(_, suppressed)| **suppressed)
+            .map(|(step, _)| step)
+            .collect();
+        self.step_entity_ranges = entity_ranges;
+        self.step_instance_ranges = instance_ranges;
+        result?;
+
+        let mut report = ReplayReport::default();
+        let mut surviving = 0usize;
+        for old in old_ids {
+            match old_to_new.get(&old).copied() {
+                Some(new) if self.entities.contains_key(&new) => {
+                    surviving += 1;
+                    report.surviving_map.insert(old, new);
+                    if new != old {
+                        report.renumbered.push(IdChange {
+                            from: old,
+                            to: new,
+                            name: self
+                                .entities
+                                .get(&new)
+                                .map(|e| e.name.clone())
+                                .or_else(|| old_names.get(&old).cloned())
+                                .unwrap_or_default(),
+                        });
+                    }
+                },
+                _ => report.removed.push(old),
+            }
+        }
+        report.surviving = surviving;
+        report.created = self
+            .entities
+            .keys()
+            .copied()
+            .filter(|id| !new_to_old.contains_key(id))
+            .collect();
+        Ok(report)
     }
 
     /// Remember how the current step's selector resolved. Called by every
@@ -529,6 +694,7 @@ impl Document {
                 })
                 .collect(),
             program,
+            suppressed: self.suppressed.iter().copied().collect(),
             source: source.or_else(|| self.source.clone()),
         }
     }
@@ -549,11 +715,329 @@ impl Document {
             .collect();
         d.source = snapshot.source;
         d.program = snapshot.program;
+        d.suppressed = snapshot.suppressed;
         for cmd in &mut d.program {
             set_doc(cmd, id);
         }
         d.replay()?;
         Ok(d)
+    }
+}
+
+/// One replay's program plus how its steps relate to the previous program.
+#[derive(Debug, Clone)]
+struct ReplayPlan {
+    program: Vec<Command>,
+    /// Previous program step each new step came from (`None` = inserted).
+    origins: Vec<Option<usize>>,
+    suppressed: Vec<bool>,
+}
+
+/// What a replay did to entity ids, for reporting an edit.
+#[derive(Debug, Clone, Default)]
+struct ReplayReport {
+    surviving: usize,
+    /// Every old entity that still exists, mapped to its current id
+    /// (including identity mappings).
+    surviving_map: BTreeMap<EntityId, EntityId>,
+    renumbered: Vec<IdChange>,
+    removed: Vec<EntityId>,
+    created: Vec<EntityId>,
+}
+
+/// Rewrite a command's entity and instance references through a mapping.
+/// Missing ids are an error for a step that will run (the program would
+/// silently address the wrong entity); `tolerate_missing` leaves them alone
+/// for a suppressed step, which does not execute.
+fn remap_command(
+    command: &mut Command,
+    entities: &BTreeMap<EntityId, EntityId>,
+    instances: &BTreeMap<u64, u64>,
+    tolerate_missing: bool,
+) -> Result<()> {
+    let e = |id: &mut EntityId| -> Result<()> {
+        if let Some(new) = entities.get(id) {
+            *id = *new;
+            Ok(())
+        } else if tolerate_missing {
+            Ok(())
+        } else {
+            Err(Error::Invalid(format!(
+                "references entity {} which the edit no longer creates (hint: keep the step \
+                 that makes it, or remove/replace the steps that use it)",
+                id
+            )))
+        }
+    };
+    let i = |id: &mut u64| -> Result<()> {
+        if let Some(new) = instances.get(id) {
+            *id = *new;
+            Ok(())
+        } else if tolerate_missing {
+            Ok(())
+        } else {
+            Err(Error::Invalid(format!(
+                "references instance {} which the edit no longer places (hint: keep the \
+                 add_instance step, or remove the steps that use it)",
+                id
+            )))
+        }
+    };
+    match command {
+        Command::Transform { entity, .. }
+        | Command::SetColor { entity, .. }
+        | Command::Delete { entity, .. }
+        | Command::Fillet { entity, .. }
+        | Command::Chamfer { entity, .. }
+        | Command::Shell { entity, .. }
+        | Command::Hole { entity, .. } => e(entity)?,
+        Command::Boolean { entities: ids, .. }
+        | Command::LinearPattern { entities: ids, .. }
+        | Command::CircularPattern { entities: ids, .. }
+        | Command::Mirror { entities: ids, .. } => {
+            for id in ids {
+                e(id)?;
+            }
+        },
+        Command::AddSketch { plane: Some(SketchPlane::Face { entity, .. }), .. } => e(entity)?,
+        Command::AddSketchLine { sketch, .. }
+        | Command::AddSketchCircle { sketch, .. }
+        | Command::AddSketchArc { sketch, .. }
+        | Command::AddSketchSpline { sketch, .. }
+        | Command::TrimSketch { sketch, .. }
+        | Command::ExtendSketch { sketch, .. }
+        | Command::OffsetSketch { sketch, .. }
+        | Command::Constrain { sketch, .. }
+        | Command::RemoveConstraint { sketch, .. }
+        | Command::MoveSketchPoint { sketch, .. }
+        | Command::DeleteSketchElement { sketch, .. }
+        | Command::Extrude { sketch, .. }
+        | Command::Revolve { sketch, .. }
+        | Command::Sweep { sketch, .. } => e(sketch)?,
+        Command::Loft { sketches, .. } => {
+            for sketch in sketches {
+                e(sketch)?;
+            }
+        },
+        Command::AddConnector { instance, .. }
+        | Command::MoveInstance { instance, .. } => i(instance)?,
+        Command::Mate { a, b, .. } => {
+            i(&mut a.instance)?;
+            i(&mut b.instance)?;
+        },
+        // `AddPart` embeds another document with its own id space; never
+        // rebind it. Nothing else carries references.
+        _ => {},
+    }
+    Ok(())
+}
+
+/// Apply `ops` to a copy of the document's program, carrying each step's
+/// origin (for id remapping) and suppression flag.
+fn apply_program_ops(
+    d: &Document,
+    ops: &[ProgramOp],
+) -> Result<Vec<(Command, Option<usize>, bool)>> {
+    let mut entries: Vec<(Command, Option<usize>, bool)> = d
+        .program
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(step, command)| (command, Some(step), d.suppressed.contains(&step)))
+        .collect();
+    for op in ops {
+        match op {
+            ProgramOp::Insert { at, command } => {
+                if *at > entries.len() {
+                    return Err(Error::Invalid(format!(
+                        "insert index {at} is past the end of the program (0..={}; hint: the \
+                         program has {} steps)",
+                        entries.len(),
+                        entries.len()
+                    )));
+                }
+                let mut command = command.clone();
+                set_doc(&mut command, d.id);
+                if !is_modeling_command(&command) {
+                    return Err(Error::Invalid(format!(
+                        "patch_program can only insert modeling commands, not `{}` (hint: \
+                         session commands such as save_document never belong in the program)",
+                        command_tag(&command)
+                    )));
+                }
+                entries.insert(*at, (command, None, false));
+            },
+            ProgramOp::Remove { at } => {
+                if *at >= entries.len() {
+                    return Err(Error::Invalid(format!(
+                        "remove index {at} is outside the program (0..{}; hint: get_program \
+                         lists the current steps)",
+                        entries.len()
+                    )));
+                }
+                entries.remove(*at);
+            },
+            ProgramOp::Replace { at, command } => {
+                if *at >= entries.len() {
+                    return Err(Error::Invalid(format!(
+                        "replace index {at} is outside the program (0..{}; hint: get_program \
+                         lists the current steps)",
+                        entries.len()
+                    )));
+                }
+                let mut command = command.clone();
+                set_doc(&mut command, d.id);
+                if !is_modeling_command(&command) {
+                    return Err(Error::Invalid(format!(
+                        "patch_program can only replace a step with a modeling command, not \
+                         `{}`",
+                        command_tag(&command)
+                    )));
+                }
+                let origin = entries[*at].1;
+                let suppressed = entries[*at].2;
+                entries[*at] = (command, origin, suppressed);
+            },
+            ProgramOp::Reorder { from, to } => {
+                if *from >= entries.len() || *to >= entries.len() {
+                    return Err(Error::Invalid(format!(
+                        "reorder indexes are outside the program (from {from}, to {to}, 0..{}; \
+                         hint: a step can only move to an existing index)",
+                        entries.len()
+                    )));
+                }
+                let entry = entries.remove(*from);
+                entries.insert(*to, entry);
+            },
+        }
+    }
+    Ok(entries)
+}
+
+/// True for commands that produce or reshape model state and therefore
+/// belong in a program. Session commands (I/O, queries, undo, batch) do not.
+fn is_modeling_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::AddBox { .. }
+            | Command::AddSphere { .. }
+            | Command::AddCylinder { .. }
+            | Command::AddMesh { .. }
+            | Command::Transform { .. }
+            | Command::SetColor { .. }
+            | Command::Delete { .. }
+            | Command::Fillet { .. }
+            | Command::Chamfer { .. }
+            | Command::Boolean { .. }
+            | Command::AddSketch { .. }
+            | Command::AddSketchLine { .. }
+            | Command::AddSketchCircle { .. }
+            | Command::AddSketchArc { .. }
+            | Command::AddSketchSpline { .. }
+            | Command::TrimSketch { .. }
+            | Command::ExtendSketch { .. }
+            | Command::OffsetSketch { .. }
+            | Command::Constrain { .. }
+            | Command::RemoveConstraint { .. }
+            | Command::MoveSketchPoint { .. }
+            | Command::DeleteSketchElement { .. }
+            | Command::Extrude { .. }
+            | Command::Revolve { .. }
+            | Command::LinearPattern { .. }
+            | Command::CircularPattern { .. }
+            | Command::Mirror { .. }
+            | Command::Shell { .. }
+            | Command::Hole { .. }
+            | Command::Sweep { .. }
+            | Command::Loft { .. }
+            | Command::Thread { .. }
+            | Command::AddPart { .. }
+            | Command::AddInstance { .. }
+            | Command::AddConnector { .. }
+            | Command::MoveInstance { .. }
+            | Command::Mate { .. }
+    )
+}
+
+/// Give a selector that first ran during a patch replay the same stored
+/// expectation a live command gets, so later knob turns report `moved`
+/// instead of `unbound`. Expectations only affect reporting, so this needs no
+/// second replay.
+fn bind_missing_expectations(d: &mut Document) {
+    let bindings = d.reference_bindings.clone();
+    for (step, report) in bindings {
+        if check_reference(d, step, &d.program[step]).is_none() {
+            continue;
+        }
+        let Some(expect) = refs::expect_of(&report) else { continue };
+        match d.program.get_mut(step) {
+            Some(Command::Fillet { edges: Some(filter), .. })
+            | Some(Command::Chamfer { edges: Some(filter), .. }) => {
+                if filter.expect.is_none() {
+                    filter.expect = Some(expect);
+                }
+            },
+            Some(Command::AddSketch {
+                plane: Some(SketchPlane::Face { expect: slot, .. }),
+                ..
+            }) => {
+                if slot.is_none() {
+                    *slot = Some(expect);
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+/// The `patch_program` body: apply ops, replay, and either report (dry run)
+/// or commit. Commands inside the ops address pre-edit entity ids; the replay
+/// rewrites references as ids move.
+fn patch_program(d: &mut Document, ops: &[ProgramOp], dry_run: bool) -> Result<CommandResult> {
+    let entries = apply_program_ops(d, ops)?;
+    let plan = ReplayPlan {
+        program: entries.iter().map(|(command, _, _)| command.clone()).collect(),
+        origins: entries.iter().map(|(_, origin, _)| *origin).collect(),
+        suppressed: entries.iter().map(|(_, _, suppressed)| *suppressed).collect(),
+    };
+    if dry_run {
+        let mut scratch = d.clone();
+        let report = scratch.replay_plan(plan)?;
+        bind_missing_expectations(&mut scratch);
+        let diff = diff_documents(d.id, &scratch, d, None, "before patch".into());
+        return Ok(CommandResult::ProgramPatched {
+            doc: d.id,
+            dry_run: true,
+            steps: scratch.program.len(),
+            suppressed: d.suppressed.iter().copied().collect(),
+            surviving: report.surviving,
+            renumbered: report.renumbered,
+            removed: report.removed,
+            created: report.created,
+            diff: Some(diff),
+        });
+    }
+
+    d.checkpoint();
+    match d.replay_plan(plan) {
+        Ok(report) => {
+            bind_missing_expectations(d);
+            Ok(CommandResult::ProgramPatched {
+                doc: d.id,
+                dry_run: false,
+                steps: d.program.len(),
+                suppressed: d.suppressed.iter().copied().collect(),
+                surviving: report.surviving,
+                renumbered: report.renumbered,
+                removed: report.removed,
+                created: report.created,
+                diff: None,
+            })
+        },
+        Err(e) => {
+            d.rollback();
+            Err(e)
+        },
     }
 }
 
@@ -631,6 +1115,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::AddConnector { doc: d, .. }
         | Command::MoveInstance { doc: d, .. }
         | Command::Mate { doc: d, .. }
+        | Command::PatchProgram { doc: d, .. }
+        | Command::Suppress { doc: d, .. }
         | Command::BillOfMaterials { doc: d }
         | Command::CheckInterference { doc: d, .. }
         | Command::ExportDrawing { doc: d, .. }
@@ -658,12 +1144,17 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::ListDocuments
         | Command::CreateDocument { .. }
         | Command::OpenDocument { .. } => {},
+        Command::Batch { commands, .. } => {
+            for command in commands {
+                set_doc(command, doc);
+            }
+        },
     }
 }
 
 /// The engine. Deterministic: identical command sequences produce
 /// identical ids, meshes and results — safe to replay in tests.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Engine {
     docs: BTreeMap<DocId, Document>,
     next_doc: DocId,
@@ -893,9 +1384,16 @@ impl Engine {
                 d.checkpoint();
                 let step = d.program.len();
                 d.program.push(command.clone());
+                d.suppressed.remove(&step);
+                d.step_entity_ranges.resize(step + 1, (0, 0));
+                d.step_instance_ranges.resize(step + 1, (0, 0));
+                let before_entity = d.next_entity;
+                let before_instance = d.next_instance;
                 d.step = Some(step);
                 let result = exec(d, &command);
                 d.step = None;
+                d.step_entity_ranges[step] = (before_entity, d.next_entity);
+                d.step_instance_ranges[step] = (before_instance, d.next_instance);
                 match result {
                     Ok(result) => Ok(result),
                     Err(e) => {
@@ -928,8 +1426,8 @@ impl Engine {
                     .clone()
                     .or_else(|| d.params.get(name).and_then(|p| p.description.clone()));
                 d.params.insert(name.clone(), Param { value: resolved, description });
-                match d.replay() {
-                    Ok(()) => {
+                match d.replay_with_report() {
+                    Ok(report) => {
                         let references_drifted = reference_checks(d)
                             .iter()
                             .filter(|check| check.status == "drift")
@@ -942,6 +1440,9 @@ impl Engine {
                             reused: d.cache.reused,
                             steps: d.program.len(),
                             references_drifted,
+                            renumbered: report.renumbered,
+                            created: report.created,
+                            removed: report.removed,
                         })
                     },
                     Err(e) => {
@@ -991,6 +1492,9 @@ impl Engine {
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
+                    suppressed: std::mem::take(&mut d.suppressed),
+                    step_entity_ranges: std::mem::take(&mut d.step_entity_ranges),
+                    step_instance_ranges: std::mem::take(&mut d.step_instance_ranges),
                     reference_bindings: std::mem::take(&mut d.reference_bindings),
                 });
                 d.next_entity = snap.next_entity;
@@ -1000,6 +1504,9 @@ impl Engine {
                 d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
+                d.suppressed = snap.suppressed;
+                d.step_entity_ranges = snap.step_entity_ranges;
+                d.step_instance_ranges = snap.step_instance_ranges;
                 d.reference_bindings = snap.reference_bindings;
                 Ok(CommandResult::Undone { doc: *doc })
             },
@@ -1015,6 +1522,9 @@ impl Engine {
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
+                    suppressed: std::mem::take(&mut d.suppressed),
+                    step_entity_ranges: std::mem::take(&mut d.step_entity_ranges),
+                    step_instance_ranges: std::mem::take(&mut d.step_instance_ranges),
                     reference_bindings: std::mem::take(&mut d.reference_bindings),
                 });
                 d.next_entity = snap.next_entity;
@@ -1024,6 +1534,9 @@ impl Engine {
                 d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
+                d.suppressed = snap.suppressed;
+                d.step_entity_ranges = snap.step_entity_ranges;
+                d.step_instance_ranges = snap.step_instance_ranges;
                 d.reference_bindings = snap.reference_bindings;
                 Ok(CommandResult::Redone { doc: *doc })
             },
@@ -1280,7 +1793,7 @@ impl Engine {
                         _ => unreachable!("validated exactly one baseline above"),
                     };
 
-                Ok(diff_documents(*doc, d, baseline, against_id, against_name))
+                Ok(CommandResult::SceneDiff(diff_documents(*doc, d, baseline, against_id, against_name)))
             },
 
             Command::ExportStl { doc, path, entities } => {
@@ -1500,7 +2013,138 @@ impl Engine {
                         })
                         .collect(),
                     program: d.program.clone(),
+                    suppressed: d.suppressed.iter().copied().collect(),
                     source: d.source.clone(),
+                })
+            },
+
+            Command::Batch { commands, atomic } => {
+                let backup = if *atomic { Some(self.clone()) } else { None };
+                let mut results = Vec::with_capacity(commands.len());
+                for (index, nested) in commands.iter().enumerate() {
+                    match self.execute(nested.clone()) {
+                        Ok(result) => results.push(result),
+                        Err(e) => {
+                            if let Some(backup) = backup {
+                                *self = backup;
+                            }
+                            let name = command_tag(nested);
+                            let label = if name.is_empty() { "command".to_string() } else { format!("`{name}`") };
+                            return Err(Error::Invalid(format!(
+                                "batch stopped at {label} (index {index}): {e}{}",
+                                if *atomic {
+                                    " (hint: atomic:true rolled every document change in this batch back)"
+                                } else {
+                                    " (hint: use atomic:true to roll the whole batch back on failure)"
+                                }
+                            )));
+                        },
+                    }
+                }
+                Ok(CommandResult::BatchExecuted {
+                    commands: commands.len(),
+                    atomic: *atomic,
+                    results,
+                })
+            },
+
+            Command::PatchProgram { doc, ops, dry_run } => {
+                let d = self.doc_mut(*doc)?;
+                patch_program(d, ops, *dry_run)
+            },
+
+            Command::Suppress { doc, steps, suppress } => {
+                let d = self.doc_mut(*doc)?;
+                if steps.is_empty() {
+                    return Err(Error::Invalid(
+                        "suppress needs at least one step (hint: get_program lists the 0-based \
+                         indexes; suppress:false turns a step back on)"
+                            .into(),
+                    ));
+                }
+                for step in steps {
+                    if *step >= d.program.len() {
+                        return Err(Error::Invalid(format!(
+                            "program step {step} does not exist (0..{}; hint: get_program lists \
+                             the current steps)",
+                            d.program.len()
+                        )));
+                    }
+                }
+                d.checkpoint();
+                let original_ids: Vec<EntityId> = d.entities.keys().copied().collect();
+                let mut current: BTreeMap<EntityId, EntityId> =
+                    original_ids.iter().map(|id| (*id, *id)).collect();
+                let mut order: Vec<usize> = steps.iter().copied().collect();
+                order.sort_unstable();
+                order.dedup();
+                // Suppress dependents before their sources; restore sources
+                // before dependents. One replay per step keeps every
+                // intermediate state valid, so an A/B chain can be toggled as
+                // one command.
+                if *suppress {
+                    order.reverse();
+                }
+                for step in order {
+                    if *suppress {
+                        d.suppressed.insert(step);
+                    } else {
+                        d.suppressed.remove(&step);
+                    }
+                    match d.replay_with_report() {
+                        Ok(report) => {
+                            let mut next = BTreeMap::new();
+                            for (original, now) in current {
+                                if let Some(new) = report.surviving_map.get(&now) {
+                                    next.insert(original, *new);
+                                }
+                            }
+                            current = next;
+                        },
+                        Err(e) => {
+                            d.rollback();
+                            let hint = if *suppress {
+                                "a later step still uses the suppressed feature; suppress that \
+                                 step too, or delete it"
+                            } else {
+                                "a step that creates this entity is still suppressed; restore \
+                                 it too"
+                            };
+                            return Err(Error::Invalid(format!(
+                                "cannot {} steps {steps:?}: {e} (hint: {hint})",
+                                if *suppress { "suppress" } else { "restore" }
+                            )));
+                        },
+                    }
+                }
+                let final_ids: std::collections::BTreeSet<EntityId> =
+                    d.entities.keys().copied().collect();
+                let mapped: std::collections::BTreeSet<EntityId> =
+                    current.values().copied().collect();
+                let mut renumbered = Vec::new();
+                for (from, to) in &current {
+                    if from != to {
+                        renumbered.push(IdChange {
+                            from: *from,
+                            to: *to,
+                            name: d.entities.get(to).map(|e| e.name.clone()).unwrap_or_default(),
+                        });
+                    }
+                }
+                let removed: Vec<EntityId> = original_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !current.contains_key(id))
+                    .collect();
+                let created: Vec<EntityId> =
+                    final_ids.iter().copied().filter(|id| !mapped.contains(id)).collect();
+                Ok(CommandResult::SuppressionChanged {
+                    doc: *doc,
+                    suppressed: d.suppressed.iter().copied().collect(),
+                    steps: d.program.len(),
+                    removed,
+                    renumbered,
+                    created,
                 })
             },
 
@@ -1660,6 +2304,9 @@ fn reference_checks(d: &Document) -> Vec<ReferenceCheck> {
 }
 
 fn check_reference(d: &Document, step: usize, command: &Command) -> Option<ReferenceCheck> {
+    if d.suppressed.contains(&step) {
+        return None;
+    }
     let (entity, method, expect, bindable) = match command {
         Command::Fillet { entity, edges: Some(filter), .. } => {
             (*entity, "fillet", filter.expect.clone(), true)
@@ -1795,7 +2442,7 @@ fn diff_documents(
     baseline: &Document,
     against: Option<DocId>,
     against_name: String,
-) -> CommandResult {
+) -> SceneDiffReport {
     use std::collections::BTreeSet;
 
     let current_signature = validate::scene_signature(&current.entities);
@@ -1892,7 +2539,7 @@ fn diff_documents(
         || program_changed
         || !references.is_empty();
 
-    CommandResult::SceneDiff {
+    SceneDiffReport {
         doc,
         against,
         against_name,
@@ -1952,6 +2599,14 @@ fn method_name(command: &Command) -> &'static str {
         Command::Mate { .. } => "mate",
         _ => "",
     }
+}
+
+/// The wire tag of a command, for error messages that name what failed.
+fn command_tag(command: &Command) -> String {
+    serde_json::to_value(command)
+        .ok()
+        .and_then(|value| value.get("method").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// Mesh equality for diffing: positions and indices, bit for bit. Normals
@@ -2036,6 +2691,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::AddConnector { doc, .. }
         | Command::MoveInstance { doc, .. }
         | Command::Mate { doc, .. }
+        | Command::PatchProgram { doc, .. }
+        | Command::Suppress { doc, .. }
         | Command::SetParameter { doc, .. }
         | Command::RemoveParameter { doc, .. }
         | Command::GetParameters { doc }
@@ -2054,6 +2711,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::ExportStep { doc, .. }
         | Command::RenderOffscreen { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
+        Command::Batch { commands, .. } => commands.iter().find_map(doc_of),
         _ => None,
     }
 }
@@ -2625,7 +3283,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
         Command::LinearPattern { doc, entities, direction, spacing, count, name, color } => {
             let direction = d.resolve3(direction)?;
             let spacing = d.resolve(spacing)?;
-            let count = validate_count(*count)?;
+            let count = validate_count(d.resolve(count)?)?;
             if direction.iter().all(|v| v.abs() < 1e-12) {
                 return Err(Error::Invalid(
                     "linear_pattern direction must be a non-zero vector (e.g. [1,0,0])".into(),
@@ -2668,7 +3326,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     "circular_pattern angle_deg must be a finite non-zero angle".into(),
                 ));
             }
-            let count = validate_count(*count)?;
+            let count = validate_count(d.resolve(count)?)?;
             let step = angle / count as f64;
             let mut created = Vec::new();
             for &source in entities {
@@ -3555,13 +4213,20 @@ fn pattern_result(
     CommandResult::EntitiesCreated { doc, entities: created, tris, reference }
 }
 
-fn validate_count(count: u32) -> Result<u32> {
+fn validate_count(count: f64) -> Result<u32> {
+    if !count.is_finite() || (count - count.round()).abs() > 1e-9 {
+        return Err(Error::Invalid(format!(
+            "pattern count must be a whole number between 2 and 1000, and includes the \
+             original (got {count})"
+        )));
+    }
+    let count = count.round() as i64;
     if !(2..=1000).contains(&count) {
         return Err(Error::Invalid(format!(
             "pattern count must be between 2 and 1000, and includes the original (got {count})"
         )));
     }
-    Ok(count)
+    Ok(count as u32)
 }
 
 fn normalize3(v: Vec3) -> Vec3 {
@@ -6444,7 +7109,7 @@ mod tests {
 
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"format\": \"wright-document\""));
-        assert!(text.contains("\"version\": 4"));
+        assert!(text.contains("\"version\": 5"));
         assert!(text.contains("print('hi')"), "the embedded source is preserved");
         // The file is the program, not the geometry.
         assert!(!text.contains("\"mesh\""));
@@ -7216,20 +7881,16 @@ mod tests {
             .execute(Command::DiffScene { doc: 1, against: None, path: Some(path_s.clone()) })
             .unwrap()
         {
-            CommandResult::SceneDiff {
-                changed,
-                added,
-                removed,
-                modified,
-                unchanged,
-                parameters,
-                program_changed,
-                commands_from,
-                commands_to,
-                scene_signature,
-                against_signature,
-                ..
-            } => {
+            CommandResult::SceneDiff(report) => {
+                let (changed, added, removed, modified, unchanged, parameters, program_changed) = (
+                    report.changed,
+                    report.added,
+                    report.removed,
+                    report.modified,
+                    report.unchanged,
+                    report.parameters,
+                    report.program_changed,
+                );
                 assert!(changed);
                 assert!(added.is_empty() && removed.is_empty());
                 assert_eq!(unchanged, 0);
@@ -7246,8 +7907,8 @@ mod tests {
                 assert_eq!(parameters[0].from, Some(4.0));
                 assert_eq!(parameters[0].to, Some(0.8));
                 assert!(!program_changed);
-                assert_eq!(commands_from, commands_to);
-                assert_ne!(scene_signature, against_signature);
+                assert_eq!(report.commands_from, report.commands_to);
+                assert_ne!(report.scene_signature, report.against_signature);
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -7264,24 +7925,15 @@ mod tests {
             .execute(Command::DiffScene { doc: 1, against: None, path: Some(path_s) })
             .unwrap()
         {
-            CommandResult::SceneDiff {
-                changed,
-                added,
-                removed,
-                modified,
-                unchanged,
-                parameters,
-                program_changed,
-                scene_signature,
-                against_signature,
-                ..
-            } => {
-                assert!(!changed);
-                assert!(added.is_empty() && removed.is_empty() && modified.is_empty());
-                assert_eq!(unchanged, 1);
-                assert!(parameters.is_empty());
-                assert!(!program_changed);
-                assert_eq!(scene_signature, against_signature);
+            CommandResult::SceneDiff(report) => {
+                assert!(!report.changed);
+                assert!(report.added.is_empty()
+                    && report.removed.is_empty()
+                    && report.modified.is_empty());
+                assert_eq!(report.unchanged, 1);
+                assert!(report.parameters.is_empty());
+                assert!(!report.program_changed);
+                assert_eq!(report.scene_signature, report.against_signature);
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -7322,14 +7974,14 @@ mod tests {
             .execute(Command::DiffScene { doc: 1, against: Some(2), path: None })
             .unwrap()
         {
-            CommandResult::SceneDiff { changed, added, removed, modified, unchanged, .. } => {
-                assert!(changed);
-                assert!(added.is_empty());
-                assert_eq!(removed.len(), 1);
-                assert_eq!(removed[0].entity, 2);
-                assert_eq!(modified.len(), 1);
-                assert!(modified[0].changed.iter().any(|c| c == "mesh"));
-                assert_eq!(unchanged, 0);
+            CommandResult::SceneDiff(report) => {
+                assert!(report.changed);
+                assert!(report.added.is_empty());
+                assert_eq!(report.removed.len(), 1);
+                assert_eq!(report.removed[0].entity, 2);
+                assert_eq!(report.modified.len(), 1);
+                assert!(report.modified[0].changed.iter().any(|c| c == "mesh"));
+                assert_eq!(report.unchanged, 0);
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -7348,10 +8000,10 @@ mod tests {
             .execute(Command::DiffScene { doc: 1, against: Some(3), path: None })
             .unwrap()
         {
-            CommandResult::SceneDiff { changed, unchanged, modified, parameters, .. } => {
-                assert!(!changed);
-                assert_eq!(unchanged, 1);
-                assert!(modified.is_empty() && parameters.is_empty());
+            CommandResult::SceneDiff(report) => {
+                assert!(!report.changed);
+                assert_eq!(report.unchanged, 1);
+                assert!(report.modified.is_empty() && report.parameters.is_empty());
             },
             r => panic!("unexpected result {r:?}"),
         }
@@ -7602,7 +8254,7 @@ mod tests {
                 entities: vec![source],
                 direction: [num(1.0), num(0.0), num(0.0)],
                 spacing: num(20.0),
-                count: 3,
+                count: num(3.0),
                 name: None,
                 color: None,
             })
@@ -7628,7 +8280,7 @@ mod tests {
                 center: Some(vec3(0.0)),
                 axis: Some([0.0, 0.0, 1.0]),
                 angle_deg: Some(num(360.0)),
-                count: 4,
+                count: num(4.0),
                 name: Some("hole".into()),
                 color: None,
             })
@@ -7685,7 +8337,7 @@ mod tests {
             entities: vec![source],
             direction: [num(1.0), num(0.0), num(0.0)],
             spacing: num(20.0),
-            count: 3,
+            count: num(3.0),
             name: None,
             color: None,
         })
@@ -7978,7 +8630,7 @@ mod tests {
             entities: vec![body],
             direction: [num(1.0), num(0.0), num(0.0)],
             spacing: num(50.0),
-            count: 2,
+            count: num(2.0),
             name: None,
             color: None,
         })
@@ -8470,10 +9122,10 @@ mod tests {
         build(3, [10.0, 10.0, 0.0]);
 
         match e.execute(Command::DiffScene { doc: 2, against: Some(3), path: None }).unwrap() {
-            CommandResult::SceneDiff { changed, references, .. } => {
-                assert!(changed);
-                assert_eq!(references.len(), 1, "{references:?}");
-                let change = &references[0];
+            CommandResult::SceneDiff(report) => {
+                assert!(report.changed);
+                assert_eq!(report.references.len(), 1, "{:?}", report.references);
+                let change = &report.references[0];
                 assert_eq!(change.method, "fillet");
                 assert_eq!(change.matched_from, 1);
                 assert_eq!(change.matched_to, 1);
@@ -8604,6 +9256,540 @@ mod tests {
 
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
+    }
+
+    // --- program editing (M21) ----------------------------------------------
+
+    fn program_of(e: &mut Engine) -> (Vec<Command>, Vec<usize>) {
+        match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { program, suppressed, .. } => (program, suppressed),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn entity_ids(e: &mut Engine) -> Vec<EntityId> {
+        match e.execute(Command::GetScene { doc: 1 }).unwrap() {
+            CommandResult::Scene { entities, .. } => entities.into_iter().map(|x| x.id).collect(),
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    fn patch(e: &mut Engine, ops: Vec<ProgramOp>, dry_run: bool) -> CommandResult {
+        e.execute(Command::PatchProgram { doc: 1, ops, dry_run }).unwrap()
+    }
+
+    fn insert_box(at: usize, name: &str, size: f64) -> ProgramOp {
+        ProgramOp::Insert {
+            at,
+            command: Command::AddBox {
+                doc: 1,
+                name: name.into(),
+                center: [num(50.0), num(0.0), num(0.0)],
+                size: [num(size), num(size), num(size)],
+                color: None,
+            },
+        }
+    }
+
+    #[test]
+    fn patch_dry_run_reports_the_id_shift_and_commits_cleanly() {
+        let mut e = engine();
+        let a = add_box(&mut e, [0.0; 3], [10.0; 3]);
+        let b = match e
+            .execute(Command::AddCylinder {
+                doc: 1,
+                name: "post".into(),
+                center: vec3(0.0),
+                radius: num(3.0),
+                height: num(20.0),
+                segments: Some(16),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let fused = union(&mut e, &[a, b]);
+        assert_eq!((a, b, fused), (1, 2, 3));
+
+        let (surviving, created, renumbered, diff, steps) =
+            match patch(&mut e, vec![insert_box(0, "inserted", 2.0)], true) {
+                CommandResult::ProgramPatched {
+                    surviving,
+                    created,
+                    renumbered,
+                    diff,
+                    steps,
+                    ..
+                } => (surviving, created, renumbered, diff.expect("dry run diff"), steps),
+                r => panic!("unexpected result {r:?}"),
+            };
+        assert_eq!(steps, 4);
+        assert_eq!(surviving, 3);
+        assert_eq!(created, vec![1]);
+        assert_eq!(
+            renumbered.iter().map(|c| (c.from, c.to)).collect::<Vec<_>>(),
+            vec![(1, 2), (2, 3), (3, 4)]
+        );
+        assert!(diff.changed);
+        assert_eq!((diff.commands_from, diff.commands_to), (3, 4));
+        // The dry run changed nothing.
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3]);
+        assert_eq!(program_of(&mut e).0.len(), 3);
+
+        // Commit: the boolean step must now address the old box and cylinder
+        // under their new ids, not whatever id 1 happens to be.
+        match patch(&mut e, vec![insert_box(0, "inserted", 2.0)], false) {
+            CommandResult::ProgramPatched { dry_run: false, created, surviving: 3, .. } => {
+                assert_eq!(created, vec![1]);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let (program, suppressed) = program_of(&mut e);
+        assert_eq!(program.len(), 4);
+        assert!(suppressed.is_empty());
+        match &program[3] {
+            Command::Boolean { entities, .. } => assert_eq!(entities, &vec![2, 3]),
+            other => panic!("step 3 should be the boolean, got {other:?}"),
+        }
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3, 4]);
+
+        // One undo step puts the old program and ids back.
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3]);
+        match &program_of(&mut e).0[2] {
+            Command::Boolean { entities, .. } => assert_eq!(entities, &vec![1, 2]),
+            other => panic!("step 2 should be the boolean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn patch_remove_and_replace_keep_or_reject_references() {
+        let mut e = engine();
+        let a = add_box(&mut e, [0.0; 3], [10.0; 3]);
+        let b = add_box(&mut e, [20.0, 0.0, 0.0], [10.0; 3]);
+        let fused = union(&mut e, &[a, b]);
+
+        // Removing a source the boolean still uses must fail without
+        // touching the document.
+        let before = scene_sig(&e);
+        let err = e
+            .execute(Command::PatchProgram {
+                doc: 1,
+                ops: vec![ProgramOp::Remove { at: 0 }],
+                dry_run: false,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("no longer creates"), "{err}");
+        assert_eq!(scene_sig(&e), before);
+        assert_eq!(program_of(&mut e).0.len(), 3);
+
+        // Replacing a source keeps its identity, so the boolean and ids stay.
+        let (surviving, removed, renumbered, diff) = match patch(
+            &mut e,
+            vec![ProgramOp::Replace {
+                at: 0,
+                command: Command::AddBox {
+                    doc: 1,
+                    name: "wider".into(),
+                    center: [num(0.0), num(0.0), num(0.0)],
+                    size: [num(16.0), num(10.0), num(10.0)],
+                    color: None,
+                },
+            }],
+            false,
+        ) {
+            CommandResult::ProgramPatched { surviving, removed, renumbered, diff, .. } => {
+                (surviving, removed, renumbered, diff)
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(surviving, 3);
+        assert!(removed.is_empty() && renumbered.is_empty());
+        assert!(diff.is_none(), "a commit has no dry-run diff");
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3]);
+        let _ = fused;
+        match &program_of(&mut e).0[2] {
+            Command::Boolean { entities, .. } => assert_eq!(entities, &vec![1, 2]),
+            other => panic!("step 2 should be the boolean, got {other:?}"),
+        }
+        // Reordering steps still remaps their references.
+        match patch(&mut e, vec![ProgramOp::Reorder { from: 0, to: 1 }], false) {
+            CommandResult::ProgramPatched { surviving: 3, .. } => {},
+            r => panic!("unexpected result {r:?}"),
+        }
+        let (program, _) = program_of(&mut e);
+        match &program[2] {
+            Command::Boolean { entities, .. } => assert_eq!(entities, &vec![2, 1]),
+            other => panic!("step 2 should be the boolean, got {other:?}"),
+        }
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3]);
+        let first = entity_snapshot(&mut e, 1);
+        let second = entity_snapshot(&mut e, 2);
+        assert!((first.translation[0] - 20.0).abs() < 1e-9);
+        assert!((second.translation[0] - 0.0).abs() < 1e-9);
+
+        // Session commands are not program steps.
+        let err = e
+            .execute(Command::PatchProgram {
+                doc: 1,
+                ops: vec![ProgramOp::Insert {
+                    at: 0,
+                    command: Command::GetProgram { doc: 1 },
+                }],
+                dry_run: true,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("modeling command"), "{err}");
+    }
+
+    #[test]
+    fn suppress_turns_a_feature_off_without_deleting_the_step() {
+        let mut e = engine();
+        let a = add_box(&mut e, [0.0; 3], [20.0; 3]);
+        let b = match e
+            .execute(Command::AddCylinder {
+                doc: 1,
+                name: "post".into(),
+                center: vec3(0.0),
+                radius: num(4.0),
+                height: num(20.0),
+                segments: Some(16),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let fused = union(&mut e, &[a, b]);
+        e.execute(Command::Fillet {
+            doc: 1,
+            entity: fused,
+            radius: num(1.5),
+            edges: Some(EdgeFilter { convex: Some(true), ..Default::default() }),
+            min_angle_deg: None,
+        })
+        .unwrap();
+        assert_eq!(program_of(&mut e).0.len(), 4);
+        let filleted_volume = volume_of(&mut e, fused);
+
+        // Suppressing the union while the fillet still uses it is rejected.
+        let err = e
+            .execute(Command::Suppress { doc: 1, steps: vec![2], suppress: true })
+            .unwrap_err();
+        assert!(err.to_string().contains("suppress that step too"), "{err}");
+        assert!(program_of(&mut e).1.is_empty());
+
+        // Steps 0/1 make solids, 2 is the union, 3 the fillet.
+        match e
+            .execute(Command::Suppress { doc: 1, steps: vec![3], suppress: true })
+            .unwrap()
+        {
+            CommandResult::SuppressionChanged { suppressed, steps, removed, .. } => {
+                assert_eq!(suppressed, vec![3]);
+                assert_eq!(steps, 4);
+                assert!(removed.is_empty());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3]);
+        let plain_volume = volume_of(&mut e, fused);
+        assert!(plain_volume > filleted_volume, "{plain_volume} vs {filleted_volume}");
+        // The step is still there, just skipped.
+        assert_eq!(program_of(&mut e).0.len(), 4);
+        assert_eq!(program_of(&mut e).1, vec![3]);
+
+        // Back on: same feature, same ids, same volume.
+        match e
+            .execute(Command::Suppress { doc: 1, steps: vec![3], suppress: false })
+            .unwrap()
+        {
+            CommandResult::SuppressionChanged { suppressed, .. } => assert!(suppressed.is_empty()),
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert!((volume_of(&mut e, fused) - filleted_volume).abs() < 1e-6);
+    }
+
+    #[test]
+    fn suppress_renumbers_and_restores_later_entities() {
+        let mut e = engine();
+        let src = add_box(&mut e, [0.0; 3], [10.0; 3]);
+        match e
+            .execute(Command::LinearPattern {
+                doc: 1,
+                entities: vec![src],
+                direction: [num(1.0), num(0.0), num(0.0)],
+                spacing: num(20.0),
+                count: num(3.0),
+                name: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntitiesCreated { entities, .. } => assert_eq!(entities, vec![2, 3]),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let last = add_box(&mut e, [100.0, 0.0, 0.0], [5.0; 3]);
+        assert_eq!(last, 4);
+
+        match e
+            .execute(Command::Suppress { doc: 1, steps: vec![1], suppress: true })
+            .unwrap()
+        {
+            CommandResult::SuppressionChanged { removed, renumbered, .. } => {
+                assert_eq!(removed, vec![2, 3]);
+                assert_eq!(
+                    renumbered.iter().map(|c| (c.from, c.to)).collect::<Vec<_>>(),
+                    vec![(4, 2)]
+                );
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert_eq!(entity_ids(&mut e), vec![1, 2]);
+
+        e.execute(Command::Suppress { doc: 1, steps: vec![1], suppress: false }).unwrap();
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3, 4]);
+        // The independent box came back under its original id.
+        let snap = entity_snapshot(&mut e, 4);
+        assert!((snap.translation[0] - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn suppress_handles_a_dependency_chain_as_one_toggle() {
+        let mut e = engine();
+        let src = add_box(&mut e, [0.0; 3], [10.0; 3]);
+        let copies = match e
+            .execute(Command::LinearPattern {
+                doc: 1,
+                entities: vec![src],
+                direction: [num(1.0), num(0.0), num(0.0)],
+                spacing: num(20.0),
+                count: num(3.0),
+                name: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntitiesCreated { entities, .. } => entities,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(copies, vec![2, 3]);
+        let fused = union(&mut e, &[src, copies[0]]);
+        assert_eq!(fused, 4);
+        let before = scene_sig(&e);
+
+        // The union uses a pattern copy, so both steps form one variant.
+        match e
+            .execute(Command::Suppress { doc: 1, steps: vec![1, 2], suppress: true })
+            .unwrap()
+        {
+            CommandResult::SuppressionChanged { suppressed, removed, .. } => {
+                assert_eq!(suppressed, vec![1, 2]);
+                assert_eq!(removed, vec![2, 3, 4]);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert_eq!(entity_ids(&mut e), vec![1]);
+
+        // Restoring both in one command restores the whole chain, ids and all.
+        match e
+            .execute(Command::Suppress { doc: 1, steps: vec![1, 2], suppress: false })
+            .unwrap()
+        {
+            CommandResult::SuppressionChanged { suppressed, created, .. } => {
+                assert!(suppressed.is_empty());
+                assert_eq!(created, vec![2, 3, 4]);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert_eq!(scene_sig(&e), before);
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn pattern_count_is_a_parameter_and_downstream_refs_follow() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "n".into(),
+            value: num(3.0),
+            description: None,
+        })
+        .unwrap();
+        let src = add_box(&mut e, [0.0; 3], [10.0; 3]);
+        match e
+            .execute(Command::LinearPattern {
+                doc: 1,
+                entities: vec![src],
+                direction: [num(1.0), num(0.0), num(0.0)],
+                spacing: num(20.0),
+                count: Scalar::Expression("n".into()),
+                name: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntitiesCreated { entities, .. } => assert_eq!(entities, vec![2, 3]),
+            r => panic!("unexpected result {r:?}"),
+        }
+        let plate = add_box(&mut e, [200.0, 0.0, 0.0], [10.0; 3]);
+        assert_eq!(plate, 4);
+        e.execute(Command::Fillet {
+            doc: 1,
+            entity: plate,
+            radius: num(1.0),
+            edges: None,
+            min_angle_deg: None,
+        })
+        .unwrap();
+        let rounded = volume_of(&mut e, plate);
+
+        // Fewer copies: the plate (4) becomes 3 and the fillet follows it.
+        match e
+            .execute(Command::SetParameter {
+                doc: 1,
+                name: "n".into(),
+                value: num(2.0),
+                description: None,
+            })
+            .unwrap()
+        {
+            CommandResult::ParameterSet { renumbered, .. } => {
+                assert_eq!(
+                    renumbered.iter().map(|c| (c.from, c.to)).collect::<Vec<_>>(),
+                    vec![(4, 3)]
+                );
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3]);
+        assert!((volume_of(&mut e, 3) - rounded).abs() < 1e-6);
+        match &program_of(&mut e).0[3] {
+            Command::Fillet { entity, .. } => assert_eq!(*entity, 3),
+            other => panic!("step 3 should be the fillet, got {other:?}"),
+        }
+
+        // More copies: everything downstream renumbers again.
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "n".into(),
+            value: num(4.0),
+            description: None,
+        })
+        .unwrap();
+        assert_eq!(entity_ids(&mut e), vec![1, 2, 3, 4, 5]);
+        assert!((volume_of(&mut e, 5) - rounded).abs() < 1e-6);
+        match &program_of(&mut e).0[3] {
+            Command::Fillet { entity, .. } => assert_eq!(*entity, 5),
+            other => panic!("step 3 should be the fillet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_suppressed_patch_round_trips_through_save_and_open() {
+        let (p1, p1s) = temp_file("wright_patch_a.wcad");
+        let (p2, p2s) = temp_file("wright_patch_b.wcad");
+
+        let mut a = engine();
+        let box_id = add_box(&mut a, [0.0; 3], [10.0; 3]);
+        a.execute(Command::Fillet {
+            doc: 1,
+            entity: box_id,
+            radius: num(1.0),
+            edges: None,
+            min_angle_deg: None,
+        })
+        .unwrap();
+        patch(&mut a, vec![insert_box(0, "extra", 4.0)], false);
+        a.execute(Command::Suppress { doc: 1, steps: vec![0], suppress: true }).unwrap();
+        // Suppressing the inserted box shifts the others; the fillet step is
+        // still valid and now addresses the box under its new id.
+        let (program, suppressed) = program_of(&mut a);
+        assert_eq!(suppressed, vec![0]);
+        assert_eq!(program.len(), 3);
+        match &program[2] {
+            Command::Fillet { entity, .. } => assert_eq!(*entity, 1),
+            other => panic!("step 2 should be the fillet, got {other:?}"),
+        }
+        let signature = scene_sig(&a);
+        a.execute(Command::SaveDocument { doc: 1, path: p1s.clone(), source: None }).unwrap();
+
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: p1s.clone(), name: None }).unwrap();
+        assert_eq!(scene_sig(&b), signature);
+        assert_eq!(program_of(&mut b).1, vec![0]);
+        b.execute(Command::SaveDocument { doc: 1, path: p2s.clone(), source: None }).unwrap();
+        assert_eq!(
+            std::fs::read(&p1).unwrap(),
+            std::fs::read(&p2).unwrap(),
+            "suppression and patched references must survive a round trip"
+        );
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn atomic_batch_rolls_back_every_command() {
+        let mut e = engine();
+        add_box(&mut e, [0.0; 3], [10.0; 3]);
+        let before = scene_sig(&e);
+
+        let err = e
+            .execute(Command::Batch {
+                commands: vec![
+                    Command::AddBox {
+                        doc: 1,
+                        name: "ok".into(),
+                        center: [num(30.0), num(0.0), num(0.0)],
+                        size: vec3(5.0),
+                        color: None,
+                    },
+                    Command::AddBox {
+                        doc: 1,
+                        name: "bad".into(),
+                        center: [num(60.0), num(0.0), num(0.0)],
+                        size: vec3(0.0),
+                        color: None,
+                    },
+                ],
+                atomic: true,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("index 1"), "{err}");
+        assert_eq!(scene_sig(&e), before);
+        assert_eq!(program_of(&mut e).0.len(), 1);
+        // The failed batch left no half-undo either: undo removes the box
+        // that existed before it.
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        assert_eq!(program_of(&mut e).0.len(), 0);
+        assert!(entity_ids(&mut e).is_empty());
+
+        // Non-atomic stops on the error but keeps what already ran.
+        e.execute(Command::Batch {
+            commands: vec![
+                Command::AddBox {
+                    doc: 1,
+                    name: "ok".into(),
+                    center: [num(0.0), num(0.0), num(0.0)],
+                    size: vec3(5.0),
+                    color: None,
+                },
+                Command::AddBox {
+                    doc: 1,
+                    name: "bad".into(),
+                    center: [num(60.0), num(0.0), num(0.0)],
+                    size: vec3(0.0),
+                    color: None,
+                },
+            ],
+            atomic: false,
+        })
+        .unwrap_err();
+        assert_eq!(program_of(&mut e).0.len(), 1);
+        assert_eq!(entity_ids(&mut e), vec![1]);
     }
 
 }

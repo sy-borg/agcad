@@ -30,9 +30,14 @@ MAX_BATCH = 500
 INSTRUCTIONS = """Wright CAD is a headless parametric CAD for 3D printing.
 A document holds a program: every modeling command is recorded, dimensions may be
 expressions over named parameters ("wall*2"). set_parameter replays the program
-deterministically (entity ids stay stable) and regenerates only the geometry
-downstream of the change; unchanged features reuse memoized meshes. undo/redo
-revert one command each and restore parameters + program + geometry atomically.
+deterministically (entity ids stay stable unless a pattern count expression
+changes) and regenerates only the geometry downstream of the change; unchanged
+features reuse memoized meshes. set_parameter reports any renumbered ids.
+undo/redo revert one command each and restore parameters + program + geometry
+atomically. patch_program inserts/removes/replaces/reorders program steps with a
+dry run that reports surviving and renumbered ids plus a scene diff; suppress
+turns a step off without deleting it for A/B variants; batch{commands,
+atomic:true} rolls a failed multi-command batch back.
 Units: millimeters and degrees. Z is up. Colors are [r,g,b,a] floats 0..1.
 Cylinders extrude along +Z. Document ids start at 1; create_document takes an
 optional explicit `doc` id, so create-then-populate fits in one batch.
@@ -65,7 +70,8 @@ document with no script is scratch state. A human working in the viewer can
 label entities and click a face or edge; the click arrives as a pick result
 whose face/edge selectors you pass straight to add_sketch/fillet/chamfer.
 Shape leverage: linear_pattern/circular_pattern repeat solids (count includes the
-original), mirror reflects them across a plane, shell hollows a solid in place
+original and may be an expression), mirror reflects them across a plane, shell
+hollows a solid in place
 (open faces listed by outward normal), hole cuts a through/blind/counterbore/
 countersink hole in place, sweep carries a profile along a polyline or helix,
 loft morphs between two or more profiles, and thread builds a real screw thread
@@ -184,10 +190,13 @@ revolve{doc,sketch,angle_deg?,axis?:"x"|"y",segments?,name?,color?} (profile →
   solid of revolution around an in-plane axis, default 360°; profile must stay on
   one side of the axis),
 linear_pattern{doc,entities:[ids],direction:[x,y,z],spacing,count,name?,color?}
-  (count INCLUDES the original, so count:4 creates 3 copies; new solids are
-  returned in `entities`; spacing may be an expression),
+  (count INCLUDES the original, so count:4 creates 3 copies; both count and
+  spacing may be expressions, so a parameter drives the number of copies. New
+  solids are returned in `entities`; a structural count change renumbers
+  downstream entities and set_parameter reports the map),
 circular_pattern{doc,entities,count,center?=[0,0,0],axis?=[0,0,1],angle_deg?=360,
-  name?,color?} (copies rotate with the pattern and share the angle evenly),
+  name?,color?} (copies rotate with the pattern and share the angle evenly;
+  count may be an expression),
 mirror{doc,entities,plane,name?,color?} (plane is {datum:{plane:"xy"|"xz"|"yz",
   offset?}} or {custom:{origin,normal}}; one reflected copy per source),
 shell{doc,entity,thickness,open?,angle_tol_deg?} (hollow IN PLACE; `open` is a
@@ -248,7 +257,22 @@ open_document{path,name?} (loads a .wcad file as a NEW document and replays it;
   returns doc, name, counts; the stored name is used unless name overrides),
 get_program{doc} (read-only program + parameters + embedded source — the
   complete handoff: the source is the canonical script; the program is the
-  replayable IR),
+  replayable IR. `suppressed` lists step indexes replay skips),
+patch_program{doc,ops,dry_run?} (edit the program in place. Each op is
+  {op:"insert",at,command}, {op:"remove",at}, {op:"replace",at,command} or
+  {op:"reorder",from,to}; indexes are 0-based and ops apply in order. Commands
+  address CURRENT entity ids; the replay rewrites references as ids shift.
+  dry_run:true returns surviving/renumbered/removed/created ids and a full
+  scene `diff` without changing the document. A real patch is one undo step.
+  Direct edits do not rewrite an embedded source; export_python reconstructs
+  the current program as a runnable script),
+suppress{doc,steps,suppress?=true} (turn 0-based program steps off/on without
+  deleting them. Saved with the document; ids before the step are unchanged,
+  later ids may shift and the result reports `renumbered`/`removed`. A feature
+  later steps still use is rejected — suppress those steps too),
+batch{commands,atomic?=false} (run raw bus commands as one unit; atomic:true
+  rolls every document change back if any command fails. Results come back in
+  order; files already written are not retracted),
 pick{doc,ray:{origin:[x,y,z],direction:[x,y,z]},tolerance?} (world-space ray
   at the solids; answers {hit:{entity,name,distance,point,normal,face,edge?}}
   or hit:null on a miss. The selectors are ready to pass straight back:
