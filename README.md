@@ -119,6 +119,9 @@ Commands, grouped by intent:
   `trim_sketch`, `extend_sketch`, `offset_sketch`, `extrude`, `revolve`
 - **Interoperability**: `import_mesh` (STL/OBJ/3MF → solid), `add_mesh` (raw
   triangles; the baked program step import records)
+- **Import → parametric**: `import_dxf`/`import_svg` (2D drawing → sketch),
+  `add_sketch_curves` (baked sketch step), `section`/`project` (solid → sketch
+  geometry), `primitives` (planar faces, cylinders, holes), `repair_mesh`
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `faces`, `edges`,
   `validate`, `diff_scene`, `export_stl`, `export_3mf`, `export_step`,
   `export_dxf`, `export_svg`, `export_drawing`, `render_offscreen`,
@@ -177,7 +180,42 @@ normals derived (`smooth_angle_deg`, default 30). The cleaned triangles become
 an `add_mesh` program step, so a `.wcad` replays without the source file.
 Imported solids transform, boolean, fillet, validate and export like any other
 entity. A non-watertight file imports anyway — `validate` reports it and
-booleans reject it rather than guessing a repair.
+booleans reject it rather than guessing a repair. `repair_mesh{entity}` is the
+explicit repair: it welds, orients each connected shell outward, drops
+triangles that make an edge non-manifold, and fills closed boundary loops. The
+command is part of the program, so the repair replays and the entity keeps its
+id.
+
+### Import → parametric (M22)
+
+The 2D importers close the loop from an existing drawing to a rule:
+
+`import_dxf{doc,path,name?,plane?,scale?,auto_constraints?}` reads ASCII DXF
+(R12-friendly) `LINE`, `CIRCLE`, `ARC`, `POLYLINE` and `LWPOLYLINE` entities;
+`$INSUNITS` converts to millimeters. `import_svg` reads `line`, `circle`,
+`ellipse`, `rect`, `polyline`, `polygon` and `path` (M/L/H/V/C/S/Q/T/A/Z),
+composes nested group transforms, honors `width`/`height`/`viewBox`, and flips
+SVG's Y-down frame to the sketch's Y-up frame. Both record an
+`add_sketch_curves` program step with the baked elements, so a `.wcad` replays
+without the source drawing. Optional auto-constraints (default on) join
+near-coincident endpoints, snap near-axis-aligned lines to exact
+horizontal/vertical, and add approximate tangency, so the imported profile
+behaves like authored geometry.
+
+`solid → sketch` goes the other way. `section{entity,plane}` intersects a
+solid or imported mesh with a plane and returns a new sketch of closed loops
+(ready to extrude); `project{entity,plane,min_angle_deg?}` projects boundary,
+sharp and front-facing silhouette edges to give an outline. Both are modeling
+commands, with the plane in the same datum/custom forms as mirror planes.
+
+`primitives{entity}` lists what an imported part is made of: the planar face
+groups from M20, fitted cylindrical surfaces (axis, center, radius, height and
+inner/outer), and hole candidates with depth and a through/blind guess. That is
+the bridge from "a triangle soup that looks like a bracket" to
+`add_cylinder` + `hole` + `fillet` with named dimensions. `repair_mesh{entity}`
+turns a non-watertight import into a booleans- and validate-ready solid; its
+report says how many holes it filled, triangles it flipped or removed, and
+whether the result is open/manifold.
 
 `export_dxf` and `export_svg` write a **2D drawing** of sketches in the sketch's
 own (u, v) millimeters, not world XYZ. `entities` defaults to every sketch;
@@ -707,9 +745,9 @@ concrete way to point at geometry, rather than building a GUI feature tree.
 Validation and scene diffs (M14) make a rebuild provable; incremental rebuilds
 (M15) make it fast; interoperability (M18) connects the script to existing
 meshes, drawings and CAD kernels. Program editing (M21) makes the program
-editable without a feature tree, while the next two milestones turn imported
-geometry into an editable sketch (M22) and turn "watertight" into "printable"
-(M23). Feature-history
+editable without a feature tree, import → parametric (M22) turns drawings and
+imported meshes back into sketches and rules, and the next milestone turns
+"watertight" into "printable" (M23). Feature-history
 editing is deliberately not a goal: replay is deterministic and
 `set_parameter` covers knob turns, while the script remains the editing surface.
 
@@ -776,14 +814,7 @@ editing is deliberately not a goal: replay is deterministic and
       by feature identity through the shift; and `batch{commands, atomic:true}`
       rolls a failed multi-command batch back instead of leaving half a model
       behind. This makes the bus an editing surface without a GUI feature tree.
-
-### Next
-
-The next two milestones attack the parts of the parametric promise that are
-still implicit: whether imported geometry can become a rule again, and whether
-a validated mesh will print.
-
-- [ ] **M22 — Import → parametric**: `import_dxf`/`import_svg` bring closed
+- [x] **M22 — Import → parametric**: `import_dxf`/`import_svg` bring closed
       loops in as sketches with optional auto-constraints (coincident,
       horizontal/vertical, approximate tangency); `section{entity, plane}` and
       `project{entity, plane}` cut a solid or imported mesh into sketch
@@ -793,6 +824,12 @@ a validated mesh will print.
       removes non-manifold junk so a non-watertight import can enter booleans.
       Together with M18 this closes the loop: mesh in → sketch → parametric
       part out.
+
+### Next
+
+The next milestone attacks the other half of the parametric promise: whether a
+validated mesh will print.
+
 - [ ] **M23 — Printability preflight**: `validate` grows from mesh integrity to
       print viability — overhang area at a configurable angle, bridge spans,
       first-layer contact, minimum feature size, trapped/cupped volumes and
@@ -860,21 +897,24 @@ The remaining milestones, in dependency order:
 
 ## Status
 
-Milestone 21 is complete: program editing sits on the same program/replay
-substrate as everything else. The suite is **277 tests** (261 engine + 1 server
-+ 15 viewer), covering the solver and sketches, solids/booleans/edges,
-persistence and export, picking and script-as-source, validation and scene
-diffs, stable face/edge references, incremental rebuilds, program patching and
-suppression, parametric pattern counts, shape leverage, interoperability
-(STL/OBJ/3MF, DXF/SVG, STEP), and assemblies and drawing sheets — including
-byte-stable saves and exports, cold-replay determinism, and self-contained
-assemblies that reopen without their part files.
+Milestone 22 is complete: drawings and imported meshes feed the same
+program/replay substrate as authored geometry. The suite is **297 tests** (281
+engine + 1 server + 15 viewer), covering the solver and sketches,
+solids/booleans/edges, persistence and export, picking and script-as-source,
+validation and scene diffs, stable face/edge references, incremental rebuilds,
+program patching and suppression, parametric pattern counts, shape leverage,
+interoperability (STL/OBJ/3MF, DXF/SVG import and export, STEP), import →
+parametric (DXF/SVG sketches with inferred constraints, sections,
+projections, primitive discovery and mesh repair), and assemblies and drawing
+sheets — including byte-stable saves and exports, cold-replay determinism, and
+self-contained assemblies that reopen without their part files.
 
 End-to-end printable examples: `examples/printable_bracket.py`,
 `revolve_bushing.py`, `face_sketch.py`, `sketch_complete.py`, `pick.py`,
 `validate.py`, `stable_references.py`, `program_edit.py`, `shape_leverage.py`,
 `cross_block.py`, `save_load.py`, `incremental_rebuild.py`, `import_mesh.py`,
-`export_2d.py`, `step_export.py`, and `assembly_drawing.py`. Each runs profile
+`import_parametric.py`, `export_2d.py`, `step_export.py`, and
+`assembly_drawing.py`. Each runs profile
 → solid → validate → render → export; `cross_block.py` is the picture-to-part
 loop above.
 

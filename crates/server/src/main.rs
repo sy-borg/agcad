@@ -94,6 +94,8 @@ fn is_mutating(command: &Command) -> bool {
             | Command::AddSphere { .. }
             | Command::AddCylinder { .. }
             | Command::ImportMesh { .. }
+            | Command::ImportDxf { .. }
+            | Command::ImportSvg { .. }
             | Command::AddMesh { .. }
             | Command::Transform { .. }
             | Command::SetColor { .. }
@@ -102,6 +104,10 @@ fn is_mutating(command: &Command) -> bool {
             | Command::Chamfer { .. }
             | Command::Boolean { .. }
             | Command::AddSketch { .. }
+            | Command::AddSketchCurves { .. }
+            | Command::Section { .. }
+            | Command::Project { .. }
+            | Command::RepairMesh { .. }
             | Command::AddSketchLine { .. }
             | Command::AddSketchCircle { .. }
             | Command::AddSketchArc { .. }
@@ -148,6 +154,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::AddSphere { doc, .. }
         | Command::AddCylinder { doc, .. }
         | Command::ImportMesh { doc, .. }
+        | Command::ImportDxf { doc, .. }
+        | Command::ImportSvg { doc, .. }
         | Command::AddMesh { doc, .. }
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
@@ -156,6 +164,10 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Chamfer { doc, .. }
         | Command::Boolean { doc, .. }
         | Command::AddSketch { doc, .. }
+        | Command::AddSketchCurves { doc, .. }
+        | Command::Section { doc, .. }
+        | Command::Project { doc, .. }
+        | Command::RepairMesh { doc, .. }
         | Command::AddSketchLine { doc, .. }
         | Command::AddSketchCircle { doc, .. }
         | Command::AddSketchArc { doc, .. }
@@ -194,6 +206,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Pick { doc, .. }
         | Command::Faces { doc, .. }
         | Command::Edges { doc, .. }
+        | Command::Primitives { doc, .. }
         | Command::Validate { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::GetParameters { doc }

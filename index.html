@@ -409,6 +409,7 @@ footer{padding:0 0 48px}
       <div><h3>Program editing</h3><p><code>patch_program</code> inserts, removes, replaces and reorders steps; its dry run reports surviving and renumbered ids plus a scene diff. <code>suppress</code> flips features for A/B variants, pattern counts are parameter-driven, and <code>batch{atomic:true}</code> never leaves half a model behind.</p></div>
       <div><h3>Shape leverage</h3><p>Patterns, <code>mirror</code>, <code>shell</code>, <code>hole</code>, <code>sweep</code>, <code>loft</code> and <code>thread</code> cover the repetitive printable moves without manual copies.</p></div>
       <div><h3>Interoperability</h3><p><code>import_mesh</code> reads STL/OBJ/3MF, welds and repairs the mesh, and bakes it into an <code>add_mesh</code> step so the <code>.wcad</code> reopens without the source file.</p></div>
+      <div><h3>Import → parametric</h3><p><code>import_dxf</code>/<code>import_svg</code> turn drawings into constraint-solved sketches; <code>section</code>/<code>project</code> cut or project a solid into sketch geometry; <code>primitives</code> recovers planar faces, cylinder axes/radii and holes; <code>repair_mesh</code> fills holes, fixes winding and removes non-manifold junk. Mesh in → sketch → parametric part out.</p></div>
       <div><h3>2D and STEP output</h3><p><code>export_dxf</code>/<code>export_svg</code> write sketch-local drawings and cutter profiles; <code>export_step</code> writes an honest AP214 faceted B-rep, with open pieces as surface models. STEP import stays out of scope.</p></div>
       <div><h3>Assemblies and drawings</h3><p>Embedded parts, instances with parameter overrides, connectors and mates, BOM and interference checks; <code>export_drawing</code> produces deterministic multi-view SVG/DXF sheets with hidden lines, dimensions, balloons and a title block.</p></div>
     </div>
@@ -474,14 +475,14 @@ python3 -m venv .venv
 # R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, and an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, an import → parametric loop (DXF/SVG sketches, section/project, primitive discovery and mesh repair), and an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet.</p>
   </div>
 </section>
 
 <section id="roadmap" class="alt">
   <div class="wrap">
     <h2>Roadmap</h2>
-    <p class="intro">The script is the source of truth. The next milestones make the program editable without a feature tree, turn imported geometry into editable sketches, and turn watertight meshes into printable parts. A GUI feature tree is deliberately not on the list.</p>
+    <p class="intro">The script is the source of truth. The program is editable without a feature tree, imported drawings and meshes become parametric sketches again, and the next milestone turns watertight meshes into printable parts. A GUI feature tree is deliberately not on the list.</p>
 
     <div class="road">
       <div class="done">
@@ -512,12 +513,12 @@ python3 -m venv .venv
           <li><b>M19b Drawings</b> <span>multi-view SVG/DXF, hidden lines, dimensions, balloons</span></li>
           <li><b>M20 Stable references</b> <span>enumerated faces and edges, ambiguity and drift reports</span></li>
           <li><b>M21 Program editing</b> <span>patch with a dry-run id map, suppress, parametric counts, atomic batches</span></li>
+          <li><b>M22 Import → parametric</b> <span>DXF/SVG sketches with auto-constraints, section/project, primitives, mesh repair</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M22 Import to parametric</b> <span>DXF/SVG sketches, sections, mesh repair</span></li>
           <li><b>M23 Printability preflight</b> <span>overhangs, orientation, bed layout, fit compensation</span></li>
           <li><b>M24 Measurement and mass</b> <span>distance, clearance, area, centroid, inertia</span></li>
           <li><b>M25 Visual verification</b> <span><code>compare_render</code>, calibration, multi-view</span></li>
@@ -541,7 +542,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">Wright CAD</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/wright-cad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/wright-cad">sy-borg/wright-cad</a></div>
-      <div><small>Status</small>Milestone 20 · stable references complete</div>
+      <div><small>Status</small>Milestone 22 · Import → parametric</div>
     </div>
   </div>
 </footer>

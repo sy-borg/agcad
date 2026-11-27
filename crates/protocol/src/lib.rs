@@ -59,7 +59,12 @@ pub const DOCUMENT_FORMAT: &str = "wright-document";
 /// readers reject a string there), and the snapshot carries the suppressed
 /// program steps. An older reader would run suppressed features, so the
 /// omission is not downgrade-safe.
-pub const DOCUMENT_VERSION: u32 = 5;
+///
+/// 6: M22 import → parametric. New program steps (`add_sketch_curves`,
+/// `section`, `project`, `repair_mesh`) carry imported geometry as data, so
+/// an older reader would silently drop the sketch/profile or leave a mesh
+/// unrepaired.
+pub const DOCUMENT_VERSION: u32 = 6;
 
 pub type DocId = u64;
 pub type EntityId = u64;
@@ -266,6 +271,132 @@ pub enum Command {
         smooth_angle_deg: Option<f64>,
         #[serde(default)]
         color: Option<Rgba>,
+    },
+
+    /// Read a 2D DXF drawing from the server's filesystem and bring its
+    /// curves in as a sketch (M22). Lines stay lines, circles and arcs stay
+    /// analytic, and polylines become connected line segments; the result is
+    /// recorded as an `add_sketch_curves` program step, so a `.wcad` save
+    /// replays without the source file. `auto_constraints` (default true)
+    /// adds coincident, horizontal/vertical and approximate-tangency
+    /// constraints so the imported drawing behaves like authored geometry
+    /// when a knob changes.
+    ImportDxf {
+        doc: DocId,
+        /// Path the *server* reads; absolute paths avoid surprises.
+        path: String,
+        /// Sketch name; defaults to the file stem.
+        #[serde(default)]
+        name: Option<String>,
+        /// Placement frame (default: the XY datum plane).
+        #[serde(default)]
+        plane: Option<SketchPlane>,
+        /// Uniform scale applied to the file's coordinates (default 1).
+        /// DXF `$INSUNITS` is converted to millimeters automatically.
+        #[serde(default)]
+        scale: Option<f64>,
+        /// Add inferred constraints (default true).
+        #[serde(default)]
+        auto_constraints: Option<bool>,
+    },
+
+    /// Read an SVG drawing from the server's filesystem and bring its curves
+    /// in as a sketch (M22). Supports `line`, `circle`, `ellipse`, `rect`,
+    /// `polyline`, `polygon` and `path` (M/L/H/V/C/S/Q/T/A/Z), nested group
+    /// transforms, and common `width`/`height`/`viewBox` units. SVG's Y axis
+    /// points down, so geometry is flipped to the sketch's Y-up frame.
+    ImportSvg {
+        doc: DocId,
+        /// Path the *server* reads; absolute paths avoid surprises.
+        path: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        plane: Option<SketchPlane>,
+        /// Uniform scale applied after the SVG unit conversion (default 1).
+        #[serde(default)]
+        scale: Option<f64>,
+        #[serde(default)]
+        auto_constraints: Option<bool>,
+    },
+
+    /// Create a sketch from a complete set of elements and constraints — the
+    /// program step `import_dxf`/`import_svg` records. Elements must carry
+    /// their own ids (1-based by convention); constraints reference them.
+    /// The sketch is solved on creation like any other.
+    AddSketchCurves {
+        doc: DocId,
+        name: String,
+        #[serde(default)]
+        plane: Option<SketchPlane>,
+        elements: Vec<SketchElement>,
+        /// Inferred or explicit constraints, referencing the element ids.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        constraints: Vec<SketchConstraint>,
+    },
+
+    /// Cut a solid or imported mesh with a plane and put the intersection
+    /// curves into a new sketch (M22). Closed loops come out as connected
+    /// line runs, so the sketch can be extruded straight away. A modeling
+    /// command: it replays with the program, and parameter changes regenerate
+    /// the section from the rebuilt solid.
+    Section {
+        doc: DocId,
+        entity: EntityId,
+        #[serde(default)]
+        name: Option<String>,
+        /// Cutting plane (default: the XY datum plane).
+        #[serde(default)]
+        plane: Option<WorkPlane>,
+    },
+
+    /// Project a solid or imported mesh onto a plane as a sketch (M22).
+    /// Boundary, sharp and silhouette edges are projected, giving an outline
+    /// an agent can dimension, offset or extrude. A modeling command.
+    Project {
+        doc: DocId,
+        entity: EntityId,
+        #[serde(default)]
+        name: Option<String>,
+        /// Projection plane (default: the XY datum plane). The plane normal
+        /// is the viewing direction.
+        #[serde(default)]
+        plane: Option<WorkPlane>,
+        /// Sharp-edge threshold in degrees (default 30).
+        #[serde(default)]
+        min_angle_deg: Option<f64>,
+    },
+
+    /// Enumerate the analytic primitives of a solid or imported mesh (M22):
+    /// planar faces, cylindrical surfaces (axis + radius, inner or outer) and
+    /// the hole candidates those inner cylinders describe. A session command:
+    /// it changes no state and is not part of the program. Use it to re-author
+    /// an imported part parametrically instead of only booleaning onto it.
+    Primitives { doc: DocId, entity: EntityId },
+
+    /// Repair a triangle mesh in place (M22): weld and clean, orient each
+    /// connected shell consistently and outward, drop triangles that make an
+    /// edge non-manifold, and fill closed boundary loops. The entity keeps
+    /// its id, name, color and transform; a modeling command, so the repair
+    /// replays parametrically and can make a non-watertight import safe for
+    /// booleans.
+    RepairMesh {
+        doc: DocId,
+        entity: EntityId,
+        /// Fill closed boundary loops (default true).
+        #[serde(default)]
+        fill_holes: Option<bool>,
+        /// Re-orient each connected shell consistently and outward
+        /// (default true).
+        #[serde(default)]
+        fix_winding: Option<bool>,
+        /// Drop triangles that make an edge belong to more than two
+        /// triangles (default true).
+        #[serde(default)]
+        remove_non_manifold: Option<bool>,
+        /// Crease angle for shading normals in degrees (default 30).
+        #[serde(default)]
+        smooth_angle_deg: Option<f64>,
     },
 
     /// Round the selected sharp edges of one solid. The entity keeps its
@@ -1447,6 +1578,74 @@ pub struct EdgeGroupInfo {
     pub selector: EdgeFilter,
 }
 
+/// One cylindrical surface found by [`Command::Primitives`] (M22).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CylinderInfo {
+    /// 1-based, deterministic within one `primitives` call.
+    pub id: u32,
+    /// Unit cylinder axis in world space, canonicalized so its largest
+    /// component is positive.
+    pub axis: Vec3,
+    /// A point on the axis (the mid-height point).
+    pub center: Vec3,
+    pub radius: f64,
+    /// Axial extent of the surface.
+    pub height: f64,
+    /// `true` for a concave/inner surface (a hole), `false` for a boss or
+    /// shaft.
+    pub inner: bool,
+    /// Surface area in mm².
+    pub area: f64,
+    pub bbox: Bbox,
+    pub tris: usize,
+    pub descriptor: String,
+    /// Identity fingerprint (axis, inner/outer, rank) that survives a
+    /// parameter change which resizes the cylinder.
+    pub fingerprint: String,
+}
+
+/// One hole candidate derived from an inner cylindrical surface (M22).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HoleCandidate {
+    /// 1-based, deterministic within one `primitives` call.
+    pub id: u32,
+    /// The [`CylinderInfo::id`] this hole came from.
+    pub cylinder: u32,
+    /// Mid-height point on the axis.
+    pub center: Vec3,
+    /// Canonical unit axis (same as the cylinder's).
+    pub axis: Vec3,
+    pub radius: f64,
+    pub depth: f64,
+    /// `true` when the cylinder spans essentially the whole solid along its
+    /// axis (a through-hole rather than a blind pocket).
+    pub through: bool,
+    pub descriptor: String,
+}
+
+/// The result of [`Command::RepairMesh`]: what the repair changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepairReport {
+    pub vertices_before: usize,
+    pub vertices_after: usize,
+    pub triangles_before: usize,
+    pub triangles_after: usize,
+    /// Closed boundary loops that were filled.
+    pub holes_filled: usize,
+    /// Triangles added by those fills.
+    pub triangles_added: usize,
+    /// Triangles dropped as degenerate, duplicate or non-manifold junk.
+    pub triangles_removed: usize,
+    /// Triangles whose winding was flipped to make the shell consistent.
+    pub flipped: usize,
+    /// Boundary edges remaining after the repair (0 means watertight).
+    pub open_edges: usize,
+    /// Edges still used by more than two triangles.
+    pub non_manifold_edges: usize,
+    /// The repaired mesh is closed and manifold.
+    pub watertight: bool,
+}
+
 /// One stored selector checked by [`Command::Validate`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReferenceCheck {
@@ -2062,6 +2261,62 @@ pub enum CommandResult {
         triangles: usize,
         dropped: usize,
     },
+    /// A 2D drawing file was imported as a sketch (see
+    /// [`Command::ImportDxf`] and [`Command::ImportSvg`]).
+    CurveImported {
+        doc: DocId,
+        sketch: EntityId,
+        name: String,
+        format: DrawingFormat,
+        path: String,
+        bytes: usize,
+        /// Curves read from the file.
+        curves: usize,
+        /// Sketch elements written to the program (a polyline becomes lines).
+        elements: usize,
+        /// Inferred constraints (0 when auto-constraints are off).
+        constraints: usize,
+        /// Closed profile loops in the imported drawing.
+        closed_loops: usize,
+        solved: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+    },
+    /// A sketch was created with a complete set of elements (see
+    /// [`Command::AddSketchCurves`], `section` and `project`).
+    SketchBuilt {
+        doc: DocId,
+        sketch: EntityId,
+        name: String,
+        elements: usize,
+        constraints: usize,
+        /// Closed profile loops the elements form (0 for an open drawing).
+        closed_loops: usize,
+        solved: bool,
+        residual: f64,
+        dof: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<ReferenceReport>,
+    },
+    /// Analytic primitives of one solid (see [`Command::Primitives`]).
+    Primitives {
+        doc: DocId,
+        entity: EntityId,
+        name: String,
+        planar_faces: Vec<FaceGroupInfo>,
+        cylinders: Vec<CylinderInfo>,
+        holes: Vec<HoleCandidate>,
+    },
+    /// A mesh was repaired in place (see [`Command::RepairMesh`]).
+    MeshRepaired {
+        doc: DocId,
+        entity: EntityId,
+        /// New signed world volume (mm³).
+        volume: f64,
+        tris: usize,
+        mesh: Mesh,
+        report: RepairReport,
+    },
     /// A solid was reshaped in place (fillet/chamfer). `edges` is how many
     /// sharp edges the selection matched, `volume` the new world-space
     /// volume in mm³, and `mesh` the new local mesh.
@@ -2579,6 +2834,41 @@ pub enum SketchPlane {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expect: Option<RefExpect>,
     },
+}
+
+/// A world-space working plane for `section` and `project` (M22). Unlike a
+/// sketch plane there is no face variant: a cut or projection needs a plane,
+/// not a solid's surface reference.
+///
+/// Wire forms:
+///
+/// ```json
+/// {"datum": {"plane": "xy", "offset": 5}}
+/// {"custom": {"origin": [0,0,10], "normal": [0,0,1], "x_axis": [1,0,0]}}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPlane {
+    /// A standard datum plane, optionally offset along its normal.
+    Datum {
+        plane: DatumPlane,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<Scalar>,
+    },
+    /// Any plane given by a world-space origin and normal.
+    Custom {
+        origin: SVec3,
+        /// Non-zero plane normal (does not need to be unit length).
+        normal: [f64; 3],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x_axis: Option<[f64; 3]>,
+    },
+}
+
+impl Default for WorkPlane {
+    fn default() -> Self {
+        Self::Datum { plane: DatumPlane::Xy, offset: None }
+    }
 }
 
 /// The resolved placement of a sketch, reported in snapshots. Sketch-local

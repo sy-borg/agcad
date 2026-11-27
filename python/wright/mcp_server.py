@@ -82,7 +82,12 @@ overrides), add_connector names attachment points and mate joins two instances
 (coincident/distance/parallel/angle). bill_of_materials and check_interference
 answer the assembly questions, and export_drawing writes an SVG or DXF sheet
 with front/top/right/iso views, hidden lines, dimensions, balloons and a BOM.
-Documents live in the engine process, not in this server, so a restarted backend
+Import → parametric: import_dxf/import_svg bring a drawing in as a
+constraint-solved sketch, section/project cut or project a solid into sketch
+geometry, primitives lists planar faces, cylinder axes/radii and hole
+candidates so an imported part can be re-authored, and repair_mesh fills holes,
+fixes winding and removes non-manifold junk. Documents live in the engine
+process, not in this server, so a restarted backend
 starts empty. When a tool result carries `reconnected`, the client rebuilt the
 connection: read its `open_documents` list, replay your script if your document
 is gone, and never assume old entity ids survived. The viewer reconnects and
@@ -114,6 +119,31 @@ add_mesh{doc,name,positions:[[x,y,z],...],indices:[i0,i1,i2,...],
   smooth_angle_deg?,color?} (raw triangle solid, three indices per triangle;
   normally produced by import_mesh, but useful when a client already has mesh
   data),
+import_dxf{doc,path,name?,plane?,scale?,auto_constraints?} (read an ASCII DXF
+  (LINE/CIRCLE/ARC/POLYLINE/LWPOLYLINE) into a SKETCH; $INSUNITS converts to
+  mm, plane is a sketch plane (default XY); records an add_sketch_curves step
+  so save/open needs no source file. auto_constraints (default true) infers
+  coincident, horizontal/vertical and approximate tangency),
+import_svg{doc,path,name?,plane?,scale?,auto_constraints?} (same for SVG:
+  line/circle/ellipse/rect/polyline/polygon/path M/L/H/V/C/S/Q/T/A/Z, group
+  transforms, width/height/viewBox; Y is flipped upright),
+add_sketch_curves{doc,name,elements,constraints?,plane?} (low-level baked
+  sketch step; elements carry ids and use the wire sketch-element shape),
+section{doc,entity,plane?,name?} (cut a solid/imported mesh with a plane and
+  return a new SKETCH of closed loops ready to extrude; plane is
+  {datum:{plane:"xy"|"xz"|"yz",offset?}} or {custom:{origin,normal,x_axis?}},
+  default XY. Modeling step, replays),
+project{doc,entity,plane?,min_angle_deg?,name?} (project boundary/sharp/
+  silhouette edges onto a plane as a sketch outline; plane normal is the view
+  direction. Modeling step),
+primitives{doc,entity} (session query: planar_faces, fitted cylinders with
+  axis/center/radius/height/inner, and hole candidates with depth + through/
+  blind guess — use it to re-author an imported part instead of only
+  booleaning onto it),
+repair_mesh{doc,entity,fill_holes?,fix_winding?,remove_non_manifold?,
+  smooth_angle_deg?} (IN PLACE: weld, orient each shell outward, drop
+  non-manifold fins and fill closed boundary loops; returns holes_filled,
+  flipped/removed counts and final watertightness; modeling step, replays),
 transform{doc,entity,translation?,rotation_deg?,scale?} (only provided parts change),
 boolean{doc,op:"union"|"difference"|"intersection",entities:[ids],name?,color?}
   (world-space set op; creates a NEW entity, sources are kept — delete them if

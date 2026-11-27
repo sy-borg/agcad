@@ -25,15 +25,19 @@ pub mod expr;
 pub mod fillet;
 pub mod geo;
 pub mod hole;
+pub mod import2d;
 pub mod loft;
 pub mod mat4;
 pub mod mesh_import;
 pub mod pattern;
 pub mod pick;
 pub mod plane;
+pub mod primitives;
 mod rebuild;
 pub mod refs;
 pub mod render;
+pub mod repair;
+pub mod section;
 pub mod shell;
 pub mod sketch;
 pub mod solid;
@@ -50,11 +54,12 @@ use std::fmt;
 
 use wright_protocol::{
     Bbox, BooleanOp, Command, CommandResult, CurveMode, DocId, DocInfo, DocumentSnapshot,
-    EdgeFilter, EntityChange, EntityId, EntitySnapshot, EntitySummary, IdChange, Mat4, Mesh,
-    MirrorPlane, ParamInfo, ParameterChange, ProgramOp, ReferenceChange, ReferenceCheck,
-    ReferenceReport, Rgba, RevolveAxis, SavedParameter, Scalar, SceneDiffReport, SketchElement,
-    SketchPlane, SketchValidation, SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3,
-    DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
+    DrawingFormat, EdgeFilter, EntityChange, EntityId, EntitySnapshot, EntitySummary, IdChange,
+    Mat4, Mesh, MirrorPlane, ParamInfo, ParameterChange, ProgramOp, ReferenceChange,
+    ReferenceCheck, ReferenceReport, Rgba, RevolveAxis, SavedParameter, Scalar, SceneDiffReport,
+    SketchConstraint, SketchElement, SketchPlane, SketchValidation, SolidValidation, SourceDoc,
+    SVec3, ValidationTotals, Vec3, WorkPlane, DOCUMENT_FORMAT, DOCUMENT_VERSION,
+    PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -790,7 +795,10 @@ fn remap_command(
         | Command::Fillet { entity, .. }
         | Command::Chamfer { entity, .. }
         | Command::Shell { entity, .. }
-        | Command::Hole { entity, .. } => e(entity)?,
+        | Command::Hole { entity, .. }
+        | Command::Section { entity, .. }
+        | Command::Project { entity, .. }
+        | Command::RepairMesh { entity, .. } => e(entity)?,
         Command::Boolean { entities: ids, .. }
         | Command::LinearPattern { entities: ids, .. }
         | Command::CircularPattern { entities: ids, .. }
@@ -799,7 +807,11 @@ fn remap_command(
                 e(id)?;
             }
         },
-        Command::AddSketch { plane: Some(SketchPlane::Face { entity, .. }), .. } => e(entity)?,
+        Command::AddSketch { plane: Some(SketchPlane::Face { entity, .. }), .. }
+        | Command::AddSketchCurves {
+            plane: Some(SketchPlane::Face { entity, .. }),
+            ..
+        } => e(entity)?,
         Command::AddSketchLine { sketch, .. }
         | Command::AddSketchCircle { sketch, .. }
         | Command::AddSketchArc { sketch, .. }
@@ -930,6 +942,10 @@ fn is_modeling_command(command: &Command) -> bool {
             | Command::Chamfer { .. }
             | Command::Boolean { .. }
             | Command::AddSketch { .. }
+            | Command::AddSketchCurves { .. }
+            | Command::Section { .. }
+            | Command::Project { .. }
+            | Command::RepairMesh { .. }
             | Command::AddSketchLine { .. }
             | Command::AddSketchCircle { .. }
             | Command::AddSketchArc { .. }
@@ -978,6 +994,10 @@ fn bind_missing_expectations(d: &mut Document) {
                 }
             },
             Some(Command::AddSketch {
+                plane: Some(SketchPlane::Face { expect: slot, .. }),
+                ..
+            })
+            | Some(Command::AddSketchCurves {
                 plane: Some(SketchPlane::Face { expect: slot, .. }),
                 ..
             }) => {
@@ -1080,6 +1100,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::AddSphere { doc: d, .. }
         | Command::AddCylinder { doc: d, .. }
         | Command::ImportMesh { doc: d, .. }
+        | Command::ImportDxf { doc: d, .. }
+        | Command::ImportSvg { doc: d, .. }
         | Command::AddMesh { doc: d, .. }
         | Command::Transform { doc: d, .. }
         | Command::SetColor { doc: d, .. }
@@ -1088,6 +1110,10 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Chamfer { doc: d, .. }
         | Command::Boolean { doc: d, .. }
         | Command::AddSketch { doc: d, .. }
+        | Command::AddSketchCurves { doc: d, .. }
+        | Command::Section { doc: d, .. }
+        | Command::Project { doc: d, .. }
+        | Command::RepairMesh { doc: d, .. }
         | Command::AddSketchLine { doc: d, .. }
         | Command::AddSketchCircle { doc: d, .. }
         | Command::AddSketchArc { doc: d, .. }
@@ -1129,6 +1155,7 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Pick { doc: d, .. }
         | Command::Faces { doc: d, .. }
         | Command::Edges { doc: d, .. }
+        | Command::Primitives { doc: d, .. }
         | Command::Validate { doc: d, .. }
         | Command::DiffScene { doc: d, .. }
         | Command::GetProgram { doc: d }
@@ -1281,6 +1308,37 @@ impl Engine {
                 }
             },
 
+            // --- 2D import: parse now, record the baked sketch -------------
+            Command::ImportDxf { doc, path, name, plane, scale, auto_constraints } => {
+                self.doc(*doc)?;
+                let imported = import2d::import_dxf(path, scale.unwrap_or(1.0))?;
+                finish_curve_import(
+                    self,
+                    *doc,
+                    imported,
+                    DrawingFormat::Dxf,
+                    path,
+                    name.clone(),
+                    plane.clone(),
+                    auto_constraints.unwrap_or(true),
+                )
+            },
+
+            Command::ImportSvg { doc, path, name, plane, scale, auto_constraints } => {
+                self.doc(*doc)?;
+                let imported = import2d::import_svg(path, scale.unwrap_or(1.0))?;
+                finish_curve_import(
+                    self,
+                    *doc,
+                    imported,
+                    DrawingFormat::Svg,
+                    path,
+                    name.clone(),
+                    plane.clone(),
+                    auto_constraints.unwrap_or(true),
+                )
+            },
+
             // --- parts: snapshot now, record the embedded definition --------
             Command::ImportPart { doc, name, path, from } => {
                 self.doc(*doc)?;
@@ -1353,6 +1411,10 @@ impl Engine {
             | Command::Chamfer { .. }
             | Command::Boolean { .. }
             | Command::AddSketch { .. }
+            | Command::AddSketchCurves { .. }
+            | Command::Section { .. }
+            | Command::Project { .. }
+            | Command::RepairMesh { .. }
             | Command::AddSketchLine { .. }
             | Command::AddSketchCircle { .. }
             | Command::AddSketchArc { .. }
@@ -1639,6 +1701,25 @@ impl Engine {
                     name: e.name.clone(),
                     min_angle_deg: min_angle,
                     edges: refs::edge_groups(&topology),
+                })
+            },
+
+            Command::Primitives { doc, entity } => {
+                let d = self.doc(*doc)?;
+                let e = d
+                    .entities
+                    .get(entity)
+                    .ok_or(Error::UnknownEntity { doc: *doc, entity: *entity })?;
+                ensure_solid(e, "primitives")?;
+                let world = transform_mesh(&e.mesh, &e.transform());
+                let report = primitives::primitives(&world, *entity)?;
+                Ok(CommandResult::Primitives {
+                    doc: *doc,
+                    entity: *entity,
+                    name: e.name.clone(),
+                    planar_faces: report.planar_faces,
+                    cylinders: report.cylinders,
+                    holes: report.holes,
                 })
             },
 
@@ -2318,6 +2399,10 @@ fn check_reference(d: &Document, step: usize, command: &Command) -> Option<Refer
             plane: Some(SketchPlane::Face { entity, expect, .. }),
             ..
         } => (*entity, "add_sketch", expect.clone(), true),
+        Command::AddSketchCurves {
+            plane: Some(SketchPlane::Face { entity, expect, .. }),
+            ..
+        } => (*entity, "add_sketch_curves", expect.clone(), true),
         Command::Hole { entity, .. } => (*entity, "hole", None, false),
         Command::Mirror { .. } => (0, "mirror", None, false),
         Command::Mate { .. } => (0, "mate", None, false),
@@ -2594,6 +2679,7 @@ fn method_name(command: &Command) -> &'static str {
         Command::Fillet { .. } => "fillet",
         Command::Chamfer { .. } => "chamfer",
         Command::AddSketch { .. } => "add_sketch",
+        Command::AddSketchCurves { .. } => "add_sketch_curves",
         Command::Hole { .. } => "hole",
         Command::Mirror { .. } => "mirror",
         Command::Mate { .. } => "mate",
@@ -2657,6 +2743,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::AddSphere { doc, .. }
         | Command::AddCylinder { doc, .. }
         | Command::ImportMesh { doc, .. }
+        | Command::ImportDxf { doc, .. }
+        | Command::ImportSvg { doc, .. }
         | Command::AddMesh { doc, .. }
         | Command::Transform { doc, .. }
         | Command::SetColor { doc, .. }
@@ -2665,6 +2753,10 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Chamfer { doc, .. }
         | Command::Boolean { doc, .. }
         | Command::AddSketch { doc, .. }
+        | Command::AddSketchCurves { doc, .. }
+        | Command::Section { doc, .. }
+        | Command::Project { doc, .. }
+        | Command::RepairMesh { doc, .. }
         | Command::AddSketchLine { doc, .. }
         | Command::AddSketchCircle { doc, .. }
         | Command::AddSketchArc { doc, .. }
@@ -2702,6 +2794,7 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Pick { doc, .. }
         | Command::Faces { doc, .. }
         | Command::Edges { doc, .. }
+        | Command::Primitives { doc, .. }
         | Command::Validate { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::ExportStl { doc, .. }
@@ -3045,6 +3138,118 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             };
             refresh_sketch(d, *doc, *sketch)?;
             Ok(sketch_result(SketchOutcome::Element(*doc, *sketch, id)))
+        },
+
+        Command::AddSketchCurves { doc, name, plane, elements, constraints } => {
+            let (translation, rotation_deg, reference) = match plane {
+                Some(plane) => resolve_sketch_plane(d, *doc, plane)?,
+                None => ([0.0; 3], [0.0; 3], None),
+            };
+            if let Some(report) = &reference {
+                d.record_reference(report);
+            }
+            let id = new_sketch_entity(d, name.clone(), translation, rotation_deg);
+            let (report, closed_loops) =
+                fill_sketch(d, *doc, id, elements.clone(), constraints.clone())?;
+            if let Some(report) = &reference {
+                bind_face_expect(d, report);
+            }
+            Ok(CommandResult::SketchBuilt {
+                doc: *doc,
+                sketch: id,
+                name: name.clone(),
+                elements: elements.len(),
+                constraints: constraints.len(),
+                closed_loops,
+                solved: report.solved,
+                residual: report.residual,
+                dof: report.dof,
+                reference,
+            })
+        },
+
+        Command::Section { doc, entity, name, plane } => {
+            let (entity_name, world) = {
+                let e = d
+                    .entities
+                    .get(entity)
+                    .ok_or(Error::UnknownEntity { doc: *doc, entity: *entity })?;
+                ensure_solid(e, "section")?;
+                (e.name.clone(), transform_mesh(&e.mesh, &e.transform()))
+            };
+            let frame = resolve_work_plane(d, plane.as_ref())?;
+            let curves = section::section_curves(&world, &frame)?;
+            if curves.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "section plane misses entity {entity} ('{entity_name}') (hint: the plane does \
+                     not cross any triangle; use an offset that passes through the solid)"
+                )));
+            }
+            let (translation, rotation_deg) = plane::placement(&frame);
+            let sketch_name = name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| format!("{entity_name} section"));
+            let id = new_sketch_entity(d, sketch_name.clone(), translation, rotation_deg);
+            let elements = import2d::to_elements(&curves);
+            let (report, closed_loops) = fill_sketch(d, *doc, id, elements.clone(), Vec::new())?;
+            Ok(CommandResult::SketchBuilt {
+                doc: *doc,
+                sketch: id,
+                name: sketch_name,
+                elements: elements.len(),
+                constraints: 0,
+                closed_loops,
+                solved: report.solved,
+                residual: report.residual,
+                dof: report.dof,
+                reference: None,
+            })
+        },
+
+        Command::Project { doc, entity, name, plane, min_angle_deg } => {
+            let (entity_name, world) = {
+                let e = d
+                    .entities
+                    .get(entity)
+                    .ok_or(Error::UnknownEntity { doc: *doc, entity: *entity })?;
+                ensure_solid(e, "project")?;
+                (e.name.clone(), transform_mesh(&e.mesh, &e.transform()))
+            };
+            let min_angle = min_angle_deg.unwrap_or(30.0);
+            if !(min_angle > 0.0 && min_angle < 180.0) {
+                return Err(Error::Invalid(
+                    "min_angle_deg must be in (0, 180) (hint: omit it for 30°)".into(),
+                ));
+            }
+            let frame = resolve_work_plane(d, plane.as_ref())?;
+            let curves = section::project_curves(&world, &frame, min_angle)?;
+            if curves.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "project found no visible edges on entity {entity} ('{entity_name}') (hint: \
+                     check the projection plane normal and the mesh's winding)"
+                )));
+            }
+            let (translation, rotation_deg) = plane::placement(&frame);
+            let sketch_name = name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| format!("{entity_name} projection"));
+            let id = new_sketch_entity(d, sketch_name.clone(), translation, rotation_deg);
+            let elements = import2d::to_elements(&curves);
+            let (report, closed_loops) = fill_sketch(d, *doc, id, elements.clone(), Vec::new())?;
+            Ok(CommandResult::SketchBuilt {
+                doc: *doc,
+                sketch: id,
+                name: sketch_name,
+                elements: elements.len(),
+                constraints: 0,
+                closed_loops,
+                solved: report.solved,
+                residual: report.residual,
+                dof: report.dof,
+                reference: None,
+            })
         },
 
         Command::Constrain { doc, sketch, kind, refs, value } => {
@@ -3392,6 +3597,57 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             hole_solid(d, *doc, *entity, spec)
         },
 
+        Command::RepairMesh {
+            doc,
+            entity,
+            fill_holes,
+            fix_winding,
+            remove_non_manifold,
+            smooth_angle_deg,
+        } => {
+            let (mesh, transform) = {
+                let e = d
+                    .entities
+                    .get(entity)
+                    .ok_or(Error::UnknownEntity { doc: *doc, entity: *entity })?;
+                if matches!(e.shape, Shape::Sketch { .. }) {
+                    return Err(Error::Invalid(format!(
+                        "entity {entity} is a sketch; repair_mesh applies to triangle solids (hint: \
+                         extrude the sketch first)"
+                    )));
+                }
+                if e.mesh.indices.is_empty() {
+                    return Err(Error::Invalid(format!(
+                        "entity {entity} has no geometry to repair"
+                    )));
+                }
+                (e.mesh.clone(), e.transform())
+            };
+            let opts = repair::Options {
+                fill_holes: fill_holes.unwrap_or(true),
+                fix_winding: fix_winding.unwrap_or(true),
+                remove_non_manifold: remove_non_manifold.unwrap_or(true),
+                smooth_angle_deg: smooth_angle_deg.unwrap_or(mesh_import::DEFAULT_SMOOTH_ANGLE_DEG),
+            };
+            let (fixed, report) = repair::repair(&mesh, opts)?;
+            let volume = fillet::signed_volume(&transform_mesh(&fixed, &transform));
+            let key = rebuild::add_mesh_key(&fixed.positions, &fixed.indices, opts.smooth_angle_deg);
+            let tris = fixed.indices.len() / 3;
+            {
+                let e = d.entity_mut(*entity)?;
+                e.mesh = fixed;
+                e.geom_key = key;
+            }
+            Ok(CommandResult::MeshRepaired {
+                doc: *doc,
+                entity: *entity,
+                volume,
+                tris,
+                mesh: d.entities[entity].mesh.clone(),
+                report,
+            })
+        },
+
         Command::Sweep { doc, sketch, path, segments, name, color } => {
             let (loops, placement) = sketch_profile(d, *doc, *sketch)?;
             let (translation, rotation_deg, scale) = placement;
@@ -3701,6 +3957,167 @@ fn resolve_sketch_plane(
     let (frame, reference) = frame;
     let (translation, rotation) = plane::placement(&frame);
     Ok((translation, rotation, reference))
+}
+
+/// Resolve a working plane for `section`/`project`. Omitted means XY.
+fn resolve_work_plane(d: &Document, plane: Option<&WorkPlane>) -> Result<plane::Frame> {
+    match plane.unwrap_or(&WorkPlane::Datum { plane: wright_protocol::DatumPlane::Xy, offset: None }) {
+        WorkPlane::Datum { plane, offset } => {
+            let offset = match offset {
+                Some(v) => d.resolve(v)?,
+                None => 0.0,
+            };
+            plane::datum_frame(*plane, offset)
+        },
+        WorkPlane::Custom { origin, normal, x_axis } => {
+            plane::custom_frame(d.resolve3(origin)?, *normal, *x_axis)
+        },
+    }
+}
+
+/// Insert an empty sketch entity with a resolved placement.
+fn new_sketch_entity(
+    d: &mut Document,
+    name: String,
+    translation: Vec3,
+    rotation_deg: Vec3,
+) -> EntityId {
+    let id = d.next_entity();
+    let shape = Shape::Sketch {
+        elements: Vec::new(),
+        constraints: Vec::new(),
+        next_element: 1,
+        next_constraint: 1,
+        solved: true,
+        residual: 0.0,
+        dof: 0,
+        over_constrained: false,
+        diagnostics: Vec::new(),
+    };
+    let entity = Entity {
+        id,
+        name,
+        shape,
+        mesh: sketch::display_mesh(&[]),
+        translation,
+        rotation_deg,
+        scale: [1.0; 3],
+        color: [0.15, 0.55, 0.85, 1.0],
+        geom_key: rebuild::sketch_key(&[]),
+    };
+    d.entities.insert(id, entity);
+    id
+}
+
+/// Load a complete element/constraint set into a sketch, solve, and report.
+fn fill_sketch(
+    d: &mut Document,
+    doc: DocId,
+    sketch: EntityId,
+    elements: Vec<SketchElement>,
+    constraints: Vec<SketchConstraint>,
+) -> Result<(sketch::SolveReport, usize)> {
+    let mut element_ids = std::collections::BTreeSet::new();
+    for e in &elements {
+        if !element_ids.insert(sketch::element_id(e)) {
+            return Err(Error::Invalid(format!(
+                "sketch element id {} appears twice (hint: element ids are unique per sketch)",
+                sketch::element_id(e)
+            )));
+        }
+    }
+    let mut constraint_ids = std::collections::BTreeSet::new();
+    for c in &constraints {
+        if !constraint_ids.insert(c.id) {
+            return Err(Error::Invalid(format!(
+                "constraint id {} appears twice (hint: constraint ids are unique per sketch)",
+                c.id
+            )));
+        }
+        sketch::validate(c.kind, &elements, &c.refs, c.value).map_err(Error::Invalid)?;
+    }
+    let next_element = element_ids.iter().max().copied().unwrap_or(0) + 1;
+    let next_constraint = constraint_ids.iter().max().copied().unwrap_or(0) + 1;
+    {
+        let (se, sc, ne, nc, ..) = sketch_parts(d, sketch)?;
+        *se = elements.clone();
+        *sc = constraints;
+        *ne = next_element;
+        *nc = next_constraint;
+    }
+    let report = refresh_sketch(d, doc, sketch)?;
+    let solved = match d.entities.get(&sketch).map(|e| &e.shape) {
+        Some(Shape::Sketch { elements, .. }) => elements.clone(),
+        _ => elements,
+    };
+    let loops = sketch::profile_loops(&solved).map(|l| l.len()).unwrap_or(0);
+    Ok((report, loops))
+}
+
+/// Finish `import_dxf`/`import_svg`: bake the parsed curves as an
+/// `add_sketch_curves` program step and report the import.
+#[allow(clippy::too_many_arguments)]
+fn finish_curve_import(
+    e: &mut Engine,
+    doc: DocId,
+    imported: import2d::Imported2d,
+    format: DrawingFormat,
+    path: &str,
+    name: Option<String>,
+    plane: Option<SketchPlane>,
+    auto_constraints: bool,
+) -> Result<CommandResult> {
+    let elements = import2d::to_elements(&imported.curves);
+    if elements.is_empty() {
+        return Err(Error::Document(format!(
+            "'{path}' parsed but contained no usable line, circle, arc or spline geometry"
+        )));
+    }
+    let constraints = if auto_constraints {
+        import2d::auto_constraints(&elements)
+    } else {
+        Vec::new()
+    };
+    let sketch_name = name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| imported.name.clone());
+    let add = Command::AddSketchCurves {
+        doc,
+        name: sketch_name.clone(),
+        plane,
+        elements,
+        constraints,
+    };
+    let result = e.execute(add)?;
+    let resolved = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string());
+    match result {
+        CommandResult::SketchBuilt {
+            sketch,
+            elements,
+            constraints,
+            closed_loops,
+            solved,
+            ..
+        } => Ok(CommandResult::CurveImported {
+            doc,
+            sketch,
+            name: sketch_name,
+            format,
+            path: resolved,
+            bytes: imported.bytes,
+            curves: imported.curves.len(),
+            elements,
+            constraints,
+            closed_loops,
+            solved,
+            warnings: imported.warnings,
+        }),
+        other => Err(Error::Invalid(format!(
+            "2D import produced an unexpected result: {other:?}"
+        ))),
+    }
 }
 
 /// Build the 2D drawing for `export_dxf` / `export_svg`.
@@ -4042,12 +4459,17 @@ fn bind_face_expect(d: &mut Document, report: &ReferenceReport) {
     }
     let Some(step) = d.step else { return };
     let Some(expect) = refs::expect_of(report) else { return };
-    if let Some(Command::AddSketch { plane: Some(SketchPlane::Face { expect: slot, .. }), .. }) =
-        d.program.get_mut(step)
-    {
-        if slot.is_none() {
-            *slot = Some(expect);
-        }
+    match d.program.get_mut(step) {
+        Some(Command::AddSketch { plane: Some(SketchPlane::Face { expect: slot, .. }), .. })
+        | Some(Command::AddSketchCurves {
+            plane: Some(SketchPlane::Face { expect: slot, .. }),
+            ..
+        }) => {
+            if slot.is_none() {
+                *slot = Some(expect);
+            }
+        },
+        _ => {},
     }
 }
 
@@ -7109,7 +7531,7 @@ mod tests {
 
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains("\"format\": \"wright-document\""));
-        assert!(text.contains("\"version\": 5"));
+        assert!(text.contains("\"version\": 6"));
         assert!(text.contains("print('hi')"), "the embedded source is preserved");
         // The file is the program, not the geometry.
         assert!(!text.contains("\"mesh\""));
@@ -9792,4 +10214,367 @@ mod tests {
         assert_eq!(entity_ids(&mut e), vec![1]);
     }
 
+    // --- M22: import → parametric -------------------------------------------
+
+    const DXF_RECT: &str = "\
+0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n\
+0\nSECTION\n2\nENTITIES\n\
+0\nLINE\n10\n0\n20\n0\n11\n20\n21\n0\n\
+0\nLINE\n10\n20\n20\n0\n11\n20\n21\n10\n\
+0\nLINE\n10\n20\n20\n10\n11\n0\n21\n10\n\
+0\nLINE\n10\n0\n20\n10\n11\n0\n21\n0\n\
+0\nENDSEC\n0\nEOF\n";
+
+    #[test]
+    fn dxf_import_bakes_a_sketch_and_extrudes() {
+        let (path, path_s) = temp_file("wright_import_rect.dxf");
+        std::fs::write(&path, DXF_RECT).unwrap();
+        let mut e = engine();
+        let imported = e
+            .execute(Command::ImportDxf {
+                doc: 1,
+                path: path_s.clone(),
+                name: None,
+                plane: None,
+                scale: None,
+                auto_constraints: None,
+            })
+            .unwrap();
+        let (sketch, elements, constraints, loops) = match imported {
+            CommandResult::CurveImported {
+                sketch,
+                elements,
+                constraints,
+                closed_loops,
+                solved,
+                ..
+            } => {
+                assert!(solved);
+                (sketch, elements, constraints, closed_loops)
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(elements, 4);
+        assert!(constraints >= 8, "inferred {constraints} constraints");
+        assert_eq!(loops, 1);
+        // The import is data: one add_sketch_curves program step.
+        let program = program_of(&mut e).0;
+        assert_eq!(program.len(), 1);
+        assert!(matches!(program[0], Command::AddSketchCurves { .. }), "{program:?}");
+
+        let (solid, volume, _) = extrude(&mut e, sketch, num(5.0));
+        assert!((volume - 1000.0).abs() < 1e-6, "{volume}");
+        let trust = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { solids, sketches, .. } => (solids, sketches),
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(trust.0.iter().any(|s| s.entity == solid && s.ok), "{trust:?}");
+
+        // Save/open replays the baked curves without the DXF.
+        let (wcad, wcad_s) = temp_file("wright_import_rect.wcad");
+        e.execute(Command::SaveDocument { doc: 1, path: wcad_s.clone(), source: None }).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut b = Engine::new();
+        let opened = b.execute(Command::OpenDocument { path: wcad_s.clone(), name: None }).unwrap();
+        assert!(matches!(opened, CommandResult::DocumentOpened { .. }), "{opened:?}");
+        let trust = match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { solids, .. } => solids,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(trust.iter().any(|s| s.ok), "{trust:?}");
+        let _ = wcad;
+    }
+
+    #[test]
+    fn svg_import_reads_a_nested_rect_and_circle() {
+        let (path, path_s) = temp_file("wright_import_nested.svg");
+        std::fs::write(
+            &path,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20mm\" height=\"10mm\" \
+             viewBox=\"0 0 20 10\"><rect x=\"0\" y=\"0\" width=\"20\" height=\"10\"/>\
+             <circle cx=\"10\" cy=\"5\" r=\"3\"/></svg>",
+        )
+        .unwrap();
+        let mut e = engine();
+        let imported = e
+            .execute(Command::ImportSvg {
+                doc: 1,
+                path: path_s.clone(),
+                name: Some("plate".into()),
+                plane: None,
+                scale: None,
+                auto_constraints: Some(false),
+            })
+            .unwrap();
+        let (sketch, elements, loops) = match imported {
+            CommandResult::CurveImported { sketch, elements, closed_loops, .. } => {
+                (sketch, elements, closed_loops)
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(elements, 5, "four edges plus one circle");
+        assert_eq!(loops, 2, "the circle is a nested hole loop");
+        let (_, volume, _) = extrude(&mut e, sketch, num(2.0));
+        let expected = (20.0 * 10.0 - std::f64::consts::PI * 9.0) * 2.0;
+        // The circle is tessellated when extruded, so the volume is a hair
+        // below the analytic ring.
+        assert!((volume - expected).abs() < 1.0, "{volume} vs {expected}");
+    }
+
+    #[test]
+    fn section_and_project_replay_with_a_parameter() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "w".into(),
+            value: num(20.0),
+            description: None,
+        })
+        .unwrap();
+        let box_id = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "body".into(),
+                center: vec3(0.0),
+                size: [Scalar::Expression("w".into()), num(10.0), num(6.0)],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let plane = Some(WorkPlane::Datum {
+            plane: wright_protocol::DatumPlane::Xy,
+            offset: Some(num(0.0)),
+        });
+        let sketch = match e
+            .execute(Command::Section {
+                doc: 1,
+                entity: box_id,
+                name: None,
+                plane: plane.clone(),
+            })
+            .unwrap()
+        {
+            CommandResult::SketchBuilt { sketch, .. } => sketch,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let (solid, volume, _) = extrude(&mut e, sketch, num(5.0));
+        assert!((volume - 1000.0).abs() < 1e-6, "{volume}");
+
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "w".into(),
+            value: num(40.0),
+            description: None,
+        })
+        .unwrap();
+        let report = match e
+            .execute(Command::Validate { doc: 1, entities: Some(vec![solid]), min_wall_mm: None })
+            .unwrap()
+        {
+            CommandResult::Validated { solids, .. } => solids[0].volume,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!((report - 2000.0).abs() < 1e-6, "{report}");
+
+        // project is also a replayable step, and its outline follows w.
+        let projected = e
+            .execute(Command::Project {
+                doc: 1,
+                entity: box_id,
+                name: None,
+                plane: Some(WorkPlane::Datum {
+                    plane: wright_protocol::DatumPlane::Xy,
+                    offset: Some(num(100.0)),
+                }),
+                min_angle_deg: None,
+            })
+            .unwrap();
+        let (outline, elements, loops) = match projected {
+            CommandResult::SketchBuilt { sketch, elements, closed_loops, .. } => {
+                (sketch, elements, closed_loops)
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(elements, 4);
+        assert_eq!(loops, 1);
+        let (_, volume, _) = extrude(&mut e, outline, num(1.0));
+        assert!((volume - 400.0).abs() < 1e-6, "{volume}");
+    }
+
+    #[test]
+    fn section_cuts_a_box_into_an_extrudable_sketch() {
+        let mut e = engine();
+        let box_id = add_box(&mut e, [0.0, 0.0, 0.0], [20.0, 10.0, 6.0]);
+        let result = e
+            .execute(Command::Section {
+                doc: 1,
+                entity: box_id,
+                name: Some("mid".into()),
+                plane: Some(WorkPlane::Datum {
+                    plane: wright_protocol::DatumPlane::Xy,
+                    offset: Some(num(0.0)),
+                }),
+            })
+            .unwrap();
+        let (sketch, elements, loops) = match result {
+            CommandResult::SketchBuilt { sketch, elements, closed_loops, .. } => {
+                (sketch, elements, closed_loops)
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(elements, 4);
+        assert_eq!(loops, 1);
+        let (_, volume, _) = extrude(&mut e, sketch, num(5.0));
+        assert!((volume - 1000.0).abs() < 1e-6, "{volume}");
+        // Section is a program step, so it survives save/open.
+        let methods: Vec<String> = program_of(&mut e)
+            .0
+            .iter()
+            .map(|c| command_tag(c))
+            .collect();
+        assert_eq!(methods, vec!["add_box", "section", "extrude"], "{methods:?}");
+    }
+
+    #[test]
+    fn project_traces_the_visible_outline_of_a_box() {
+        let mut e = engine();
+        let box_id = add_box(&mut e, [0.0, 0.0, 0.0], [20.0, 10.0, 6.0]);
+        let result = e
+            .execute(Command::Project {
+                doc: 1,
+                entity: box_id,
+                name: None,
+                plane: Some(WorkPlane::Datum {
+                    plane: wright_protocol::DatumPlane::Xy,
+                    offset: Some(num(100.0)),
+                }),
+                min_angle_deg: None,
+            })
+            .unwrap();
+        let (sketch, elements, loops) = match result {
+            CommandResult::SketchBuilt { sketch, elements, closed_loops, .. } => {
+                (sketch, elements, closed_loops)
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(elements, 4);
+        assert_eq!(loops, 1);
+        let (_, volume, _) = extrude(&mut e, sketch, num(2.0));
+        assert!((volume - 400.0).abs() < 1e-6, "{volume}");
+    }
+
+    #[test]
+    fn primitives_find_the_hole_in_a_boolean() {
+        let mut e = engine();
+        let plate = add_box(&mut e, [0.0, 0.0, 0.0], [40.0, 40.0, 10.0]);
+        let pin = match e
+            .execute(Command::AddCylinder {
+                doc: 1,
+                name: "pin".into(),
+                center: vec3(0.0),
+                radius: num(5.0),
+                height: num(20.0),
+                segments: Some(48),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let cut = match e
+            .execute(Command::Boolean {
+                doc: 1,
+                op: BooleanOp::Difference,
+                entities: vec![plate, pin],
+                name: Some("ring".into()),
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let report = e.execute(Command::Primitives { doc: 1, entity: cut }).unwrap();
+        match report {
+            CommandResult::Primitives { planar_faces, cylinders, holes, .. } => {
+                assert!(!planar_faces.is_empty());
+                assert!(
+                    cylinders.iter().any(|c| c.inner && (c.radius - 5.0).abs() < 0.1),
+                    "{cylinders:?}"
+                );
+                assert_eq!(holes.len(), 1, "{holes:?}");
+                assert!((holes[0].radius - 5.0).abs() < 0.1, "{holes:?}");
+                assert!(holes[0].depth > 9.9, "{holes:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn repair_mesh_fills_a_hole_and_replays() {
+        let mut e = engine();
+        // Use a box mesh with one triangle removed.
+        let full = geo::box_mesh([20.0, 10.0, 6.0]);
+        let positions = full.positions.clone();
+        let mut indices = full.indices.clone();
+        indices.drain(0..3);
+        let mesh_id = match e
+            .execute(Command::AddMesh {
+                doc: 1,
+                name: "broken".into(),
+                positions,
+                indices,
+                smooth_angle_deg: None,
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let before = match e.execute(Command::Validate { doc: 1, entities: Some(vec![mesh_id]), min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { solids, .. } => solids[0].clone(),
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(!before.watertight && before.open_edges > 0, "{before:?}");
+
+        let repaired = e
+            .execute(Command::RepairMesh {
+                doc: 1,
+                entity: mesh_id,
+                fill_holes: None,
+                fix_winding: None,
+                remove_non_manifold: None,
+                smooth_angle_deg: None,
+            })
+            .unwrap();
+        match repaired {
+            CommandResult::MeshRepaired { report, volume, .. } => {
+                assert!(report.watertight, "{report:?}");
+                assert!(report.holes_filled >= 1, "{report:?}");
+                assert!(volume > 0.0, "{volume}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let after = match e.execute(Command::Validate { doc: 1, entities: Some(vec![mesh_id]), min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { solids, .. } => solids[0].clone(),
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(after.watertight && after.ok, "{after:?}");
+
+        // The repair is a program step and replays after save/open.
+        let (_, wcad_s) = temp_file("wright_repair.wcad");
+        e.execute(Command::SaveDocument { doc: 1, path: wcad_s.clone(), source: None }).unwrap();
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: wcad_s, name: None }).unwrap();
+        let trust = match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { solids, .. } => solids,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(trust.iter().all(|s| s.ok), "{trust:?}");
+    }
 }

@@ -65,6 +65,33 @@ def _mirror_plane_payload(plane: Any) -> dict:
     )
 
 
+def _work_plane_payload(plane: Any) -> dict | None:
+    """Normalize a `section`/`project` plane into the wire `WorkPlane`.
+
+    Accepted forms mirror mirror planes: ``"xy" | "xz" | "yz"``,
+    ``{"plane": "xy", "offset": 5}``, ``{"origin": [...], "normal": [...]}``,
+    or an already-normalized ``{"datum": ...}`` / ``{"custom": ...}`` dict.
+    """
+    if plane is None:
+        return None
+    if isinstance(plane, str):
+        if plane not in _DATUM_PLANES:
+            raise ValueError(f"plane must be one of {_DATUM_PLANES} or a plane dict (got {plane!r})")
+        return {"datum": {"plane": plane}}
+    if not isinstance(plane, dict):
+        raise TypeError("plane must be a string, a dict, or None")
+    if "datum" in plane or "custom" in plane:
+        return dict(plane)
+    if "plane" in plane:
+        return {"datum": dict(plane)}
+    if "origin" in plane:
+        return {"custom": dict(plane)}
+    raise ValueError(
+        "plane dict must contain 'plane' (datum) or 'origin' + 'normal' (custom), "
+        "or already be a {'datum': ...} / {'custom': ...} wire form"
+    )
+
+
 def _sweep_path_payload(path: Any) -> dict:
     """Normalize a sweep path into the wire form.
 
@@ -582,6 +609,174 @@ class Wright:
             indices=flat,
             smooth_angle_deg=smooth_angle_deg,
             color=color,
+        )
+
+    def import_dxf(
+        self,
+        doc: int,
+        path: str,
+        name: str | None = None,
+        plane: Any = None,
+        scale: float | None = None,
+        auto_constraints: bool | None = None,
+    ) -> dict[str, Any]:
+        """Read a DXF drawing on the **server** and bring it in as a sketch.
+
+        Lines, circles, arcs and polylines become analytic sketch elements;
+        `$INSUNITS` converts to millimeters and ``scale`` multiplies after
+        that. ``plane`` places the sketch (``"xy"``/``"xz"``/``"yz"``, a
+        datum/custom dict, or a face selector). ``auto_constraints`` (default
+        true) infers coincident, horizontal/vertical and approximate-tangency
+        constraints so the imported drawing behaves like authored geometry.
+
+        The result is recorded as an ``add_sketch_curves`` program step, so a
+        ``.wcad`` replays without the source file. Returns the sketch id,
+        element/constraint counts and closed-loop count.
+        """
+        return self._request(
+            "import_dxf",
+            doc=doc,
+            path=path,
+            name=name,
+            plane=_sketch_plane_payload(plane, None),
+            scale=scale,
+            auto_constraints=auto_constraints,
+        )
+
+    def import_svg(
+        self,
+        doc: int,
+        path: str,
+        name: str | None = None,
+        plane: Any = None,
+        scale: float | None = None,
+        auto_constraints: bool | None = None,
+    ) -> dict[str, Any]:
+        """Read an SVG drawing on the **server** and bring it in as a sketch.
+
+        Supports ``line``, ``circle``, ``ellipse``, ``rect``, ``polyline``,
+        ``polygon`` and ``path`` (M/L/H/V/C/S/Q/T/A/Z), nested group
+        transforms and common width/height/viewBox units. SVG Y is flipped to
+        the sketch's Y-up frame; cubic/quadratic curves are sampled to
+        splines, circular arcs stay analytic where possible.
+
+        The result is recorded as an ``add_sketch_curves`` program step, and
+        ``auto_constraints`` works exactly as in :meth:`import_dxf`.
+        """
+        return self._request(
+            "import_svg",
+            doc=doc,
+            path=path,
+            name=name,
+            plane=_sketch_plane_payload(plane, None),
+            scale=scale,
+            auto_constraints=auto_constraints,
+        )
+
+    def add_sketch_curves(
+        self,
+        doc: int,
+        name: str,
+        elements: list[dict[str, Any]],
+        constraints: list[dict[str, Any]] | None = None,
+        plane: Any = None,
+    ) -> dict[str, Any]:
+        """Create a sketch from complete wire-format elements (the program
+        step :meth:`import_dxf`/:meth:`import_svg` record).
+
+        Elements are ``{"type": "line", "id": 1, "p1": [x, y], "p2": [x, y]}``
+        and the circle/arc/spline forms; constraints reference those ids and
+        look like ``{"id": 1, "kind": "horizontal", "refs": [{"element": 1}]}``.
+        Agents normally use the importers or the individual ``add_sketch_*``
+        commands; this is the compact bulk form.
+        """
+        return self._request(
+            "add_sketch_curves",
+            doc=doc,
+            name=name,
+            elements=elements,
+            constraints=constraints or [],
+            plane=_sketch_plane_payload(plane, None),
+        )
+
+    def section(
+        self,
+        doc: int,
+        entity: int,
+        name: str | None = None,
+        plane: Any = None,
+    ) -> dict[str, Any]:
+        """Cut a solid with a plane and put the intersection into a new sketch.
+
+        The plane defaults to XY at the origin; datum/custom dicts and
+        ``"xy"``/``"xz"``/``"yz"`` are accepted. Closed loops come out as
+        connected line runs, ready for :meth:`extrude` — the fastest way to
+        turn an imported mesh into a parametric profile. A modeling command:
+        it replays with the program.
+        """
+        return self._request(
+            "section", doc=doc, entity=entity, name=name, plane=_work_plane_payload(plane)
+        )
+
+    def project(
+        self,
+        doc: int,
+        entity: int,
+        name: str | None = None,
+        plane: Any = None,
+        min_angle_deg: float | None = None,
+    ) -> dict[str, Any]:
+        """Project a solid's boundary, sharp and silhouette edges onto a plane.
+
+        The plane normal is the viewing direction (default +Z). Useful for an
+        outline of an imported mesh that can be offset or extruded. A modeling
+        command: it replays with the program.
+        """
+        return self._request(
+            "project",
+            doc=doc,
+            entity=entity,
+            name=name,
+            plane=_work_plane_payload(plane),
+            min_angle_deg=min_angle_deg,
+        )
+
+    def primitives(self, doc: int, entity: int) -> dict[str, Any]:
+        """List the analytic primitives of one solid or imported mesh.
+
+        Returns ``planar_faces`` (the M20 face listing), ``cylinders`` (axis,
+        center, radius, height and inner/outer) and ``holes`` (inner cylinders
+        with depth and a through/blind guess). This is how an agent re-authors
+        an imported part parametrically instead of only booleaning onto it. A
+        session command: it changes no state.
+        """
+        return self._request("primitives", doc=doc, entity=entity)
+
+    def repair_mesh(
+        self,
+        doc: int,
+        entity: int,
+        fill_holes: bool | None = None,
+        fix_winding: bool | None = None,
+        remove_non_manifold: bool | None = None,
+        smooth_angle_deg: float | None = None,
+    ) -> dict[str, Any]:
+        """Repair a triangle mesh in place: weld, orient each shell outward,
+        drop non-manifold fins and fill closed boundary loops.
+
+        Defaults repair everything. The entity keeps its id, name, color and
+        transform; the command is part of the program, so it replays and can
+        make a non-watertight import safe for booleans. Returns a report of
+        filled holes, flipped/removed triangles and the final watertightness.
+        """
+        return self._request(
+            "repair_mesh",
+            doc=doc,
+            entity=entity,
+            fill_holes=fill_holes,
+            fix_winding=fix_winding,
+            remove_non_manifold=remove_non_manifold,
+            smooth_angle_deg=smooth_angle_deg,
         )
 
     def boolean(
