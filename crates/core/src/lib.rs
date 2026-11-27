@@ -32,6 +32,7 @@ pub mod pattern;
 pub mod pick;
 pub mod plane;
 mod rebuild;
+pub mod refs;
 pub mod render;
 pub mod shell;
 pub mod sketch;
@@ -50,9 +51,10 @@ use std::fmt;
 use wright_protocol::{
     Bbox, BooleanOp, Command, CommandResult, CurveMode, DocId, DocInfo, DocumentSnapshot,
     EdgeFilter, EntityChange, EntityId, EntitySnapshot, EntitySummary, Mat4, Mesh, MirrorPlane,
-    ParamInfo, ParameterChange, Rgba, RevolveAxis, SavedParameter, Scalar, SketchElement,
-    SketchPlane, SketchValidation, SolidValidation, SourceDoc, SVec3, ValidationTotals,
-    Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
+    ParamInfo, ParameterChange, ReferenceChange, ReferenceCheck, ReferenceReport, Rgba,
+    RevolveAxis, SavedParameter, Scalar, SketchElement, SketchPlane, SketchValidation,
+    SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3, DOCUMENT_FORMAT, DOCUMENT_VERSION,
+    PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -111,6 +113,10 @@ struct Snapshot {
     instances: BTreeMap<u64, assembly::Instance>,
     program: Vec<Command>,
     params: ParamMap,
+    /// Resolution result of each selector-carrying step, captured when that
+    /// step ran. Derived from the program + geometry, but kept in undo
+    /// snapshots so `validate` can report references without a replay.
+    reference_bindings: BTreeMap<usize, ReferenceReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +319,10 @@ pub struct Document {
     /// Per-feature geometry memo, keyed by content. Derived state: not saved,
     /// not part of undo snapshots, safe to clear at any time.
     cache: rebuild::GeometryCache,
+    /// How each selector-carrying program step resolved when it last ran.
+    /// Derived from the program and geometry; used by `validate`/`diff_scene`
+    /// to report references without re-resolving them against a later state.
+    reference_bindings: BTreeMap<usize, ReferenceReport>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
 }
@@ -333,6 +343,7 @@ impl Document {
             replaying: false,
             step: None,
             cache: rebuild::GeometryCache::default(),
+            reference_bindings: BTreeMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -388,6 +399,7 @@ impl Document {
             instances: self.instances.clone(),
             program: self.program.clone(),
             params: self.params.clone(),
+            reference_bindings: self.reference_bindings.clone(),
         });
         if self.undo_stack.len() > MAX_HISTORY {
             self.undo_stack.remove(0);
@@ -407,6 +419,7 @@ impl Document {
             self.instances = snap.instances;
             self.program = snap.program;
             self.params = snap.params;
+            self.reference_bindings = snap.reference_bindings;
         }
         self.redo_stack.clear();
     }
@@ -444,6 +457,7 @@ impl Document {
         self.next_entity = 1;
         self.next_instance = 1;
         self.replaying = true;
+        self.reference_bindings.clear();
         self.cache.begin();
         let mut result = Ok(());
         for (step, cmd) in program.iter().enumerate() {
@@ -456,6 +470,15 @@ impl Document {
         self.step = None;
         self.replaying = false;
         result
+    }
+
+    /// Remember how the current step's selector resolved. Called by every
+    /// selector-carrying command, live and replay alike; `validate` and
+    /// `diff_scene` read it instead of re-resolving against a later state.
+    pub(crate) fn record_reference(&mut self, report: &ReferenceReport) {
+        if let Some(step) = self.step {
+            self.reference_bindings.insert(step, report.clone());
+        }
     }
 
     /// Memoize one geometry result by content key at the current program step.
@@ -618,6 +641,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::Redo { doc: d }
         | Command::GetScene { doc: d }
         | Command::Pick { doc: d, .. }
+        | Command::Faces { doc: d, .. }
+        | Command::Edges { doc: d, .. }
         | Command::Validate { doc: d, .. }
         | Command::DiffScene { doc: d, .. }
         | Command::GetProgram { doc: d }
@@ -904,14 +929,21 @@ impl Engine {
                     .or_else(|| d.params.get(name).and_then(|p| p.description.clone()));
                 d.params.insert(name.clone(), Param { value: resolved, description });
                 match d.replay() {
-                    Ok(()) => Ok(CommandResult::ParameterSet {
-                        doc: *doc,
-                        name: name.clone(),
-                        value: resolved,
-                        rebuilt: d.cache.rebuilt,
-                        reused: d.cache.reused,
-                        steps: d.program.len(),
-                    }),
+                    Ok(()) => {
+                        let references_drifted = reference_checks(d)
+                            .iter()
+                            .filter(|check| check.status == "drift")
+                            .count();
+                        Ok(CommandResult::ParameterSet {
+                            doc: *doc,
+                            name: name.clone(),
+                            value: resolved,
+                            rebuilt: d.cache.rebuilt,
+                            reused: d.cache.reused,
+                            steps: d.program.len(),
+                            references_drifted,
+                        })
+                    },
                     Err(e) => {
                         d.rollback();
                         Err(e)
@@ -959,6 +991,7 @@ impl Engine {
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
+                    reference_bindings: std::mem::take(&mut d.reference_bindings),
                 });
                 d.next_entity = snap.next_entity;
                 d.next_instance = snap.next_instance;
@@ -967,6 +1000,7 @@ impl Engine {
                 d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
+                d.reference_bindings = snap.reference_bindings;
                 Ok(CommandResult::Undone { doc: *doc })
             },
 
@@ -981,6 +1015,7 @@ impl Engine {
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
                     params: std::mem::take(&mut d.params),
+                    reference_bindings: std::mem::take(&mut d.reference_bindings),
                 });
                 d.next_entity = snap.next_entity;
                 d.next_instance = snap.next_instance;
@@ -989,6 +1024,7 @@ impl Engine {
                 d.instances = snap.instances;
                 d.program = snap.program;
                 d.params = snap.params;
+                d.reference_bindings = snap.reference_bindings;
                 Ok(CommandResult::Redone { doc: *doc })
             },
 
@@ -1055,6 +1091,42 @@ impl Engine {
                 let d = self.doc(*doc)?;
                 let hit = pick::pick(&d.entities, ray, *tolerance)?;
                 Ok(CommandResult::Picked { doc: *doc, hit })
+            },
+
+            Command::Faces { doc, entity } => {
+                let d = self.doc(*doc)?;
+                let e = d.entities.get(entity).ok_or(Error::UnknownEntity { doc: *doc, entity: *entity })?;
+                ensure_solid(e, "faces")?;
+                let world = transform_mesh(&e.mesh, &e.transform());
+                let topology = refs::topology(&world, *entity, 30.0)?;
+                Ok(CommandResult::FacesResolved {
+                    doc: *doc,
+                    entity: *entity,
+                    name: e.name.clone(),
+                    faces: refs::face_groups(&topology),
+                })
+            },
+
+            Command::Edges { doc, entity, min_angle_deg } => {
+                let d = self.doc(*doc)?;
+                let e = d.entities.get(entity).ok_or(Error::UnknownEntity { doc: *doc, entity: *entity })?;
+                ensure_solid(e, "edges")?;
+                let min_angle = min_angle_deg.unwrap_or(30.0);
+                if !(min_angle > 0.0 && min_angle < 180.0) {
+                    return Err(Error::Invalid(
+                        "min_angle_deg must be in (0, 180) (hint: omit it for 30°)"
+                            .into(),
+                    ));
+                }
+                let world = transform_mesh(&e.mesh, &e.transform());
+                let topology = refs::topology(&world, *entity, min_angle)?;
+                Ok(CommandResult::EdgesResolved {
+                    doc: *doc,
+                    entity: *entity,
+                    name: e.name.clone(),
+                    min_angle_deg: min_angle,
+                    edges: refs::edge_groups(&topology),
+                })
             },
 
             Command::Validate { doc, entities, min_wall_mm } => {
@@ -1148,8 +1220,22 @@ impl Engine {
                 }
 
                 let totals = validation_totals(&solids, &sketches);
+                let references = reference_checks(d);
+                for check in &references {
+                    if let Some(message) = &check.message {
+                        warnings.push(format!("reference {}: {message}", check.status));
+                    }
+                }
                 let ok = solids.iter().all(|s| s.ok) && sketches.iter().all(|s| s.ok);
-                Ok(CommandResult::Validated { doc: *doc, ok, solids, sketches, totals, warnings })
+                Ok(CommandResult::Validated {
+                    doc: *doc,
+                    ok,
+                    solids,
+                    sketches,
+                    totals,
+                    warnings,
+                    references,
+                })
             },
 
             Command::DiffScene { doc, against, path } => {
@@ -1560,6 +1646,94 @@ fn sketch_validation(entity: &Entity) -> SketchValidation {
     }
 }
 
+/// Report every selector-carrying step in the program (M20). The binding was
+/// captured when that step ran; this only classifies it against the stored
+/// expectation, so it is read-only and never writes expectations back.
+fn reference_checks(d: &Document) -> Vec<ReferenceCheck> {
+    let mut out = Vec::new();
+    for (step, command) in d.program.iter().enumerate() {
+        if let Some(check) = check_reference(d, step, command) {
+            out.push(check);
+        }
+    }
+    out
+}
+
+fn check_reference(d: &Document, step: usize, command: &Command) -> Option<ReferenceCheck> {
+    let (entity, method, expect, bindable) = match command {
+        Command::Fillet { entity, edges: Some(filter), .. } => {
+            (*entity, "fillet", filter.expect.clone(), true)
+        },
+        Command::Chamfer { entity, edges: Some(filter), .. } => {
+            (*entity, "chamfer", filter.expect.clone(), true)
+        },
+        Command::AddSketch {
+            plane: Some(SketchPlane::Face { entity, expect, .. }),
+            ..
+        } => (*entity, "add_sketch", expect.clone(), true),
+        Command::Hole { entity, .. } => (*entity, "hole", None, false),
+        Command::Mirror { .. } => (0, "mirror", None, false),
+        Command::Mate { .. } => (0, "mate", None, false),
+        _ => return None,
+    };
+    // The binding was captured when the step actually ran, so a later
+    // fillet/boolean that reshapes the same entity cannot make an earlier
+    // selector look drifted.
+    let report = d.reference_bindings.get(&step)?.clone();
+    let entity = if method == "mirror" || method == "mate" { None } else { Some(entity) };
+    let status = if report.matched == 0 {
+        "missing"
+    } else if report.drift.is_some() {
+        "drift"
+    } else if bindable && expect.is_none() {
+        "unbound"
+    } else if report.moved {
+        "moved"
+    } else if report.ambiguous {
+        "ambiguous"
+    } else {
+        "ok"
+    };
+    let message = match status {
+        "drift" => report.drift.as_ref().map(|d| {
+            format!(
+                "{method} at step {step} now binds to '{}' instead of '{}'",
+                d.actual_descriptor, d.expected_descriptor
+            )
+        }),
+        "missing" => Some(format!(
+            "{method} at step {step} no longer matches any geometry (hint: re-author the selector \
+             from `faces`/`edges`)"
+        )),
+        "moved" => Some(format!(
+            "{method} at step {step} still binds to the same feature, but its geometry changed"
+        )),
+        "ambiguous" => Some(format!(
+            "{method} at step {step} matches {} groups; the first is '{}'",
+            report.matched,
+            report
+                .descriptors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".into())
+        )),
+        _ => None,
+    };
+    Some(ReferenceCheck {
+        step,
+        method: method.into(),
+        entity,
+        status: status.into(),
+        matched: report.matched,
+        ambiguous: report.ambiguous,
+        fingerprint: report.fingerprint.clone(),
+        expected: expect.as_ref().map(|e| e.fingerprint.clone()),
+        expected_descriptor: expect.as_ref().map(|e| e.descriptor.clone()),
+        actual_descriptor: report.descriptors.first().cloned(),
+        message,
+    })
+}
+
 /// Roll per-entity reports up into document totals.
 fn validation_totals(solids: &[SolidValidation], sketches: &[SketchValidation]) -> ValidationTotals {
     let mut totals = ValidationTotals {
@@ -1710,11 +1884,13 @@ fn diff_documents(
     let commands_from = baseline.program.len();
     let commands_to = current.program.len();
     let program_changed = canonical_program(&baseline.program) != canonical_program(&current.program);
+    let references = reference_changes(current, baseline);
     let changed = !added.is_empty()
         || !removed.is_empty()
         || !modified.is_empty()
         || !parameters.is_empty()
-        || program_changed;
+        || program_changed
+        || !references.is_empty();
 
     CommandResult::SceneDiff {
         doc,
@@ -1731,6 +1907,50 @@ fn diff_documents(
         program_changed,
         commands_from,
         commands_to,
+        references,
+    }
+}
+
+/// Selectors whose binding moved between two revisions. Steps are matched by
+/// index and method; a reordered program simply stops comparing there.
+fn reference_changes(current: &Document, baseline: &Document) -> Vec<ReferenceChange> {
+    let mut out = Vec::new();
+    for (step, command) in current.program.iter().enumerate() {
+        let Some(before_command) = baseline.program.get(step) else { continue };
+        if method_name(command) != method_name(before_command) {
+            continue;
+        }
+        let Some(now) = check_reference(current, step, command) else { continue };
+        let Some(before) = check_reference(baseline, step, before_command) else { continue };
+        if now.fingerprint == before.fingerprint && now.matched == before.matched {
+            continue;
+        }
+        out.push(ReferenceChange {
+            step,
+            method: now.method.clone(),
+            entity: now.entity,
+            from_fingerprint: before.fingerprint,
+            to_fingerprint: now.fingerprint,
+            from_descriptor: before.actual_descriptor,
+            to_descriptor: now.actual_descriptor,
+            matched_from: before.matched,
+            matched_to: now.matched,
+        });
+    }
+    out
+}
+
+/// Method name of a modeling command, used to pair selectors across
+/// revisions.
+fn method_name(command: &Command) -> &'static str {
+    match command {
+        Command::Fillet { .. } => "fillet",
+        Command::Chamfer { .. } => "chamfer",
+        Command::AddSketch { .. } => "add_sketch",
+        Command::Hole { .. } => "hole",
+        Command::Mirror { .. } => "mirror",
+        Command::Mate { .. } => "mate",
+        _ => "",
     }
 }
 
@@ -1823,6 +2043,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Redo { doc }
         | Command::GetScene { doc }
         | Command::Pick { doc, .. }
+        | Command::Faces { doc, .. }
+        | Command::Edges { doc, .. }
         | Command::Validate { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::ExportStl { doc, .. }
@@ -1916,7 +2138,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             };
             let mesh = entity.mesh.clone();
             d.entities.insert(id, entity);
-            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
+            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh, reference: None })
         },
 
         Command::Transform { doc, entity, translation, rotation_deg, scale } => {
@@ -2012,7 +2234,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             };
             let mesh = entity.mesh.clone();
             d.entities.insert(id, entity);
-            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
+            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh, reference: None })
         },
 
         Command::Fillet { doc, entity, radius, edges, min_angle_deg } => {
@@ -2035,10 +2257,13 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
         // --- sketches -------------------------------------------------------
 
         Command::AddSketch { doc, name, plane } => {
-            let (translation, rotation_deg) = match plane {
+            let (translation, rotation_deg, reference) = match plane {
                 Some(plane) => resolve_sketch_plane(d, *doc, plane)?,
-                None => ([0.0; 3], [0.0; 3]),
+                None => ([0.0; 3], [0.0; 3], None),
             };
+            if let Some(report) = &reference {
+                d.record_reference(report);
+            }
             let id = d.next_entity();
             let shape = Shape::Sketch {
                 elements: Vec::new(),
@@ -2064,7 +2289,10 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
             };
             let mesh = entity.mesh.clone();
             d.entities.insert(id, entity);
-            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh })
+            if let Some(report) = &reference {
+                bind_face_expect(d, report);
+            }
+            Ok(CommandResult::EntityCreated { doc: *doc, entity: id, mesh, reference })
         },
 
         Command::AddSketchLine { doc, sketch, p1, p2, construction } => {
@@ -2417,7 +2645,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     created.push(id);
                 }
             }
-            Ok(pattern_result(*doc, d, created))
+            Ok(pattern_result(*doc, d, created, None))
         },
 
         Command::CircularPattern { doc, entities, center, axis, angle_deg, count, name, color } => {
@@ -2452,7 +2680,7 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                     created.push(id);
                 }
             }
-            Ok(pattern_result(*doc, d, created))
+            Ok(pattern_result(*doc, d, created, None))
         },
 
         Command::Mirror { doc, entities, plane, name, color } => {
@@ -2465,7 +2693,9 @@ fn exec(d: &mut Document, command: &Command) -> Result<CommandResult> {
                 let id = create_copy(d, *doc, source, kind, name.clone(), *color)?;
                 created.push(id);
             }
-            Ok(pattern_result(*doc, d, created))
+            let reference = refs::mirror_report(origin, normal);
+            d.record_reference(&reference);
+            Ok(pattern_result(*doc, d, created, Some(reference)))
         },
 
         Command::Shell { doc, entity, thickness, open, angle_tol_deg } => {
@@ -2771,20 +3001,20 @@ fn resolve_sketch_plane(
     d: &Document,
     doc: DocId,
     plane: &SketchPlane,
-) -> Result<(Vec3, Vec3)> {
+) -> Result<(Vec3, Vec3, Option<ReferenceReport>)> {
     let frame = match plane {
         SketchPlane::Datum { plane, offset } => {
             let offset = match offset {
                 Some(v) => d.resolve(v)?,
                 None => 0.0,
             };
-            plane::datum_frame(*plane, offset)?
+            (plane::datum_frame(*plane, offset)?, None)
         },
         SketchPlane::Custom { origin, normal, x_axis } => {
             let origin = d.resolve3(origin)?;
-            plane::custom_frame(origin, *normal, *x_axis)?
+            (plane::custom_frame(origin, *normal, *x_axis)?, None)
         },
-        SketchPlane::Face { entity, near, normal, angle_tol_deg } => {
+        SketchPlane::Face { entity, near, normal, angle_tol_deg, expect } => {
             let near = near.as_ref().map(|v| d.resolve3(v)).transpose()?;
             let e = d
                 .entities
@@ -2803,10 +3033,16 @@ fn resolve_sketch_plane(
                 )));
             }
             let world = transform_mesh(&e.mesh, &e.transform());
-            plane::face_frame(&world, near, *normal, *angle_tol_deg, *entity)?
+            let frame = plane::face_frame(&world, near, *normal, *angle_tol_deg, *entity)?;
+            let topology = refs::topology(&world, *entity, 30.0)?;
+            let report =
+                refs::match_faces(&topology, near, *normal, *angle_tol_deg, expect.as_ref());
+            (frame, Some(report))
         },
     };
-    Ok(plane::placement(&frame))
+    let (frame, reference) = frame;
+    let (translation, rotation) = plane::placement(&frame);
+    Ok((translation, rotation, reference))
 }
 
 /// Build the 2D drawing for `export_dxf` / `export_svg`.
@@ -3065,6 +3301,22 @@ fn reshape(
     let filter = edges.unwrap_or(&empty);
     let key = rebuild::reshape_key(input_key, placement, kind, filter, min_angle_deg);
 
+    // Resolve the selector against the live geometry even on a cache hit:
+    // the mesh may be memoized, but the reference report and its drift check
+    // are about *which* edge this command addresses.
+    let reference = match edges {
+        Some(_) => {
+            let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
+            let world = transform_mesh(&e.mesh, &transform);
+            let topology = refs::topology(&world, entity, min_angle_deg)?;
+            Some(refs::match_edges(&topology, filter))
+        },
+        None => None,
+    };
+    if let Some(report) = &reference {
+        d.record_reference(report);
+    }
+
     let cached = d.cached_geometry(key, |d| {
         let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
         let world = transform_mesh(&e.mesh, &transform);
@@ -3098,7 +3350,47 @@ fn reshape(
         e.mesh = mesh.clone();
         e.geom_key = key;
     }
-    Ok(CommandResult::EntityModified { doc, entity, edges, volume, mesh })
+    if let Some(report) = &reference {
+        bind_edge_expect(d, report);
+    }
+    Ok(CommandResult::EntityModified { doc, entity, edges, volume, mesh, reference })
+}
+
+/// Store what an edge selector resolved to in the program step that carries
+/// it, on first use. A selector that already carries an expectation is never
+/// silently rebound: a replay compares against the old binding and reports
+/// drift, so the agent has to re-author the reference deliberately.
+fn bind_edge_expect(d: &mut Document, report: &ReferenceReport) {
+    if d.replaying {
+        return;
+    }
+    let Some(step) = d.step else { return };
+    let Some(expect) = refs::expect_of(report) else { return };
+    if let Some(
+        Command::Fillet { edges: Some(filter), .. }
+        | Command::Chamfer { edges: Some(filter), .. },
+    ) = d.program.get_mut(step)
+    {
+        if filter.expect.is_none() {
+            filter.expect = Some(expect);
+        }
+    }
+}
+
+/// Store what a face-plane selector resolved to in its `add_sketch` step.
+fn bind_face_expect(d: &mut Document, report: &ReferenceReport) {
+    if d.replaying {
+        return;
+    }
+    let Some(step) = d.step else { return };
+    let Some(expect) = refs::expect_of(report) else { return };
+    if let Some(Command::AddSketch { plane: Some(SketchPlane::Face { expect: slot, .. }), .. }) =
+        d.program.get_mut(step)
+    {
+        if slot.is_none() {
+            *slot = Some(expect);
+        }
+    }
 }
 
 /// Rebuild every extrude/revolve that references `sketch`, so solids follow
@@ -3249,13 +3541,18 @@ fn sketch_result(outcome: SketchOutcome) -> CommandResult {
 }
 
 /// Build a pattern/mirror result from the copies just created.
-fn pattern_result(doc: DocId, d: &Document, created: Vec<EntityId>) -> CommandResult {
+fn pattern_result(
+    doc: DocId,
+    d: &Document,
+    created: Vec<EntityId>,
+    reference: Option<ReferenceReport>,
+) -> CommandResult {
     let tris = created
         .iter()
         .filter_map(|id| d.entities.get(id))
         .map(|e| e.mesh.indices.len() / 3)
         .sum();
-    CommandResult::EntitiesCreated { doc, entities: created, tris }
+    CommandResult::EntitiesCreated { doc, entities: created, tris, reference }
 }
 
 fn validate_count(count: u32) -> Result<u32> {
@@ -3275,7 +3572,7 @@ fn normalize3(v: Vec3) -> Vec3 {
 fn ensure_solid(entity: &Entity, what: &str) -> Result<()> {
     if matches!(entity.shape, Shape::Sketch { .. }) {
         return Err(Error::Invalid(format!(
-            "entity {} is a sketch; {what} repeats printable solids (hint: extrude the sketch \
+            "entity {} is a sketch; {what} needs a printable solid (hint: extrude the sketch \
              first)",
             entity.id
         )));
@@ -3403,7 +3700,7 @@ fn shell_solid(
         e.mesh = mesh.clone();
         e.geom_key = key;
     }
-    Ok(CommandResult::EntityReshaped { doc, entity, volume, tris, mesh })
+    Ok(CommandResult::EntityReshaped { doc, entity, volume, tris, mesh, reference: None })
 }
 
 fn hole_solid(
@@ -3414,6 +3711,15 @@ fn hole_solid(
 ) -> Result<CommandResult> {
     let (input_key, placement, transform) = editable_solid(d, doc, entity, "hole")?;
     let key = rebuild::hole_key(input_key, placement, &spec);
+    let reference = {
+        let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
+        let world = transform_mesh(&e.mesh, &transform);
+        let topology = refs::topology(&world, entity, 30.0)?;
+        Some(refs::match_entry_face(&topology, spec.center, spec.normal, None))
+    };
+    if let Some(report) = &reference {
+        d.record_reference(report);
+    }
     let cached = d.cached_geometry(key, |d| {
         let e = d.entities.get(&entity).ok_or(Error::UnknownEntity { doc, entity })?;
         let world = transform_mesh(&e.mesh, &transform);
@@ -3435,7 +3741,7 @@ fn hole_solid(
         e.mesh = mesh.clone();
         e.geom_key = key;
     }
-    Ok(CommandResult::EntityReshaped { doc, entity, volume, tris, mesh })
+    Ok(CommandResult::EntityReshaped { doc, entity, volume, tris, mesh, reference })
 }
 
 /// Shared preflight for in-place world-space features.
@@ -3578,7 +3884,7 @@ fn add_entity(
     };
     let mesh = entity.mesh.clone();
     d.entities.insert(id, entity);
-    Ok(CommandResult::EntityCreated { doc, entity: id, mesh })
+    Ok(CommandResult::EntityCreated { doc, entity: id, mesh, reference: None })
 }
 
 #[cfg(test)]
@@ -4927,7 +5233,13 @@ mod tests {
     }
 
     fn face_plane(entity: EntityId, normal: [f64; 3]) -> SketchPlane {
-        SketchPlane::Face { entity, near: None, normal: Some(normal), angle_tol_deg: None }
+        SketchPlane::Face {
+            entity,
+            near: None,
+            normal: Some(normal),
+            angle_tol_deg: None,
+            expect: None,
+        }
     }
 
     fn sketch_frame(e: &mut Engine, sketch: EntityId) -> wright_protocol::SketchPlaneFrame {
@@ -5847,6 +6159,7 @@ mod tests {
                 near: Some([num(0.0), num(0.0), num(20.0)]),
                 normal: Some([0.0, 0.0, 1.0]),
                 angle_tol_deg: None,
+                expect: None,
             },
         );
         let f = sketch_frame(&mut e, boss_top);
@@ -5923,6 +6236,7 @@ mod tests {
                     near: None,
                     normal: Some([0.0, 0.0, 1.0]),
                     angle_tol_deg: Some(0.0),
+                    expect: None,
                 }),
             })
             .unwrap_err();
@@ -7950,4 +8264,346 @@ mod tests {
         assert!(err.contains("out of range"), "{err}");
         let _ = std::fs::remove_file(stl_path);
     }
+
+    #[test]
+    fn faces_and_edges_enumerate_a_box() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0; 3], [10.0; 3]);
+
+        let faces = match e.execute(Command::Faces { doc: 1, entity: id }).unwrap() {
+            CommandResult::FacesResolved { name, faces, .. } => {
+                assert_eq!(name, "box");
+                faces
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(faces.len(), 6);
+        assert!(faces.iter().all(|f| f.kind == "planar" && f.tris == 2));
+        assert!(faces.iter().all(|f| (f.area - 100.0).abs() < 1e-5));
+        assert!(faces.iter().all(|f| f.edges.len() == 4));
+        assert!(faces.iter().all(|f| f.selector.entity == id));
+
+        let edges = match e
+            .execute(Command::Edges { doc: 1, entity: id, min_angle_deg: None })
+            .unwrap()
+        {
+            CommandResult::EdgesResolved { edges, min_angle_deg, .. } => {
+                assert_eq!(min_angle_deg, 30.0);
+                edges
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(edges.len(), 12);
+        assert!(edges.iter().all(|x| x.kind == "line" && x.segments == 1));
+        assert!(edges.iter().all(|x| x.faces.len() == 2));
+        assert!(edges.iter().all(|x| x.direction.is_some_and(|d| {
+            (d.iter().map(|v| v * v).sum::<f64>() - 1.0).abs() < 1e-9
+        })));
+    }
+
+    #[test]
+    fn a_fillet_binds_its_selector_and_reports_movement_not_drift() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "side".into(),
+            value: num(10.0),
+            description: None,
+        })
+        .unwrap();
+        let id = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "block".into(),
+                center: [num(0.0), num(0.0), num(0.0)],
+                size: [Scalar::Expression("side".into()), num(10.0), num(10.0)],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let vertical = match e
+            .execute(Command::Edges { doc: 1, entity: id, min_angle_deg: None })
+            .unwrap()
+        {
+            CommandResult::EdgesResolved { edges, .. } => edges
+                .into_iter()
+                .find(|edge| edge.direction.is_some_and(|d| d[2].abs() > 0.9))
+                .expect("a box has vertical edges"),
+            r => panic!("unexpected result {r:?}"),
+        };
+
+        let first = e
+            .execute(Command::Fillet {
+                doc: 1,
+                entity: id,
+                radius: num(1.0),
+                edges: Some(vertical.selector.clone()),
+                min_angle_deg: None,
+            })
+            .unwrap();
+        let reference = match first {
+            CommandResult::EntityModified { reference, .. } => {
+                reference.expect("fillet reports its reference")
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(reference.matched, 1);
+        assert!(!reference.ambiguous);
+        assert!(reference.drift.is_none());
+        assert!(reference.fingerprint.is_some());
+
+        // The binding is stored in the program, not just the live result.
+        let doc = e.doc_for_test(1);
+        let step = doc
+            .program
+            .iter()
+            .position(|c| matches!(c, Command::Fillet { .. }))
+            .unwrap();
+        match &doc.program[step] {
+            Command::Fillet { edges: Some(filter), .. } => {
+                assert!(filter.expect.is_some(), "the live command binds");
+            },
+            other => panic!("unexpected program step {other:?}"),
+        }
+
+        let ok = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { references, .. } => references,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let fillet = ok.iter().find(|r| r.method == "fillet").expect("fillet reference");
+        assert_eq!(fillet.status, "ok", "{fillet:?}");
+
+        // Resizing keeps the same logical edge; it moved, but did not drift.
+        e.execute(Command::SetParameter {
+            doc: 1,
+            name: "side".into(),
+            value: num(11.0),
+            description: None,
+        })
+        .unwrap();
+        let moved = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { references, .. } => references,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let fillet = moved.iter().find(|r| r.method == "fillet").expect("fillet reference");
+        assert_eq!(fillet.status, "moved", "{fillet:?}");
+        assert!(fillet.expected.is_some(), "the original expectation is kept");
+    }
+
+    #[test]
+    fn a_stale_selector_expectation_is_reported_as_drift() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0; 3], [10.0; 3]);
+        let edge = match e
+            .execute(Command::Edges { doc: 1, entity: id, min_angle_deg: None })
+            .unwrap()
+        {
+            CommandResult::EdgesResolved { edges, .. } => edges[0].selector.clone(),
+            r => panic!("unexpected result {r:?}"),
+        };
+        e.execute(Command::Fillet {
+            doc: 1,
+            entity: id,
+            radius: num(1.0),
+            edges: Some(edge),
+            min_angle_deg: None,
+        })
+        .unwrap();
+
+        // Simulate a document whose recorded binding no longer describes the
+        // geometry: change the expectation, then replay.
+        {
+            let d = e.doc_mut(1).unwrap();
+            let step = d.program.iter().position(|c| matches!(c, Command::Fillet { .. })).unwrap();
+            if let Command::Fillet { edges: Some(filter), .. } = &mut d.program[step] {
+                filter.expect.as_mut().unwrap().fingerprint = "0".repeat(16);
+            }
+            d.replay().unwrap();
+        }
+        let checks = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { references, .. } => references,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let fillet = checks.iter().find(|r| r.method == "fillet").expect("fillet reference");
+        assert_eq!(fillet.status, "drift", "{fillet:?}");
+        assert!(fillet.expected.as_deref() == Some("0000000000000000"), "{fillet:?}");
+        assert!(fillet.message.as_deref().unwrap_or_default().contains("now binds to"));
+    }
+
+    #[test]
+    fn diff_scene_names_a_selector_that_binds_differently() {
+        let mut e = engine();
+        let mut build = |doc: DocId, center: [f64; 3]| {
+            e.execute(Command::CreateDocument { name: format!("doc{doc}"), doc: Some(doc) }).unwrap();
+            let id = match e
+                .execute(Command::AddBox {
+                    doc,
+                    name: "block".into(),
+                    center: [num(center[0]), num(center[1]), num(center[2])],
+                    size: [num(10.0), num(10.0), num(10.0)],
+                    color: None,
+                })
+                .unwrap()
+            {
+                CommandResult::EntityCreated { entity, .. } => entity,
+                r => panic!("unexpected result {r:?}"),
+            };
+            let selector = EdgeFilter {
+                direction: Some([0.0, 0.0, 1.0]),
+                near: Some([5.0, 5.0, 0.0]),
+                near_radius: Some(2.5),
+                ..Default::default()
+            };
+            e.execute(Command::Fillet {
+                doc,
+                entity: id,
+                radius: num(1.0),
+                edges: Some(selector),
+                min_angle_deg: None,
+            })
+            .unwrap();
+        };
+        build(2, [0.0, 0.0, 0.0]);
+        build(3, [10.0, 10.0, 0.0]);
+
+        match e.execute(Command::DiffScene { doc: 2, against: Some(3), path: None }).unwrap() {
+            CommandResult::SceneDiff { changed, references, .. } => {
+                assert!(changed);
+                assert_eq!(references.len(), 1, "{references:?}");
+                let change = &references[0];
+                assert_eq!(change.method, "fillet");
+                assert_eq!(change.matched_from, 1);
+                assert_eq!(change.matched_to, 1);
+                assert_ne!(change.from_fingerprint, change.to_fingerprint);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn hole_mirror_and_face_sketch_report_references() {
+        let mut e = engine();
+        let id = add_box(&mut e, [0.0; 3], [10.0; 3]);
+
+        let hole = e
+            .execute(Command::Hole {
+                doc: 1,
+                entity: id,
+                center: [num(0.0), num(0.0), num(5.0)],
+                normal: [0.0, 0.0, 1.0],
+                diameter: num(4.0),
+                depth: None,
+                counterbore_diameter: None,
+                counterbore_depth: None,
+                countersink_angle_deg: None,
+                segments: None,
+            })
+            .unwrap();
+        match hole {
+            CommandResult::EntityReshaped { reference, .. } => {
+                let report = reference.expect("hole reports its entry face");
+                assert!(report.matched >= 1);
+                assert!(report.fingerprint.is_some());
+                assert!(report.chosen.is_some());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let mirrored = e
+            .execute(Command::Mirror {
+                doc: 1,
+                entities: vec![id],
+                plane: MirrorPlane::Custom {
+                    origin: [num(20.0), num(0.0), num(0.0)],
+                    normal: [1.0, 0.0, 0.0],
+                },
+                name: None,
+                color: None,
+            })
+            .unwrap();
+        match mirrored {
+            CommandResult::EntitiesCreated { reference, .. } => {
+                let report = reference.expect("mirror reports its plane");
+                assert_eq!(report.matched, 1);
+                assert!(report.descriptors[0].contains("mirror plane"));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        let sketch = e
+            .execute(Command::AddSketch {
+                doc: 1,
+                name: "top".into(),
+                plane: Some(SketchPlane::Face {
+                    entity: id,
+                    near: None,
+                    normal: Some([0.0, 0.0, 1.0]),
+                    angle_tol_deg: None,
+                    expect: None,
+                }),
+            })
+            .unwrap();
+        match sketch {
+            CommandResult::EntityCreated { reference, .. } => {
+                let report = reference.expect("face sketch reports its plane");
+                assert!(report.chosen.is_some());
+                assert!(report.fingerprint.is_some());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let checks = match e.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { references, .. } => references,
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(checks.iter().any(|c| c.method == "add_sketch" && c.status == "ok"), "{checks:?}");
+        assert!(checks.iter().any(|c| c.method == "hole"), "{checks:?}");
+    }
+
+    #[test]
+    fn reference_bindings_survive_save_and_open() {
+        let (p1, p1s) = temp_file("wright_refs_a.wcad");
+        let (p2, p2s) = temp_file("wright_refs_b.wcad");
+
+        let mut a = engine();
+        let id = add_box(&mut a, [0.0; 3], [10.0; 3]);
+        let edge = match a
+            .execute(Command::Edges { doc: 1, entity: id, min_angle_deg: None })
+            .unwrap()
+        {
+            CommandResult::EdgesResolved { edges, .. } => edges[0].selector.clone(),
+            r => panic!("unexpected result {r:?}"),
+        };
+        a.execute(Command::Fillet {
+            doc: 1,
+            entity: id,
+            radius: num(1.0),
+            edges: Some(edge),
+            min_angle_deg: None,
+        })
+        .unwrap();
+        a.execute(Command::SaveDocument { doc: 1, path: p1s.clone(), source: None }).unwrap();
+
+        let mut b = Engine::new();
+        b.execute(Command::OpenDocument { path: p1s.clone(), name: None }).unwrap();
+        match b.execute(Command::Validate { doc: 1, entities: None, min_wall_mm: None }).unwrap() {
+            CommandResult::Validated { references, .. } => {
+                let fillet = references.iter().find(|r| r.method == "fillet").expect("reference");
+                assert_eq!(fillet.status, "ok", "{fillet:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        b.execute(Command::SaveDocument { doc: 1, path: p2s.clone(), source: None }).unwrap();
+        assert_eq!(
+            std::fs::read(&p1).unwrap(),
+            std::fs::read(&p2).unwrap(),
+            "a bound reference must save -> open -> save byte-identically"
+        );
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
 }

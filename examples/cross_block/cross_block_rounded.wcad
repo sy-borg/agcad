@@ -1,6 +1,6 @@
 {
   "format": "wright-document",
-  "version": 3,
+  "version": 4,
   "protocol": 1,
   "name": "cross_block",
   "parameters": {
@@ -224,7 +224,13 @@
             1.0
           ]
         ],
-        "convex": null
+        "convex": null,
+        "expect": {
+          "fingerprint": "c9c410844cb84a73",
+          "geometry": "dadda07b4ee6c27d",
+          "matched": 12,
+          "descriptor": "12 matched: line edge #9: 15.00 mm, 1 segment(s), direction +X, convex, between faces #2 and #6, midpoint (-15.00, -7.50, 50.00); …"
+        }
       },
       "min_angle_deg": null
     },
@@ -245,7 +251,13 @@
             -1.0
           ]
         ],
-        "convex": null
+        "convex": null,
+        "expect": {
+          "fingerprint": "d83734ab0414b1e6",
+          "geometry": "8250d7a2c654ff69",
+          "matched": 12,
+          "descriptor": "12 matched: line edge #1: 15.00 mm, 1 segment(s), direction +X, convex, between faces #1 and #142, midpoint (-15.00, -7.50, 0.00); …"
+        }
       },
       "min_angle_deg": null
     }

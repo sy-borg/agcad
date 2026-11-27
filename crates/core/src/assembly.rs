@@ -601,11 +601,33 @@ pub fn mate(
     inst_b.rotation_deg = r_new;
     d.instances_mut().insert(inst_b.id, inst_b.clone());
     place_instance(d, inst_b.id)?;
+    let mut values = Vec::new();
+    for v in [pa, pb] {
+        values.extend_from_slice(&v);
+    }
+    for axis in [aa, ab] {
+        values.extend_from_slice(&axis.unwrap_or([0.0; 3]));
+    }
+    values.push(offset);
+    let domain = format!(
+        "wright/mate/1|{}.{}|{}.{}",
+        inst_a.name, a.connector, inst_b.name, b.connector
+    );
+    let reference = crate::refs::fixed_report(
+        &domain,
+        &values,
+        format!(
+            "mate {} between {}.{} and {}.{}",
+            kind, inst_a.name, a.connector, inst_b.name, b.connector
+        ),
+    );
+    d.record_reference(&reference);
     Ok(CommandResult::MateSolved {
         doc,
         kind,
         a_instance: a.instance,
         b_instance: b.instance,
+        reference: Some(reference),
     })
 }
 

@@ -379,7 +379,7 @@ footer{padding:0 0 48px}
 {"jsonrpc":"2.0","id":1,
  "result":{"entity_created":
   {"doc":1,"entity":1,"mesh":{...}}}}</pre>
-        <p>Commands cover documents, primitives, booleans, sketches with arcs, splines and construction geometry, constraints (including tangent, equal, symmetric and angle), trim, extend, offset, extrude, revolve, patterns and mirror, shell, holes, sweep, loft, threads, fillet, chamfer, picking, validation, scene diff, export, undo and redo, and rendering.</p>
+        <p>Commands cover documents, primitives, booleans, sketches with arcs, splines and construction geometry, constraints (including tangent, equal, symmetric and angle), trim, extend, offset, extrude, revolve, patterns and mirror, shell, holes, sweep, loft, threads, fillet, chamfer, picking, face/edge enumeration, validation, scene diff, export, undo and redo, and rendering.</p>
       </div>
       <div>
         <h3>From Python</h3>
@@ -405,7 +405,7 @@ footer{padding:0 0 48px}
 
     <div class="rules">
       <div><h3>Sketch completeness</h3><p>Arcs and interpolating splines, tangent/equal/concentric/symmetric/angle/point-on-line constraints, construction geometry, and <code>trim_sketch</code>/<code>extend_sketch</code>/<code>offset_sketch</code>. Every solve names an unsatisfied or redundant constraint by id.</p></div>
-      <div><h3>Trust loop</h3><p><code>validate</code> checks watertightness, non-manifold edges, self-intersections, volume and thinnest wall; <code>diff_scene</code> compares two revisions by entity signature and names what changed. Both are read-only queries.</p></div>
+      <div><h3>Trust loop</h3><p><code>validate</code> checks watertightness, non-manifold edges, self-intersections, volume and thinnest wall; <code>diff_scene</code> compares two revisions by entity signature and names what changed. <code>faces</code>/<code>edges</code> enumerate the groups a selector can address, and <code>validate</code> reports whether each stored reference is still the same feature (<code>moved</code>) or has drifted. All are read-only queries.</p></div>
       <div><h3>Shape leverage</h3><p>Patterns, <code>mirror</code>, <code>shell</code>, <code>hole</code>, <code>sweep</code>, <code>loft</code> and <code>thread</code> cover the repetitive printable moves without manual copies.</p></div>
       <div><h3>Interoperability</h3><p><code>import_mesh</code> reads STL/OBJ/3MF, welds and repairs the mesh, and bakes it into an <code>add_mesh</code> step so the <code>.wcad</code> reopens without the source file.</p></div>
       <div><h3>2D and STEP output</h3><p><code>export_dxf</code>/<code>export_svg</code> write sketch-local drawings and cutter profiles; <code>export_step</code> writes an honest AP214 faceted B-rep, with open pieces as surface models. STEP import stays out of scope.</p></div>
@@ -473,14 +473,14 @@ python3 -m venv .venv
 # R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a validate-and-diff trust loop, a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, and an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, and an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet.</p>
   </div>
 </section>
 
 <section id="roadmap" class="alt">
   <div class="wrap">
     <h2>Roadmap</h2>
-    <p class="intro">The script is the source of truth. The next milestones make references survive a knob turn, make the program editable without a feature tree, turn imported geometry into editable sketches, and turn watertight meshes into printable parts. A GUI feature tree is deliberately not on the list.</p>
+    <p class="intro">The script is the source of truth. The next milestones make the program editable without a feature tree, turn imported geometry into editable sketches, and turn watertight meshes into printable parts. A GUI feature tree is deliberately not on the list.</p>
 
     <div class="road">
       <div class="done">
@@ -509,12 +509,12 @@ python3 -m venv .venv
           <li><b>M18c STEP path</b> <span>faceted B-rep, honest open surfaces</span></li>
           <li><b>M19 Assemblies</b> <span>embedded parts, instances, mates, interference, BOM</span></li>
           <li><b>M19b Drawings</b> <span>multi-view SVG/DXF, hidden lines, dimensions, balloons</span></li>
+          <li><b>M20 Stable references</b> <span>enumerated faces and edges, ambiguity and drift reports</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M20 Stable references</b> <span>enumerated selectors, ambiguity and drift reports</span></li>
           <li><b>M21 Program editing</b> <span>patch, suppress, parametric counts, atomic batches</span></li>
           <li><b>M22 Import to parametric</b> <span>DXF/SVG sketches, sections, mesh repair</span></li>
           <li><b>M23 Printability preflight</b> <span>overhangs, orientation, bed layout, fit compensation</span></li>
@@ -540,7 +540,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">Wright CAD</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/wright-cad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/wright-cad">sy-borg/wright-cad</a></div>
-      <div><small>Status</small>Milestone 19 · assemblies and drawings complete</div>
+      <div><small>Status</small>Milestone 20 · stable references complete</div>
     </div>
   </div>
 </footer>

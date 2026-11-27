@@ -356,8 +356,9 @@ pub fn reshape_key(
     h.f64(size);
     h.f64(min_angle_deg);
 
-    // EdgeFilter is a geometric selection; every field changes which edges
-    // are cut, so every field belongs in the key.
+    // EdgeFilter is a geometric selection: every *geometric* field changes
+    // which edges are cut, so it belongs in the key. `expect` is reporting
+    // metadata only and deliberately does not invalidate cached geometry.
     match filter.direction {
         Some(v) => {
             h.str("dir");

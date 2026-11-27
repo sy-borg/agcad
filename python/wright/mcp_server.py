@@ -257,13 +257,24 @@ pick{doc,ray:{origin:[x,y,z],direction:[x,y,z]},tolerance?} (world-space ray
   edge -> fillet/chamfer{edges:<edge>} (exactly {direction,near,near_radius},
   present only when the hit is within tolerance mm of a sharp edge). This is
   how a human click in the viewer reaches the agent; sketches are skipped),
+faces{doc,entity} (list the planar faces of one solid: id, descriptor,
+  normal/area/center, adjacent edge ids, a stable fingerprint, an exact
+  geometry hash and a selector ready for add_sketch{plane:...}; session query),
+edges{doc,entity,min_angle_deg?} (list logical sharp edges: collinear/tangent
+  runs are one edge, so a tessellated rim is one curve with `segments`, not 32
+  candidates. Each carries endpoints/direction or midpoint, adjacent face ids,
+  fingerprint/geometry and a selector ready for fillet/chamfer{edges:...};
+  session query),
 validate{doc,entities?,min_wall_mm?} (trust check, changes no state). For every
   solid: watertight/open/non-manifold edges, degenerate triangles,
   self-intersections, signed world volume, world bbox and an approximate
   thinnest wall (inward rays; sub-0.05 mm contact is treated as numerical
   noise); for every sketch: solver status, over-constrained/diagnostics and
   whether the profile is closed.
-  Returns ok + per-entity reports + totals + warnings. entities restricts the
+  Returns ok + per-entity reports + totals + warnings + references. Each stored
+  selector (fillet, chamfer, face sketch plane, hole, mirror, mate) is
+  re-checked: ok, moved (same feature, new coordinates), ambiguous, missing,
+  drift (now binds a different feature) or unbound. entities restricts the
   check; min_wall_mm sets the thin-wall pass/fail threshold (omit to report
   the estimate without failing),
 diff_scene{doc,against?:doc_id,path?:".wcad"} (compare two revisions by
@@ -271,7 +282,8 @@ diff_scene{doc,against?:doc_id,path?:".wcad"} (compare two revisions by
   saved file, which is replayed read-only and not added to the document list.
   Returns changed + added/removed/modified with the changed fields and
   volume/triangle deltas, unchanged count, parameter changes, program change,
-  and stable scene signatures. Use it to prove a rebuild did what you meant),
+  references whose binding changed, and stable scene signatures. Use it to
+  prove a rebuild did what you meant),
 export_stl{doc,path,entities?} (binary STL, world space, absolute path — a
   slicer-ready file; not part of the program, changes no state; sketches are
   display-only and skipped),

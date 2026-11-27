@@ -626,7 +626,11 @@ class Wright:
         ``min_angle_deg`` (default 30) is how sharp a face pair must be to
         count as an edge; tessellation seams of curved surfaces stay below it.
         Returns the new local mesh, the number of edges touched and the
-        world-space volume.
+        world-space volume. The result also carries ``reference``: how many
+        *logical* edges the filter matched (a 32-segment rim is one), whether
+        that was ambiguous, and a fingerprint. On first use the engine stores
+        that binding in the program; later replays report drift instead of
+        silently re-filleting a different edge.
         """
         return self._request(
             "fillet", doc=doc, entity=entity, radius=radius, edges=edges,
@@ -1282,6 +1286,38 @@ class Wright:
         """Scene snapshot: entities with transforms, colors and meshes."""
         return self._request("get_scene", doc=doc)
 
+    # -- stable references ---------------------------------------------------
+
+    def faces(self, doc: int, entity: int) -> list[dict[str, Any]]:
+        """List the planar faces of one solid.
+
+        Each face carries a deterministic 1-based ``id``, a readable
+        ``descriptor`` (normal, area, center), a ``fingerprint`` that stays
+        stable while it remains the same feature, an exact ``geometry`` hash,
+        its adjacent ``edges`` ids, and a ``selector`` ready to pass as
+        ``add_sketch(plane=...)``. A session command: it changes no state.
+        """
+        return self._request("faces", doc=doc, entity=entity)["faces"]
+
+    def edges(
+        self,
+        doc: int,
+        entity: int,
+        min_angle_deg: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """List the logical sharp edges of one solid.
+
+        A collinear or tangent run is one edge, so a tessellated cylinder rim
+        is a single ``curve`` with ``segments`` facets instead of dozens of
+        candidates. Each edge carries endpoints/direction or curve midpoint,
+        adjacent face ids, a stable ``fingerprint`` and a ``selector`` ready
+        to pass to ``fillet``/``chamfer``. ``min_angle_deg`` is the sharp-edge
+        threshold (default 30). A session command: it changes no state.
+        """
+        return self._request(
+            "edges", doc=doc, entity=entity, min_angle_deg=min_angle_deg
+        )["edges"]
+
     # -- trust ---------------------------------------------------------------
 
     def validate(
@@ -1305,6 +1341,12 @@ class Wright:
         A session command: it changes no state and is not part of the
         program. The wall estimate casts one inward ray per sampled triangle,
         so it is a fast sanity check rather than a medial-axis measurement.
+
+        ``references`` re-resolves every stored selector in the program
+        (fillet, chamfer, face sketch planes, holes, mirrors, mates) and
+        labels it ``ok``, ``moved``, ``ambiguous``, ``missing``, ``drift`` or
+        ``unbound``. Drift means the selector now binds to a different
+        logical feature — the failure a parametric rebuild must not hide.
         """
         return self._request(
             "validate", doc=doc, entities=entities, min_wall_mm=min_wall_mm
@@ -1323,7 +1365,8 @@ class Wright:
         entities as added, removed, modified (with the changed fields and
         volume/triangle deltas) or unchanged, and reports parameter and
         program changes. ``scene_signature``/``against_signature`` are stable
-        content fingerprints.
+        content fingerprints. ``references`` names selectors whose logical
+        binding changed, even when the volume barely moved.
 
         Reading a file baseline is read-only: it is replayed privately and
         never inserted into the document list. A session command — it

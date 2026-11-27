@@ -639,11 +639,39 @@ pub enum Command {
     /// language-agnostic.
     GetProgram { doc: DocId },
 
+    /// Enumerate the planar faces of one solid with readable descriptors,
+    /// stable ids, fingerprints and ready-made `add_sketch` selectors. A
+    /// session command: it changes no state and is not part of the program.
+    ///
+    /// Faces are listed in deterministic mesh order. `fingerprint` identifies
+    /// the face across rebuilds (normal + rank among parallel faces);
+    /// `geometry` is the exact vertex hash and changes when a parameter
+    /// resizes the face. Use the selector to address a face without guessing
+    /// a `near` point.
+    Faces { doc: DocId, entity: EntityId },
+
+    /// Enumerate the logical sharp edges of one solid: collinear or tangent
+    /// runs are grouped, so a tessellated cylinder rim is one edge with 32
+    /// segments rather than 32 separate candidates. Each group carries its
+    /// endpoints/direction (or curve midpoint), adjacent face ids, a
+    /// fingerprint and a ready-to-use `fillet`/`chamfer` selector. A session
+    /// command: it changes no state and is not part of the program.
+    Edges {
+        doc: DocId,
+        entity: EntityId,
+        /// Sharp-edge threshold in degrees (default 30), the same value
+        /// `fillet`/`chamfer` use.
+        #[serde(default)]
+        min_angle_deg: Option<f64>,
+    },
+
     /// Check the document's printable solids and sketches. For every solid
     /// this reports watertightness (open/non-manifold edges), degenerate
     /// triangles, self-intersections, signed world volume, world bbox and an
     /// approximate thinnest wall; for every sketch it reports solver status
-    /// and whether the profile is closed. A session command: it changes no
+    /// and whether the profile is closed. Stored selectors are also checked
+    /// against their authored binding (M20): `ok`, `moved`, `ambiguous`,
+    /// `missing`, `drift` or `unbound`. A session command: it changes no
     /// state and is not part of the program.
     ///
     /// `ok` is the short answer: every solid is closed, manifold,
@@ -665,7 +693,8 @@ pub enum Command {
     /// which is replayed privately and discarded — exactly one must be given.
     /// The diff classifies entities as added, removed, modified (with the
     /// changed fields and volume/triangle deltas) or unchanged, and includes
-    /// parameter and program changes. A session command: it changes no state.
+    /// parameter and program changes plus selectors whose logical binding
+    /// changed. A session command: it changes no state.
     DiffScene {
         doc: DocId,
         /// Compare against this open document.
@@ -1091,7 +1120,7 @@ fn default_up() -> [f64; 3] {
 /// every sharp edge is selected. Selection is geometric on purpose: entity
 /// ids and edge indices are stable across replay, but a parameter change
 /// moves edges, and "the edges parallel to Z" keeps meaning the same thing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EdgeFilter {
     /// Keep edges parallel to this direction (either orientation).
@@ -1111,6 +1140,13 @@ pub struct EdgeFilter {
     pub normals: Option<Vec<[f64; 3]>>,
     /// Keep only convex (`true`) or concave (`false`) edges.
     pub convex: Option<bool>,
+    /// What this filter bound to when it was authored. The engine fills this
+    /// in on the first live run and compares against it on later replays, so
+    /// a selector that starts choosing different geometry is reported as
+    /// drift instead of silently re-filleting another edge. Omit it to bind
+    /// on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<RefExpect>,
 }
 
 /// A world-space ray. `direction` is normalized by the engine, so the
@@ -1168,6 +1204,209 @@ pub struct EdgeSelector {
     /// changes without swallowing the parallel edge on the other side of a
     /// thin wall.
     pub near_radius: f64,
+}
+
+/// What a selector bound to when it resolved successfully (M20).
+///
+/// The engine writes this into the program step on the first live run. It is
+/// reporting metadata: it never changes which geometry a selector matches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefExpect {
+    /// Identity fingerprint of the resolved group (or set of groups). Stable
+    /// while the selector keeps binding to the same feature, even when a
+    /// parameter moves or resizes it.
+    pub fingerprint: String,
+    /// Exact-geometry fingerprint of the same binding. It changes whenever
+    /// the feature moves, so a reference can be reported as "same feature,
+    /// different geometry" instead of drift.
+    pub geometry: String,
+    /// Number of logical groups that matched.
+    pub matched: usize,
+    /// Readable description of the binding, captured at authoring time.
+    pub descriptor: String,
+}
+
+/// Why a bound selector no longer matches its stored [`RefExpect`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceDrift {
+    /// Fingerprint recorded when the selector was authored.
+    pub expected: String,
+    /// Fingerprint of the geometry it resolves to now.
+    pub actual: String,
+    pub expected_descriptor: String,
+    pub actual_descriptor: String,
+}
+
+/// How one selector resolved against live geometry (M20).
+///
+/// Every modeling command that takes a geometric selector returns one of
+/// these, and `validate`/`diff_scene` classify the stored binding to report
+/// movement and drift after a rebuild.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceReport {
+    /// Number of logical groups (faces or edges) the selector matched.
+    pub matched: usize,
+    /// 1-based group ids in the corresponding `faces`/`edges` listing,
+    /// ascending. For a face selector, `chosen` is the one that was used.
+    pub groups: Vec<u32>,
+    /// More than one logical group matched. Intentional broad selectors
+    /// (for example "every vertical edge" or no edge filter at all) are
+    /// common; the report makes the breadth visible rather than failing.
+    pub ambiguous: bool,
+    /// The group actually used, when the operation consumes exactly one
+    /// (face planes). `None` for selectors that act on every match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<u32>,
+    /// Underlying sharp segments (edges) or triangles (faces) touched.
+    pub elements: usize,
+    /// Identity fingerprint of the binding (the chosen face or the matched
+    /// set of edges). `None` when nothing matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Exact-geometry fingerprint of the same binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<String>,
+    /// Readable descriptions of the matched groups (capped for large sets).
+    #[serde(default)]
+    pub descriptors: Vec<String>,
+    /// Set when the selector carried a prior [`RefExpect`] and now binds to a
+    /// different logical feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift: Option<ReferenceDrift>,
+    /// The same feature, with different exact geometry (a knob resized or
+    /// moved it). This is expected for parametric edits and is not drift.
+    #[serde(default)]
+    pub moved: bool,
+}
+
+impl ReferenceReport {
+    /// A report for something that is not a geometric selector (a connector
+    /// or a datum-derived plane): one logical match, no ambiguity.
+    pub fn fixed(fingerprint: impl Into<String>, descriptor: impl Into<String>) -> Self {
+        let descriptor = descriptor.into();
+        Self {
+            matched: 1,
+            groups: Vec::new(),
+            ambiguous: false,
+            chosen: None,
+            elements: 1,
+            fingerprint: Some(fingerprint.into()),
+            geometry: None,
+            descriptors: vec![descriptor],
+            drift: None,
+            moved: false,
+        }
+    }
+}
+
+/// One enumerated planar face of a solid (see [`Command::Faces`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceGroupInfo {
+    /// 1-based, deterministic within one `faces` call.
+    pub id: u32,
+    /// `planar` today; reserved for curved surfaces.
+    pub kind: String,
+    /// Area-weighted outward normal in world space.
+    pub normal: Vec3,
+    /// Area-weighted centroid (a point on the face plane).
+    pub center: Vec3,
+    /// World-space area in mm².
+    pub area: f64,
+    pub bbox: Bbox,
+    pub tris: usize,
+    /// Adjacent logical edge ids, ascending.
+    pub edges: Vec<u32>,
+    /// Human-readable description (`planar face #2: normal +Z, area ...`).
+    pub descriptor: String,
+    /// Identity fingerprint (stable while this face stays the same feature).
+    pub fingerprint: String,
+    /// Exact-geometry fingerprint.
+    pub geometry: String,
+    /// Ready to pass as `add_sketch{plane: ...}`.
+    pub selector: FaceSelector,
+}
+
+/// One enumerated logical edge of a solid (see [`Command::Edges`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EdgeGroupInfo {
+    /// 1-based, deterministic within one `edges` call.
+    pub id: u32,
+    /// `line` (straight run) or `curve` (a tessellated rim or freeform run).
+    pub kind: String,
+    /// Endpoints for a `line`; omitted for a closed or curved run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<Vec3>,
+    /// Length-weighted midpoint (on a circular rim this is the circle
+    /// center, not a rim point).
+    pub midpoint: Vec3,
+    /// Unit direction for a `line`; omitted for a curved run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Vec3>,
+    /// Total length in mm.
+    pub length: f64,
+    /// Convex (`true`) or concave (`false`); omitted when a tessellated run
+    /// mixes both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convex: Option<bool>,
+    /// Interior dihedral angle in degrees, when the run is uniform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dihedral_deg: Option<f64>,
+    /// Sharp segments that make up this logical edge.
+    pub segments: usize,
+    /// Adjacent planar face ids, ascending.
+    pub faces: Vec<u32>,
+    pub descriptor: String,
+    pub fingerprint: String,
+    pub geometry: String,
+    /// Ready to pass to `fillet`/`chamfer` as `edges`.
+    pub selector: EdgeFilter,
+}
+
+/// One stored selector checked by [`Command::Validate`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceCheck {
+    /// 0-based program step that carries the selector.
+    pub step: usize,
+    /// `fillet`, `chamfer`, `add_sketch`, `hole`, `mirror` or `mate`.
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<EntityId>,
+    /// `ok`, `moved`, `ambiguous`, `missing`, `drift` or `unbound`.
+    pub status: String,
+    pub matched: usize,
+    pub ambiguous: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_descriptor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_descriptor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// One selector whose binding changed between two revisions (see
+/// [`Command::DiffScene`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceChange {
+    pub step: usize,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<EntityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_descriptor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_descriptor: Option<String>,
+    pub matched_from: usize,
+    pub matched_to: usize,
 }
 
 /// Validation of one printable solid (see [`Command::Validate`]).
@@ -1623,7 +1862,14 @@ pub enum CommandResult {
     Documents { docs: Vec<DocInfo> },
     DocumentCreated { doc: DocId },
     Closed { doc: DocId },
-    EntityCreated { doc: DocId, entity: EntityId, mesh: Mesh },
+    EntityCreated {
+        doc: DocId,
+        entity: EntityId,
+        mesh: Mesh,
+        /// How the sketch's face-plane selector resolved, when it had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<ReferenceReport>,
+    },
     /// A part was registered for `add_instance` (see [`Command::ImportPart`]).
     /// `solids` is the number of printable solids an instance will create and
     /// `bytes` the embedded snapshot size.
@@ -1648,7 +1894,15 @@ pub enum CommandResult {
     ConnectorAdded { doc: DocId, instance: u64, name: String },
     InstanceMoved { doc: DocId, instance: u64 },
     /// A mate was solved by moving instance `b` (see [`Command::Mate`]).
-    MateSolved { doc: DocId, kind: MateKind, a_instance: u64, b_instance: u64 },
+    MateSolved {
+        doc: DocId,
+        kind: MateKind,
+        a_instance: u64,
+        b_instance: u64,
+        /// The connectors the mate resolved to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<ReferenceReport>,
+    },
     /// Bill of materials (see [`Command::BillOfMaterials`]).
     Bom { doc: DocId, rows: Vec<BomRow> },
     /// Interference report (see [`Command::CheckInterference`]). `ok` is true
@@ -1694,10 +1948,21 @@ pub enum CommandResult {
         edges: u32,
         volume: f64,
         mesh: Mesh,
+        /// How the edge selector resolved: matched logical edges, ambiguity
+        /// and the identity fingerprint (M20).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<ReferenceReport>,
     },
     /// Several entities created at once (linear/circular patterns and
     /// mirrors). `entities` lists the copies in creation order.
-    EntitiesCreated { doc: DocId, entities: Vec<EntityId>, tris: usize },
+    EntitiesCreated {
+        doc: DocId,
+        entities: Vec<EntityId>,
+        tris: usize,
+        /// The mirror plane or pattern definition the copies came from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<ReferenceReport>,
+    },
     /// A solid was reshaped in place without an edge count (shell, hole).
     /// `volume` is the new world-space volume and `mesh` the new local mesh.
     EntityReshaped {
@@ -1706,6 +1971,9 @@ pub enum CommandResult {
         volume: f64,
         tris: usize,
         mesh: Mesh,
+        /// How the entry face or opened faces resolved (hole/shell).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<ReferenceReport>,
     },
     /// A solid was built from profiles or a path (sweep, loft, thread).
     /// `kind` is `sweep`, `loft` or `thread`.
@@ -1733,6 +2001,10 @@ pub enum CommandResult {
         /// memoized).
         #[serde(default)]
         steps: usize,
+        /// Stored selectors whose logical binding changed during this replay
+        /// (M20). Inspect `validate` for the details and descriptors.
+        #[serde(default)]
+        references_drifted: usize,
     },
     ParameterRemoved { doc: DocId, name: String },
     Parameters { doc: DocId, params: Vec<ParamInfo> },
@@ -1742,6 +2014,16 @@ pub enum CommandResult {
     /// A ray query (see [`Command::Pick`]). `hit` is `None` when the ray
     /// missed every solid; that is a valid answer, not an error.
     Picked { doc: DocId, hit: Option<PickHit> },
+    /// Enumerated planar faces (see [`Command::Faces`]).
+    FacesResolved { doc: DocId, entity: EntityId, name: String, faces: Vec<FaceGroupInfo> },
+    /// Enumerated logical edges (see [`Command::Edges`]).
+    EdgesResolved {
+        doc: DocId,
+        entity: EntityId,
+        name: String,
+        min_angle_deg: f64,
+        edges: Vec<EdgeGroupInfo>,
+    },
     /// Trust report for the document's solids and sketches (see
     /// [`Command::Validate`]). `ok` is false when any solid is not printable
     /// or any sketch is unsolved/open; the per-entity reports say why.
@@ -1753,6 +2035,9 @@ pub enum CommandResult {
         totals: ValidationTotals,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         warnings: Vec<String>,
+        /// Stored selectors re-resolved against the current geometry.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<ReferenceCheck>,
     },
     /// Revision comparison by entity signature (see [`Command::DiffScene`]).
     SceneDiff {
@@ -1777,6 +2062,10 @@ pub enum CommandResult {
         program_changed: bool,
         commands_from: usize,
         commands_to: usize,
+        /// Selectors whose binding changed between the revisions, even when
+        /// the volume barely moved.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<ReferenceChange>,
     },
     StlExported { doc: DocId, path: String, tris: usize, bytes: usize },
     /// A 3MF package was written. `objects` is how many build items it
@@ -2123,6 +2412,11 @@ pub enum SketchPlane {
         /// Angular tolerance for `normal`, in degrees (default 1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         angle_tol_deg: Option<f64>,
+        /// What this face reference bound to when it was authored. Filled in
+        /// by the engine on the first live run and compared on later
+        /// replays. Omit it to bind on first use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<RefExpect>,
     },
 }
 

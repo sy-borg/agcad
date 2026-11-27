@@ -283,6 +283,7 @@ mod tests {
                     near: Some([num(hit.face.near[0]), num(hit.face.near[1]), num(hit.face.near[2])]),
                     normal: Some(hit.face.normal),
                     angle_tol_deg: None,
+                    expect: None,
                 }),
             })
             .unwrap()

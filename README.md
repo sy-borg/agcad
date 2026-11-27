@@ -116,10 +116,10 @@ Commands, grouped by intent:
   `trim_sketch`, `extend_sketch`, `offset_sketch`, `extrude`, `revolve`
 - **Interoperability**: `import_mesh` (STL/OBJ/3MF → solid), `add_mesh` (raw
   triangles; the baked program step import records)
-- **Queries and I/O**: `get_scene`, `get_program`, `pick`, `validate`,
-  `diff_scene`, `export_stl`, `export_3mf`, `export_step`, `export_dxf`,
-  `export_svg`, `export_drawing`, `render_offscreen`, `save_document`,
-  `open_document`
+- **Queries and I/O**: `get_scene`, `get_program`, `pick`, `faces`, `edges`,
+  `validate`, `diff_scene`, `export_stl`, `export_3mf`, `export_step`,
+  `export_dxf`, `export_svg`, `export_drawing`, `render_offscreen`,
+  `save_document`, `open_document`
 - **History**: `undo`, `redo`
 
 `get_program` returns the program, the parameters and any embedded authoring
@@ -133,6 +133,28 @@ normal = all its edges, two = the edge between them) and `convex` — so "the
 vertical corners" or "the top rim" keeps its meaning when a parameter moves
 the geometry. Omit it to treat every sharp edge; `min_angle_deg` (default 30)
 separates real edges from tessellation seams.
+
+`faces{entity}` and `edges{entity}` make that resolution inspectable. Faces are
+maximal planar patches with a deterministic 1-based id, a readable descriptor
+(normal, area, center), adjacent edge ids, a stable `fingerprint` (the same
+feature across a resize) and an exact `geometry` hash (changes when it moves).
+Edges are **logical runs**: collinear or tangent segments that share an endpoint
+are one edge, so a 32-segment cylinder rim is a single `curve` with
+`segments:32`, while a box corner still splits into three lines. Each listing
+includes a ready-made selector, so an agent addresses "face #4" or "the edge
+between faces #1 and #4" instead of guessing a `near` point.
+
+Every modeling command that takes a selector (`fillet`, `chamfer`,
+`add_sketch` face planes, `hole`, `mirror`, mates) reports `matched`,
+`ambiguous` and a `fingerprint`. On first use the engine stores the binding in
+the program step; a later replay compares against it. `validate` re-checks the
+stored references (`ok`, `moved`, `ambiguous`, `missing`, `drift`, `unbound`)
+and `diff_scene` names any selector whose binding changed — so a parametric
+rebuild fails loudly instead of silently filleting another edge. A `moved`
+reference is the same feature with new coordinates (a knob resized it); `drift`
+means it now selects a different logical feature. `set_parameter` also returns
+`references_drifted` after a replay, so a knob turn can fail loudly before the
+next `validate`.
 
 `pick{doc,ray:{origin,direction},tolerance?}` casts a world-space ray and answers
 `{hit:{entity,name,distance,point,normal,face,edge?}}` or `hit:null` (a valid
@@ -450,6 +472,13 @@ no state and are not part of the program. The loop is **build → validate →
 render → change a knob → diff**, and a no-op rebuild shows `changed:false` with
 identical signatures.
 
+M20 adds the third trust question: did the build address the geometry the
+script meant? `validate` returns `references` for every stored selector and
+`diff_scene` returns the selectors whose logical binding changed between
+revisions. `faces`/`edges` hand out the ids, descriptors and fingerprints those
+reports use; `stable_references.py` walks the loop from a listed edge to a
+fillet, a resize (`moved`), and a broad filter (`ambiguous`).
+
 ## Live preview: MCP agent + viewer, one shared scene
 
 The TCP server runs **one shared document space** for all connections and
@@ -598,12 +627,11 @@ coverage, interoperability, assemblies and drawings — and give the human a
 concrete way to point at geometry, rather than building a GUI feature tree.
 Validation and scene diffs (M14) make a rebuild provable; incremental rebuilds
 (M15) make it fast; interoperability (M18) connects the script to existing
-meshes, drawings and CAD kernels. The next four milestones make geometric
-references survive a knob turn (M20), make the program editable without a
-feature tree (M21), turn imported geometry into an editable sketch (M22), and
-turn "watertight" into "printable" (M23). Feature-history editing is
-deliberately not a goal: replay is deterministic and `set_parameter` covers
-knob turns, while the script remains the editing surface.
+meshes, drawings and CAD kernels. The next three milestones make the program
+editable without a feature tree (M21), turn imported geometry into an editable
+sketch (M22), and turn "watertight" into "printable" (M23). Feature-history
+editing is deliberately not a goal: replay is deterministic and
+`set_parameter` covers knob turns, while the script remains the editing surface.
 
 ### Shipped
 
@@ -654,25 +682,19 @@ knob turns, while the script remains the editing surface.
       with parameter overrides; connectors and sequential mates; BOM;
       AABB-pruned interference; deterministic SVG/DXF drawing sheets with
       hidden lines, dimensions, balloons, a BOM and a title block.
+- [x] **M20 — Stable references**: `faces`/`edges` enumerate logical faces and
+      edge runs with descriptors, ids and fingerprints; every selector reports
+      `matched`, `ambiguous` and a binding fingerprint; selectors remember what
+      they bound to and `validate`/`diff_scene` report `moved`, `missing` and
+      drift after a rebuild.
 
 ### Next
 
-The next four milestones attack the parts of the parametric promise that are
-still implicit: which edge a selector actually resolved to, how a feature is
-changed without re-authoring the script, whether imported geometry can become
-a rule again, and whether a validated mesh will print.
+The next three milestones attack the parts of the parametric promise that are
+still implicit: how a feature is changed without re-authoring the script,
+whether imported geometry can become a rule again, and whether a validated mesh
+will print.
 
-- [ ] **M20 — Stable references**: selector resolution becomes a first-class,
-      inspectable operation. `faces{entity}` / `edges{entity}` enumerate the
-      resolved groups of a solid with readable descriptors, candidate counts and
-      deterministic ordering; every selector used by `fillet`, `chamfer`,
-      `add_sketch` face planes, `hole`, `mirror` and mates reports `matched`,
-      `ambiguous` and a fingerprint. Selectors gain ancestry ("the cap created
-      by step 4", "the edge between faces A and B") to disambiguate geometry
-      that no longer looks unique. `validate` reports reference drift after a
-      rebuild, and `diff_scene` names a selector that now binds to different
-      geometry even when the volume barely moved. The goal is a parametric CAD
-      that fails loudly instead of silently re-filleting the wrong edge.
 - [ ] **M21 — Program editing**: `patch_program{ops}` inserts, removes,
       replaces and reorders program steps, with a dry run that reports
       surviving and renumbered entity ids plus a `diff_scene` to prove the
@@ -759,21 +781,22 @@ The remaining milestones, in dependency order:
 
 ## Status
 
-Milestone 19 is complete: assemblies and drawings now sit on the same
-program/replay substrate as everything else. The suite is **250 tests**
-(235 engine + 1 server + 14 viewer), covering the solver and sketches,
+Milestone 20 is complete: stable references now sit on the same
+program/replay substrate as everything else. The suite is **269 tests**
+(253 engine + 1 server + 15 viewer), covering the solver and sketches,
 solids/booleans/edges, persistence and export, picking and script-as-source,
-validation and scene diffs, incremental rebuilds, shape leverage,
-interoperability (STL/OBJ/3MF, DXF/SVG, STEP), and assemblies and drawing
-sheets — including byte-stable saves and exports, cold-replay determinism, and
-self-contained assemblies that reopen without their part files.
+validation and scene diffs, stable face/edge references, incremental rebuilds,
+shape leverage, interoperability (STL/OBJ/3MF, DXF/SVG, STEP), and assemblies
+and drawing sheets — including byte-stable saves and exports, cold-replay
+determinism, and self-contained assemblies that reopen without their part
+files.
 
 End-to-end printable examples: `examples/printable_bracket.py`,
 `revolve_bushing.py`, `face_sketch.py`, `sketch_complete.py`, `pick.py`,
-`validate.py`, `shape_leverage.py`, `cross_block.py`, `save_load.py`,
-`incremental_rebuild.py`, `import_mesh.py`, `export_2d.py`, `step_export.py`,
-and `assembly_drawing.py`. Each runs profile → solid → validate → render →
-export; `cross_block.py` is the picture-to-part loop above.
+`validate.py`, `stable_references.py`, `shape_leverage.py`, `cross_block.py`,
+`save_load.py`, `incremental_rebuild.py`, `import_mesh.py`, `export_2d.py`,
+`step_export.py`, and `assembly_drawing.py`. Each runs profile → solid →
+validate → render → export; `cross_block.py` is the picture-to-part loop above.
 
 ## What agents say
 

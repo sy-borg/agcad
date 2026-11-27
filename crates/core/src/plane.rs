@@ -222,7 +222,13 @@ pub fn face_frame(
             .min_by(|a, b| {
                 let da = (dot(a.normal, p) - a.offset).abs();
                 let db = (dot(b.normal, p) - b.offset).abs();
-                da.total_cmp(&db).then_with(|| b.area.total_cmp(&a.area))
+                da.total_cmp(&db)
+                    .then_with(|| {
+                        let ca = sub(a.centroid, p);
+                        let cb = sub(b.centroid, p);
+                        dot(ca, ca).total_cmp(&dot(cb, cb))
+                    })
+                    .then_with(|| b.area.total_cmp(&a.area))
             })
             .expect("candidates is non-empty"),
         None => candidates

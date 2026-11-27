@@ -189,6 +189,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::Redo { doc }
         | Command::GetScene { doc }
         | Command::Pick { doc, .. }
+        | Command::Faces { doc, .. }
+        | Command::Edges { doc, .. }
         | Command::Validate { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::GetParameters { doc }
