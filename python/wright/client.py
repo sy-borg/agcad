@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 __all__ = ["Wright", "WrightError", "WrightStdioTransport", "WrightTcpTransport"]
-__version__ = "0.1.0"
+__version__ = "0.5.0"
 
 
 class WrightError(RuntimeError):

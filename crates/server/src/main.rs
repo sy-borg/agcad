@@ -252,7 +252,10 @@ fn scene_changed(command: &Command, result: &CommandResult) -> String {
 // --- modes ---------------------------------------------------------------------
 
 fn serve_stdio() -> ExitCode {
-    eprintln!("Wright CAD v0.2.0 | protocol: stdio | engine: private to this session");
+    eprintln!(
+        "Wright CAD v{} | protocol: stdio | engine: private to this session",
+        env!("CARGO_PKG_VERSION")
+    );
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
 
@@ -288,7 +291,10 @@ fn serve_tcp(port: u16) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    eprintln!("Wright CAD v0.2.0 | protocol: tcp | listening on 127.0.0.1:{port}");
+    eprintln!(
+        "Wright CAD v{} | protocol: tcp | listening on 127.0.0.1:{port}",
+        env!("CARGO_PKG_VERSION")
+    );
     eprintln!("docs: one shared document space for every connection; mutations broadcast scene_changed");
 
     let engine = Arc::new(Mutex::new(Engine::new()));

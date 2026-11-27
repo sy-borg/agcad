@@ -23,7 +23,7 @@ from typing import Any
 
 from .client import Wright, WrightError
 
-SERVER_INFO = {"name": "wright", "version": "0.2.0"}
+SERVER_INFO = {"name": "wright", "version": "0.5.0"}
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 MAX_BATCH = 500
 
