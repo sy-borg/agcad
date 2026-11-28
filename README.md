@@ -101,7 +101,7 @@ Line-delimited JSON-RPC 2.0, one request/response per line:
 Commands, grouped by intent:
 
 - **Documents**: `initialize`, `list_documents`, `create_document`,
-  `close_document`
+  `close_document`, `clear_document` (reset in place, keeping id and name)
 - **Primitives**: `add_box`, `add_sphere`, `add_cylinder`
 - **Modelling**: `boolean`, `transform`, `set_color`, `set_material`, `delete`,
   `fillet`, `chamfer`
@@ -802,6 +802,46 @@ Then ask the agent to draw; what it builds through MCP appears in the viewer
 immediately. Without `WRIGHT_CONNECT`, the MCP server spawns a private engine
 (isolated, invisible to viewers) — attach mode is opt-in.
 
+### Scripts stay live too
+
+An agent often moves from MCP calls to a Python script once the shape settles.
+Use `Wright.open()` in that script instead of `Wright.spawn()`. `open()` uses
+the shared backend when one is available and falls back to a private engine, so
+the same script works in the viewer and in CI:
+
+```python
+from wright import Wright
+
+cad = Wright.open()                    # shared if reachable, else private
+doc = cad.document("bracket", reset=True)
+```
+
+`examples/live_demo.py` is the runnable version: it attaches to the backend the
+viewer is watching, resets `live_demo`, and rebuilds a small bracket. Use
+`--private` or `WRIGHT_PRIVATE=1` to force an isolated run.
+
+Resolution order: `private=True`; explicit `host`/`port`; then
+`WRIGHT_PRIVATE=1` forces a private engine; then `WRIGHT_CONNECT=host:port`;
+then the project session descriptor written by the TCP server (and refreshed
+by explicit TCP clients); then `127.0.0.1:7860`; finally `spawn()`. An
+explicit endpoint fails rather than silently going private.
+
+`cad.document(name, reset=True)` reuses a document by name and clears it in
+place (`clear_document`), keeping its id and name. A rerun therefore shows up in
+the same viewer slot and starts entity ids at 1 again, instead of creating a
+second document. A viewer with no pinned document follows the latest
+`scene_changed`, so a script-created document becomes visible without pressing
+Tab.
+
+The session descriptor lives under the OS temp directory, keyed by the project
+directory (with parent-directory lookup), so custom ports work without
+hardcoding them. The TCP server writes it on startup; explicit TCP clients
+refresh it. `WRIGHT_SESSION_DIR` overrides the location on both sides, and the
+path key is normalized the same way on Unix and Windows. It is opt-in
+convenience, not a daemon: a stale descriptor is dropped on the next failed
+attach. `Wright.spawn()` remains the explicit isolation mode and is never
+published.
+
 Restarts are handled without restarting anyone:
 
 - the Python client reconnects on the next command and retries briefly while
@@ -815,19 +855,22 @@ Restarts are handled without restarting anyone:
 ```python
 from wright import Wright
 
-with Wright.connect("127.0.0.1", 7860) as cad:   # the shared engine
-    ...                                          # the viewer follows along
+with Wright.open() as cad:                       # shared if a backend is up
+    doc = cad.document("bracket", reset=True)    # rerun-safe; viewer follows
+    ...
 ```
 
-`Wright.spawn()` starts a private stdio engine: perfect for CI and one-shot
-examples, but no viewer can see it.
+`Wright.connect("127.0.0.1", 7860)` attaches explicitly and fails if that
+engine is not running. `Wright.spawn()` starts a private stdio engine: perfect
+for CI and one-shot examples, but no viewer can see it.
 
 Two limits worth knowing:
 
-- the viewer shows **one document at a time**. It follows the lowest-id open
-  document until you pin one with `Tab`/`[`/`]`, a `1`-`9` slot key, or
-  `--doc ID` at startup. Selection is view state local to the viewer, so several
-  viewers can watch different documents.
+- the viewer shows **one document at a time**. Unpinned, it follows the
+  document named by the latest `scene_changed` (falling back to the first open
+  document). Pin one with `Tab`/`[`/`]`, a `1`-`9` slot key, or `--doc ID` at
+  startup. Selection is view state local to the viewer, so several viewers can
+  watch different documents.
 - the viewer is a reference surface, not an editor: the human can orbit, zoom,
   watch live updates, read the corner axis triad and toggle `name #id` labels.
   A click runs `pick` and the HUD shows the exact JSON selector to hand to the
@@ -908,17 +951,18 @@ Minimal agent session:
 ```python
 from wright import Wright
 
-with Wright.spawn() as cad:
+with Wright.open() as cad:              # shared viewer if one is running
     cad.initialize()
-    doc = cad.create_document("bracket")["doc"]
+    doc = cad.document("bracket", reset=True)
     base = cad.add_box(doc, name="base", center=(0, 0, 5), size=(80, 40, 10))
     boss = cad.add_cylinder(doc, name="boss", center=(20, 0, 12), radius=8, height=14)
     cad.undo(doc)          # everything on the bus is reversible
 ```
 
-This session is private. For the human/agent loop, start `wright --tcp 7860`
-plus `wright-view --port 7860`, and use `Wright.connect("127.0.0.1", 7860)` so
-both see the same scene.
+`Wright.open()` falls back to a private engine when nothing is listening. For
+the human/agent loop, start `wright --tcp 7860` plus
+`wright-view --port 7860`; for a guaranteed private session (CI, benchmarks),
+use `Wright.spawn()`.
 
 ## Roadmap
 

@@ -127,6 +127,8 @@ struct Snapshot {
     materials: BTreeMap<EntityId, MaterialSpec>,
     /// Steps that replay skips.
     suppressed: std::collections::BTreeSet<usize>,
+    /// Provenance script, so clearing a document is fully undoable.
+    source: Option<SourceDoc>,
     /// Id span (next_entity before, after) of each program step in the last
     /// replay. Used to remap numeric references when an edit changes how many
     /// entities a step allocates. Derived, but snapshot it with the state it
@@ -386,6 +388,28 @@ impl Document {
         }
     }
 
+    /// Reset to an empty program and scene, keeping the document id and
+    /// name. Undo history is preserved: `clear_document` checkpoints first,
+    /// so `undo` restores the scene it replaced.
+    fn clear(&mut self) {
+        self.next_entity = 1;
+        self.entities.clear();
+        self.parts.clear();
+        self.instances.clear();
+        self.next_instance = 1;
+        self.program.clear();
+        self.suppressed.clear();
+        self.params.clear();
+        self.materials.clear();
+        self.source = None;
+        self.replaying = false;
+        self.step = None;
+        self.cache = rebuild::GeometryCache::default();
+        self.step_entity_ranges.clear();
+        self.step_instance_ranges.clear();
+        self.reference_bindings.clear();
+    }
+
     pub(crate) fn next_entity(&mut self) -> EntityId {
         let id = self.next_entity;
         self.next_entity += 1;
@@ -444,6 +468,7 @@ impl Document {
             instances: self.instances.clone(),
             program: self.program.clone(),
             suppressed: self.suppressed.clone(),
+            source: self.source.clone(),
             params: self.params.clone(),
             materials: self.materials.clone(),
             step_entity_ranges: self.step_entity_ranges.clone(),
@@ -468,6 +493,7 @@ impl Document {
             self.instances = snap.instances;
             self.program = snap.program;
             self.suppressed = snap.suppressed;
+            self.source = snap.source;
             self.params = snap.params;
             self.materials = snap.materials;
             self.step_entity_ranges = snap.step_entity_ranges;
@@ -1199,7 +1225,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::RenderOffscreen { doc: d, .. }
         | Command::SetCalibration { doc: d, .. }
         | Command::CompareRender { doc: d, .. }
-        | Command::CloseDocument { doc: d } => *d = doc,
+        | Command::CloseDocument { doc: d }
+        | Command::ClearDocument { doc: d } => *d = doc,
         Command::Initialize
         | Command::ListDocuments
         | Command::ListMaterials
@@ -1301,6 +1328,16 @@ impl Engine {
                 self.docs.remove(doc).ok_or(Error::UnknownDocument(*doc))?;
                 self.calibrations.remove(doc);
                 Ok(CommandResult::Closed { doc: *doc })
+            },
+
+            Command::ClearDocument { doc } => {
+                {
+                    let d = self.doc_mut(*doc)?;
+                    d.checkpoint();
+                    d.clear();
+                }
+                self.calibrations.remove(doc);
+                Ok(CommandResult::Cleared { doc: *doc })
             },
 
             // --- mesh import: parse now, record the baked triangles -----
@@ -1579,6 +1616,7 @@ impl Engine {
                     parts: std::mem::take(&mut d.parts),
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
+                    source: std::mem::take(&mut d.source),
                     params: std::mem::take(&mut d.params),
                     materials: std::mem::take(&mut d.materials),
                     suppressed: std::mem::take(&mut d.suppressed),
@@ -1592,6 +1630,7 @@ impl Engine {
                 d.parts = snap.parts;
                 d.instances = snap.instances;
                 d.program = snap.program;
+                d.source = snap.source;
                 d.params = snap.params;
                 d.materials = snap.materials;
                 d.suppressed = snap.suppressed;
@@ -1611,6 +1650,7 @@ impl Engine {
                     parts: std::mem::take(&mut d.parts),
                     instances: std::mem::take(&mut d.instances),
                     program: std::mem::take(&mut d.program),
+                    source: std::mem::take(&mut d.source),
                     params: std::mem::take(&mut d.params),
                     materials: std::mem::take(&mut d.materials),
                     suppressed: std::mem::take(&mut d.suppressed),
@@ -1624,6 +1664,7 @@ impl Engine {
                 d.parts = snap.parts;
                 d.instances = snap.instances;
                 d.program = snap.program;
+                d.source = snap.source;
                 d.params = snap.params;
                 d.materials = snap.materials;
                 d.suppressed = snap.suppressed;
@@ -3628,7 +3669,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::RenderOffscreen { doc, .. }
         | Command::SetCalibration { doc, .. }
         | Command::CompareRender { doc, .. }
-        | Command::CloseDocument { doc } => Some(*doc),
+        | Command::CloseDocument { doc }
+        | Command::ClearDocument { doc } => Some(*doc),
         Command::Batch { commands, .. } => commands.iter().find_map(doc_of),
         _ => None,
     }
@@ -8982,6 +9024,66 @@ mod tests {
             doc: 11, name: "b".into(), center: vec3(0.0), size: vec3(1.0), color: None,
         })
         .unwrap();
+    }
+
+    /// A script that attaches to a shared engine reruns in place: clear keeps
+    /// the id/name, drops the program and geometry, and can be undone.
+    #[test]
+    fn clear_document_resets_in_place_and_undoes() {
+        let mut e = engine();
+        e.execute(Command::SetParameter {
+            doc: 1, name: "w".into(), value: num(10.0), description: None,
+        })
+        .unwrap();
+        e.execute(Command::AddBox {
+            doc: 1, name: "base".into(), center: vec3(0.0), size: vec3(1.0), color: None,
+        })
+        .unwrap();
+
+        match e.execute(Command::ClearDocument { doc: 1 }).unwrap() {
+            CommandResult::Cleared { doc } => assert_eq!(doc, 1),
+            r => panic!("unexpected result {r:?}"),
+        }
+        match e.execute(Command::ListDocuments).unwrap() {
+            CommandResult::Documents { docs } => {
+                assert_eq!(docs.len(), 1);
+                assert_eq!(docs[0].doc, 1);
+                assert_eq!(docs[0].name, "test");
+                assert_eq!(docs[0].entity_count, 0);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { name, params, program, .. } => {
+                assert_eq!(name, "test");
+                assert!(params.is_empty());
+                assert!(program.is_empty());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Fresh ids start at 1 again: a rerun is indistinguishable from a
+        // new document, apart from the stable id/name.
+        match e
+            .execute(Command::AddBox {
+                doc: 1, name: "again".into(), center: vec3(0.0), size: vec3(1.0), color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => assert_eq!(entity, 1),
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // The clear is one undo step (the box added after it is another).
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        e.execute(Command::Undo { doc: 1 }).unwrap();
+        match e.execute(Command::GetProgram { doc: 1 }).unwrap() {
+            CommandResult::Program { params, program, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(program.len(), 1);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
     }
 
     /// The scene reports a world-space bbox alongside the local mesh, so a

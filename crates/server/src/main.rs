@@ -21,6 +21,8 @@ use wright_core::Engine;
 use wright_protocol::{Command, CommandResult, DocId, RpcError, RpcRequest, RpcResponse};
 use serde_json::{Map, Value, json};
 
+mod session;
+
 fn main() -> ExitCode {
     let mut tcp_port: Option<u16> = None;
     let mut args = std::env::args().skip(1);
@@ -140,6 +142,7 @@ fn is_mutating(command: &Command) -> bool {
             | Command::CreateDocument { .. }
             | Command::OpenDocument { .. }
             | Command::CloseDocument { .. }
+            | Command::ClearDocument { .. }
             | Command::Undo { .. }
             | Command::Redo { .. }
             | Command::PatchProgram { .. }
@@ -229,7 +232,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::CompareRender { doc, .. }
         | Command::PatchProgram { doc, .. }
         | Command::Suppress { doc, .. }
-        | Command::CloseDocument { doc } => Some(*doc),
+        | Command::CloseDocument { doc }
+        | Command::ClearDocument { doc } => Some(*doc),
         Command::Batch { commands, .. } => commands.iter().find_map(doc_of),
         Command::CreateDocument { .. }
         | Command::OpenDocument { .. }
@@ -296,11 +300,16 @@ fn serve_tcp(port: u16) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
+    // `--tcp 0` asks the OS for a free port; publish the real one.
+    let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(port);
     eprintln!(
         "Wright CAD v{} | protocol: tcp | listening on 127.0.0.1:{port}",
         env!("CARGO_PKG_VERSION")
     );
     eprintln!("docs: one shared document space for every connection; mutations broadcast scene_changed");
+    if let Some(path) = session::publish(port) {
+        eprintln!("session: {} (Wright.open() discovers this server)", path.display());
+    }
 
     let engine = Arc::new(Mutex::new(Engine::new()));
     let bus = Arc::new(Broadcaster::new());
@@ -462,5 +471,14 @@ mod tests {
         let opened =
             CommandResult::DocumentOpened { doc: 8, name: "a".into(), commands: 1, params: 0, entities: 1 };
         assert_eq!(notified_doc(&scene_changed(&open, &opened)), Some(8));
+    }
+
+    #[test]
+    fn clear_document_is_a_document_scoped_mutation() {
+        let clear = Command::ClearDocument { doc: 3 };
+        assert!(is_mutating(&clear));
+        assert_eq!(doc_of(&clear), Some(3));
+        let notified = scene_changed(&clear, &CommandResult::Cleared { doc: 3 });
+        assert_eq!(notified_doc(&notified), Some(3));
     }
 }

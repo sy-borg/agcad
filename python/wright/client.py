@@ -3,9 +3,9 @@
 The primary interface for AI agents. Plain, dependency-free, synchronous:
 
 >>> from wright import Wright
->>> cad = Wright.spawn()
+>>> cad = Wright.open()          # shared viewer if one is running, else private
 >>> _ = cad.initialize()
->>> doc = cad.create_document("bracket")["doc"]
+>>> doc = cad.document("bracket", reset=True)
 >>> box = cad.add_box(doc, name="base", center=(0, 0, 5), size=(10, 10, 10))
 >>> box["entity"]
 1
@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import socket
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -350,6 +351,120 @@ def _find_server() -> list[str]:
 # normal process restart.
 _CONNECT_DELAYS = (0.0, 0.1, 0.3, 0.75)
 
+# Discovery probes are best-effort: a stale session file or an unused default
+# port must fall through to `spawn` quickly instead of retrying like an
+# explicit attach request.
+_PROBE_DELAYS = (0.0,)
+
+# Session descriptors let a script started in the same directory find a
+# non-default backend. The path is per-user temp space, keyed by the project
+# directory, not a fixed port. `tempfile` and `normcase` keep it portable to
+# Windows (where case and path separators may differ).
+_SESSION_ENV = "WRIGHT_SESSION_DIR"
+_PRIVATE_ENV = "WRIGHT_PRIVATE"
+
+
+def _parse_endpoint(value: str) -> tuple[str, int]:
+    """Parse ``host:port``, ``:port`` or a bare ``port``.
+
+    The MCP server accepts the same values in ``WRIGHT_CONNECT``; keeping the
+    parser here means scripts and MCP agree on what an endpoint string means.
+    """
+    value = value.strip()
+    if not value:
+        raise ValueError("empty endpoint")
+    if value.startswith("["):
+        host, _, rest = value[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else rest
+        host = host or "127.0.0.1"
+    else:
+        host, sep, port = value.rpartition(":")
+        if not sep:
+            host, port = "127.0.0.1", value
+        host = host or "127.0.0.1"
+    return host, int(port)
+
+
+def _session_key(path: str) -> str:
+    """64-bit FNV-1a of a normalized path, matching the Rust server.
+
+    A stdlib-only client has no SHA dependency and the server has no hash
+    crate; FNV-1a is a few lines on both sides. It is a filename key, not a
+    security boundary.
+    """
+    hash = 0xCBF29CE484222325
+    for byte in path.encode("utf-8", "surrogatepass"):
+        hash ^= byte
+        hash = (hash * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"{hash:016x}"
+
+
+def _session_path(cwd: str | None = None) -> Path:
+    """Where the shared-server descriptor for ``cwd`` lives."""
+    base = os.environ.get(_SESSION_ENV)
+    root = Path(base) if base else Path(tempfile.gettempdir()) / "wright"
+    # Match the server: absolute + normcase, no symlink resolution (both
+    # processes get their cwd from the OS, which is already physical).
+    here = os.path.normcase(os.path.abspath(cwd or os.getcwd()))
+    return root / f"session-{_session_key(here)}.json"
+
+
+def _write_session(host: str, port: int) -> None:
+    """Best-effort publication of a reachable TCP endpoint for this project.
+
+    Only successful *TCP* attaches call this; a private engine is never
+    published, because it would make the next script join an engine that dies
+    with its owner.
+    """
+    try:
+        path = _session_path()
+        payload = {
+            "host": host,
+            "port": port,
+            "pid": os.getpid(),
+            "cwd": os.getcwd(),
+        }
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        # Discovery is a convenience; a read-only temp dir must not break an
+        # otherwise working session.
+        pass
+
+
+def _read_session() -> tuple[str, int, Path] | None:
+    # A script often runs from a subdirectory (examples/, a project folder)
+    # while the server/MCP was started at the repository root. Walk up so a
+    # project-scoped descriptor follows the whole tree.
+    try:
+        here = Path(os.path.abspath(os.getcwd()))
+    except OSError:
+        return None
+    for directory in (here, *here.parents):
+        path = _session_path(str(directory))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            host = str(data["host"])
+            port = int(data["port"])
+            if 0 < port < 65536:
+                return host, port, path
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
+def _forget_session(path: Path | None = None) -> None:
+    try:
+        (path or _session_path()).unlink()
+    except OSError:
+        pass
+
 
 def _open_with_retry(
     kind: tuple, delays: tuple[float, ...], what: str
@@ -399,12 +514,20 @@ class Wright:
         self._reconnect = reconnect
         # Counts successful transport rebuilds; see the `generation` property.
         self._generation = 0
+        # True when this client is attached to a shared TCP engine. A private
+        # stdio engine is isolated from viewers, so scripts that want live
+        # preview use `Wright.open()` and check this if they need to say so.
+        self.shared = isinstance(transport, WrightTcpTransport)
 
     # -- constructors -------------------------------------------------------
 
     @classmethod
     def spawn(cls, argv: Iterable[str] | None = None) -> "Wright":
-        """Start a fresh server subprocess (stdio transport)."""
+        """Start a fresh, private server subprocess (stdio transport).
+
+        This is the isolation mode: no viewer can see it, and it exits with
+        this process. Use :meth:`open` for the human/agent loop.
+        """
         args = list(argv) if argv is not None else _find_server()
         return cls(
             _open_with_retry(("spawn", args), _CONNECT_DELAYS, "start"),
@@ -412,13 +535,89 @@ class Wright:
         )
 
     @classmethod
-    def connect(cls, host: str = "127.0.0.1", port: int = 7860) -> "Wright":
+    def connect(
+        cls, host: str = "127.0.0.1", port: int = 7860, *, publish: bool = True
+    ) -> "Wright":
         """Attach to a running server. TCP mode shares one document space
-        across all connections; mutations are broadcast to the others."""
-        return cls(
+        across all connections; mutations are broadcast to the others.
+
+        ``publish`` records the endpoint in this project's session descriptor
+        so a later `Wright.open()` / `wright run` finds a non-default port.
+        Explicit connects are what the MCP server uses to join a viewer.
+        """
+        cad = cls(
             _open_with_retry(("tcp", host, port), _CONNECT_DELAYS, "connect to"),
             reconnect=("tcp", host, port),
         )
+        if publish:
+            _write_session(host, port)
+        return cad
+
+    @classmethod
+    def open(
+        cls,
+        host: str | None = None,
+        port: int | None = None,
+        *,
+        private: bool | None = None,
+    ) -> "Wright":
+        """Open the best available engine: shared if one is running, else private.
+
+        This is the constructor script templates should use. Resolution:
+
+        1. ``private=True`` forces :meth:`spawn`;
+        2. explicit ``host``/``port`` connects there and raises if unreachable;
+        3. ``WRIGHT_PRIVATE=1`` forces :meth:`spawn`;
+        4. ``WRIGHT_CONNECT=host:port`` connects there and raises if unreachable;
+        5. a session descriptor written by the TCP server or an earlier client;
+        6. the conventional ``127.0.0.1:7860``;
+        7. otherwise :meth:`spawn`.
+
+        A script using ``open()`` therefore stays visible in a running viewer
+        by default, while CI and one-shot runs with no backend still get an
+        isolated engine. Use :meth:`spawn` explicitly when isolation is
+        required.
+        """
+        if private is True:
+            return cls.spawn()
+        # An explicit endpoint is a direct request; it also overrides the
+        # WRIGHT_PRIVATE env switch.
+        if host is not None or port is not None:
+            return cls.connect(host or "127.0.0.1", port or 7860)
+
+        env_private = os.environ.get(_PRIVATE_ENV, "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if private is None and env_private:
+            return cls.spawn()
+
+        attach = os.environ.get("WRIGHT_CONNECT")
+        if attach:
+            try:
+                attach_host, attach_port = _parse_endpoint(attach)
+            except ValueError as e:
+                raise WrightError(
+                    f"invalid WRIGHT_CONNECT={attach!r} (use host:port): {e}"
+                ) from None
+            return cls.connect(attach_host, attach_port)
+
+        published = _read_session()
+        if published is not None:
+            published_host, published_port, published_path = published
+            try:
+                return cls.connect(published_host, published_port)
+            except WrightError:
+                # The descriptor outlived its server. Drop it and keep
+                # looking: the default port may still have a live backend.
+                _forget_session(published_path)
+
+        try:
+            return cls(
+                _open_with_retry(("tcp", "127.0.0.1", 7860), _PROBE_DELAYS, "connect to"),
+                reconnect=("tcp", "127.0.0.1", 7860),
+            )
+        except WrightError:
+            return cls.spawn()
 
     @property
     def generation(self) -> int:
@@ -505,6 +704,39 @@ class Wright:
 
     def close_document(self, doc: int) -> dict[str, Any]:
         return self._request("close_document", doc=doc)
+
+    def clear_document(self, doc: int) -> dict[str, Any]:
+        """Reset a document in place to an empty program and scene.
+
+        The document keeps its id and name, so a viewer following it stays
+        there and a rerun allocates the same entity ids from 1 again. The
+        clear is one undo step.
+        """
+        return self._request("clear_document", doc=doc)
+
+    def document(
+        self,
+        name: str = "untitled",
+        *,
+        reset: bool = False,
+        doc: int | None = None,
+    ) -> int:
+        """Return the id of the document named ``name``, creating it if needed.
+
+        On a shared engine a script is usually rerun. ``reset=True`` clears an
+        existing document with that name instead of creating a duplicate, so
+        the viewer keeps following the same id and entity ids restart at 1.
+        Without ``reset`` an existing document is reused as-is (useful for a
+        follow-up step that adds to the previous build).
+
+        ``doc`` is an optional explicit id used only when creating.
+        """
+        for info in self.list_documents():
+            if info["name"] == name:
+                if reset:
+                    self.clear_document(info["doc"])
+                return info["doc"]
+        return self.create_document(name, doc=doc)["doc"]
 
     # -- parameters (the agent-authored "function") ---------------------------
 

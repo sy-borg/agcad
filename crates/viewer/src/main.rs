@@ -1619,6 +1619,12 @@ fn parse_scene_event(line: &str) -> Option<SceneEvent> {
     Some(SceneEvent::Changed(doc))
 }
 
+/// The follow target for an unpinned viewer when `doc` changed. A pinned
+/// viewer returns `None` and keeps its explicit choice.
+fn follow_changed(selected: Option<DocId>, doc: DocId) -> Option<DocId> {
+    if selected.is_none() { Some(doc) } else { None }
+}
+
 /// Zero-based document slot for the number keys `1`-`9`.
 fn digit_slot(code: KeyCode) -> Option<usize> {
     Some(match code {
@@ -1645,9 +1651,14 @@ enum MiddleDrag {
 struct App {
     host: String,
     port: u16,
-    /// The document the viewer should show. `None` follows the first open
-    /// document; cycling or `1`-`9` pins an explicit choice.
+    /// The document the viewer should show. `None` follows activity:
+    /// `follow_doc` when a notification named a document, else the first open
+    /// document. Cycling or `1`-`9` pins an explicit choice.
     selected_doc: Option<DocId>,
+    /// The document named by the most recent `scene_changed` while unpinned.
+    /// This is how a provider that creates a fresh document (a script that
+    /// attaches to the shared engine) becomes visible without pressing Tab.
+    follow_doc: Option<DocId>,
     /// The resolved document currently on screen.
     doc: Option<DocId>,
     dragging: bool,
@@ -1672,6 +1683,7 @@ impl App {
             host,
             port,
             selected_doc: doc,
+            follow_doc: None,
             doc: None,
             dragging: false,
             mmb: None,
@@ -1754,12 +1766,17 @@ impl App {
         if self.state.is_none() {
             return;
         }
-        match net::fetch_scene(&self.host, self.port, self.selected_doc) {
+        let want = self.selected_doc.or(self.follow_doc);
+        match net::fetch_scene(&self.host, self.port, want) {
             Ok(fetched) => {
-                // A selected document that has been closed falls back to
-                // "follow the first document" instead of staying stale.
+                // A selected (or followed) document that has been closed
+                // falls back to "follow the first document" instead of
+                // staying stale.
                 if self.selected_doc.is_some() && fetched.doc != self.selected_doc {
                     self.selected_doc = None;
+                }
+                if self.follow_doc.is_some() && fetched.doc != self.follow_doc {
+                    self.follow_doc = None;
                 }
                 self.doc = fetched.doc;
                 let label = match fetched
@@ -1816,6 +1833,7 @@ impl App {
             return;
         }
         self.selected_doc = Some(doc);
+        self.follow_doc = None;
         // Entity ids are per document, so a pick from the old document must
         // not leak into the new one.
         if let Some(state) = self.state.as_mut() {
@@ -2079,7 +2097,16 @@ impl ApplicationHandler for App {
                 reload |= match event {
                     SceneEvent::Refresh | SceneEvent::Changed(None) => true,
                     SceneEvent::Changed(Some(doc)) => {
-                        self.doc.is_none() || self.doc == Some(doc)
+                        // Unpinned viewers follow the latest activity, so a
+                        // script that creates or resets its own document
+                        // shows up without a Tab press.
+                        match follow_changed(self.selected_doc, doc) {
+                            Some(follow) => {
+                                self.follow_doc = Some(follow);
+                                true
+                            },
+                            None => self.doc.is_none() || self.doc == Some(doc),
+                        }
                     },
                 };
             }
@@ -2421,6 +2448,12 @@ mod tests {
         assert_eq!(net::select_document(&docs, None), Some(1));
         assert_eq!(net::select_document(&[], Some(2)), None);
         assert_eq!(net::select_document(&[], None), None);
+    }
+
+    #[test]
+    fn an_unpinned_viewer_follows_the_latest_changed_document() {
+        assert_eq!(follow_changed(None, 2), Some(2));
+        assert_eq!(follow_changed(Some(1), 2), None);
     }
 
     #[test]

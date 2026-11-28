@@ -417,9 +417,9 @@ footer{padding:0 0 48px}
         <h3>From Python</h3>
 <pre><span class="k">from</span> wright <span class="k">import</span> Wright
 
-<span class="k">with</span> Wright.spawn() <span class="k">as</span> cad:
+<span class="k">with</span> Wright.open() <span class="k">as</span> cad:
     cad.initialize()
-    doc = cad.create_document(<span class="s">"bracket"</span>)[<span class="s">"doc"</span>]
+    doc = cad.document(<span class="s">"bracket"</span>, reset=<span class="k">True</span>)
 
     cad.set_parameter(doc, <span class="s">"wall"</span>, 2.0,
         description=<span class="s">"plate thickness [mm]"</span>)
@@ -480,7 +480,7 @@ WRIGHT_CONNECT=127.0.0.1:7860 wright-mcp
 ./target/debug/wright-view --port 7860
 <span class="c"># labels: name #id · Tab/[ ]/1-9: switch
 # document · click: pick · C: copy selector</span></pre>
-        <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation; each notification names the affected document (including the new id for create/open). Without <code>WRIGHT_CONNECT</code>, the MCP server runs a private engine. The viewer shows one document at a time and chooses it locally (following the first until you switch), so several viewers can watch different documents on one engine. A click sends a ray through <code>pick</code>; the HUD shows the exact <code>{entity,normal,near}</code> face or <code>{direction,near,near_radius}</code> edge selector to hand to the agent, who passes it straight to <code>add_sketch</code>, <code>fillet</code> or <code>chamfer</code>.</p>
+        <p>The TCP server shares one document space and broadcasts <code>scene_changed</code> after every mutation; each notification names the affected document (including the new id for create/open). Without <code>WRIGHT_CONNECT</code>, the MCP server runs a private engine. Scripts use <code>Wright.open()</code> to join the same engine when one is running and <code>cad.document(name, reset=True)</code> to rerun in place; the viewer shows one document at a time, follows the latest activity until you pin a document, and lets several viewers watch different documents on one engine. A click sends a ray through <code>pick</code>; the HUD shows the exact <code>{entity,normal,near}</code> face or <code>{direction,near,near_radius}</code> edge selector to hand to the agent, who passes it straight to <code>add_sketch</code>, <code>fillet</code> or <code>chamfer</code>.</p>
         <p>Restarts self-heal: the client reconnects (retrying briefly) and the viewer's watcher reconnects and re-fetches by itself. The MCP result then carries <code>reconnected</code> with the documents that survived; a restarted engine is empty, so the agent replays its script.</p>
       </div>
     </div>

@@ -67,7 +67,16 @@ save_document -> .wcad is a replayable snapshot (program + current parameter
 values + the embedded script). get_program exposes all three, so a handoff can
 recover the recipe without executing it. For durable work keep the script and
 pass it as save_document{source:{language:"python",text:...}}; an MCP-only
-document with no script is scratch state. A human working in the viewer can
+document with no script is scratch state.
+When you switch from MCP calls to a runnable Python script, use Wright.open()
+instead of Wright.spawn(): open() joins the shared backend the viewer watches
+when one is reachable (explicit endpoint, WRIGHT_CONNECT, or this project's
+session descriptor, then 127.0.0.1:7860) and otherwise starts a private engine.
+Use cad.document(name, reset=True) to reuse and clear a named document, so a
+rerun keeps its id and the viewer stays on it; clear_document{doc} is the bus
+command behind it. Wright.spawn() is the explicit isolation mode (CI, one-shot)
+and is never visible to a viewer; use it only when private execution is wanted.
+A human working in the viewer can
 label entities and click a face or edge; the click arrives as a pick result
 whose face/edge selectors you pass straight to add_sketch/fillet/chamfer.
 Shape leverage: linear_pattern/circular_pattern repeat solids (count includes the
@@ -122,6 +131,8 @@ EXECUTE_DESCRIPTION = """Batch-execute wright commands. Each command is an objec
 Commands: initialize{}, list_documents{}, create_document{name,doc?}
   (doc is an unused id >= 1; omit it to allocate the next one — pass it to
   create+populate in a single batch), close_document{doc},
+clear_document{doc} (reset program/parameters/geometry in place, keeping the
+  id and name; undoable),
 set_parameter{doc,name,value(number|string expression),description?} (returns
   rebuilt/reused geometry-feature counts and total program steps),
 remove_parameter{doc,name}, get_parameters{doc},

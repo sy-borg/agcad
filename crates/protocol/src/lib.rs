@@ -193,6 +193,11 @@ pub enum Command {
         doc: Option<DocId>,
     },
     CloseDocument { doc: DocId },
+    /// Reset a document in place: clear its program, parameters and derived
+    /// geometry while keeping its id and name. Scripts that attach to a
+    /// shared engine use this to make a rerun idempotent without moving the
+    /// document id the viewer is following.
+    ClearDocument { doc: DocId },
 
     AddBox {
         doc: DocId,
@@ -3021,6 +3026,7 @@ pub enum CommandResult {
     Documents { docs: Vec<DocInfo> },
     DocumentCreated { doc: DocId },
     Closed { doc: DocId },
+    Cleared { doc: DocId },
     EntityCreated {
         doc: DocId,
         entity: EntityId,
