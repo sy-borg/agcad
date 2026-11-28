@@ -1137,6 +1137,86 @@ pub enum Command {
         path: Option<String>,
     },
 
+    /// Bind a reference-image scale to this document (M25). Give either two
+    /// pixel points plus the real distance between them (`a`, `b` and
+    /// `length_mm`), a known pixel span plus its real length (`pixels` and
+    /// `length_mm`), or a direct `mm_per_px`. The result is the scale plus,
+    /// when `reference` names a readable PNG, that image's size in pixels and
+    /// millimeters. Calibration is session state used by `compare_render`;
+    /// it is not a program step and is not saved in `.wcad`.
+    SetCalibration {
+        doc: DocId,
+        /// Reference PNG the scale belongs to. Optional, but binding it makes
+        /// a later comparison against another image report that the scale was
+        /// not applied.
+        #[serde(default)]
+        reference: Option<String>,
+        /// First point in reference-image pixels (0,0 is the top-left).
+        #[serde(default)]
+        a: Option<[f64; 2]>,
+        /// Second point in reference-image pixels.
+        #[serde(default)]
+        b: Option<[f64; 2]>,
+        /// Real length between `a` and `b`, or of `pixels`, in millimeters.
+        #[serde(default)]
+        length_mm: Option<f64>,
+        /// Pixel length corresponding to `length_mm` when two points are not
+        /// given (for example the image width in pixels).
+        #[serde(default)]
+        pixels: Option<f64>,
+        /// Direct millimeters per reference pixel.
+        #[serde(default)]
+        mm_per_px: Option<f64>,
+        /// Forget the document's calibration instead of setting one.
+        #[serde(default)]
+        clear: bool,
+    },
+
+    /// Score a render against a reference image or mesh (M25). The model is
+    /// rendered from the requested view(s) as a silhouette and compared to
+    /// the reference's silhouette: bbox-normalized IoU, aspect delta, pixel
+    /// bboxes and per-region mismatch. A mesh reference also gets an optional
+    /// volume/bbox comparison. With `set_calibration`, image references gain
+    /// physical width/height in mm; without it the report sets
+    /// `needs_calibration` so the agent can ask for a known length instead of
+    /// guessing. A session command: it changes no model state.
+    CompareRender {
+        doc: DocId,
+        /// Reference used by every view without its own. PNG = image;
+        /// STL/OBJ/3MF = mesh.
+        #[serde(default)]
+        reference: Option<String>,
+        /// One named view: `front`, `back`, `left`, `right`, `top`,
+        /// `bottom` or `iso` (the default).
+        #[serde(default)]
+        view: Option<String>,
+        /// Several views, each with an optional own `reference`. Multi-view
+        /// comparison catches an inner feature hidden behind one good
+        /// silhouette. Give `view` or `views`, not both.
+        #[serde(default)]
+        views: Option<Vec<CompareView>>,
+        /// Square render size in pixels (default 512).
+        #[serde(default)]
+        size: Option<u32>,
+        /// Region grid cells per axis for the mismatch report (default 3).
+        #[serde(default)]
+        regions: Option<u32>,
+        /// Reference foreground threshold (0..1, default 0.08): how far a
+        /// pixel must differ from the image's border color to count as part
+        /// of the part.
+        #[serde(default)]
+        tolerance: Option<f64>,
+        /// IoU a view must reach for the overall `passed` flag (default
+        /// 0.85).
+        #[serde(default)]
+        min_iou: Option<f64>,
+        /// Compare volumes and bboxes against a mesh reference (default true
+        /// when the reference is a mesh). Asking for it with only image
+        /// references is an error.
+        #[serde(default)]
+        volumetric: Option<bool>,
+    },
+
     /// Create an empty sketch: a 2D constraint-solved drawing placed in 3D
     /// by the entity transform. `plane` chooses where it sits — a standard
     /// datum plane (the default is XY at the origin), an explicit
@@ -3364,6 +3444,50 @@ pub enum CommandResult {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// A reference-image scale was bound to the document (see
+    /// [`Command::SetCalibration`]).
+    Calibrated {
+        doc: DocId,
+        /// `true` when the command removed the calibration instead.
+        cleared: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mm_per_px: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pixels_per_mm: Option<f64>,
+        /// `two_points`, `known_length` or `mm_per_px`; absent when cleared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// Reference image size when it was readable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<ReferenceImage>,
+    },
+    /// A render was scored against one or more references (see
+    /// [`Command::CompareRender`]).
+    RenderCompared {
+        doc: DocId,
+        views: Vec<RenderViewScore>,
+        /// Mean silhouette IoU over the views.
+        iou: f64,
+        /// Worst view's IoU.
+        min_iou: f64,
+        worst_view: String,
+        /// Mean relative aspect delta over the views.
+        aspect_delta: f64,
+        /// Every view reached the requested `min_iou`.
+        passed: bool,
+        threshold: f64,
+        /// True when at least one image reference had no applicable
+        /// calibration; the agent should ask for a known length.
+        needs_calibration: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Volume/bbox comparison, one per mesh reference. Empty when the
+        /// reference is an image or `volumetric:false`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        volumes: Vec<VolumeComparison>,
+    },
     SketchElementCreated { doc: DocId, sketch: EntityId, element: u64 },
     SketchElementDeleted { doc: DocId, sketch: EntityId, element: u64 },
     ConstraintCreated {
@@ -3410,6 +3534,117 @@ pub enum CommandResult {
         volume: f64,
         tris: usize,
     },
+}
+
+/// One view in a multi-view comparison (see [`Command::CompareRender`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompareView {
+    /// `front`, `back`, `left`, `right`, `top`, `bottom` or `iso`.
+    pub view: String,
+    /// Reference for this view. Falls back to the command's `reference`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+/// Pixel bbox of one silhouette, in the rendered/reference image.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SilhouetteBox {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// `width / height`.
+    pub aspect: f64,
+}
+
+/// Width and height in millimeters.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SizeMm {
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Axis-aligned world extents in millimeters.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Size3Mm {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+/// One cell of the aligned comparison grid. `mismatch` is `1 - iou`;
+/// `missing` and `extra` are fractions of the region's foreground union.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompareRegion {
+    /// Readable name such as `top-left` or `center`; generic `r0c1` for
+    /// non-3×3 grids.
+    pub name: String,
+    pub row: u32,
+    pub col: u32,
+    pub iou: f64,
+    pub mismatch: f64,
+    pub missing: f64,
+    pub extra: f64,
+    /// Foreground pixels in the reference or model inside this region.
+    pub union_pixels: u32,
+}
+
+/// One view's score in a [`Command::CompareRender`] report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderViewScore {
+    pub view: String,
+    pub reference: String,
+    /// `image` or `mesh`.
+    pub reference_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_height: Option<u32>,
+    /// Bbox-normalized silhouette intersection-over-union, 0..1.
+    pub iou: f64,
+    /// Relative bbox aspect difference: `|model - reference| / reference`.
+    pub aspect_delta: f64,
+    pub model_bbox: SilhouetteBox,
+    pub reference_bbox: SilhouetteBox,
+    pub regions: Vec<CompareRegion>,
+    /// Projected model width/height in mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_size_mm: Option<SizeMm>,
+    /// Reference width/height in mm (from calibration or the mesh).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_size_mm: Option<SizeMm>,
+    /// `model_size_mm - reference_size_mm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_delta_mm: Option<SizeMm>,
+    /// True when this view used an image reference without a usable scale.
+    pub needs_calibration: bool,
+}
+
+/// Volume and world-bbox comparison against one mesh reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeComparison {
+    pub view: String,
+    pub reference: String,
+    /// Sum of the model solids' signed volumes (mm³). Overlapping solids are
+    /// counted separately, exactly like `validate` does per solid.
+    pub model_mm3: f64,
+    pub reference_mm3: f64,
+    /// `model - reference`.
+    pub delta_mm3: f64,
+    /// `model / reference`; `None` when the reference volume is zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f64>,
+    pub model_size_mm: Size3Mm,
+    pub reference_size_mm: Size3Mm,
+}
+
+/// A reference image's pixel and physical size.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceImage {
+    pub width: u32,
+    pub height: u32,
+    pub width_mm: f64,
+    pub height_mm: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

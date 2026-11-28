@@ -97,6 +97,14 @@ area/perimeter/loops; mass_properties gives surface area, centroid and inertia
 per solid and for the assembly, with mass from a material density; clearance
 is the closest approach between two solids classified against the same
 free/sliding/snug/press fits. Read-only, so agents can ask before they cut.
+Visual verification turns a picture into a number: compare_render scores the
+model against a reference PNG or STL/OBJ/3MF by silhouette IoU, aspect delta,
+pixel bbox, per-region mismatch and optional volume; use views=[...] for
+front/top/right checks so an inner feature cannot hide behind one silhouette.
+set_calibration converts a known reference length (two pixel points, or a
+pixel span) into mm_per_px. If compare_render says needs_calibration, ask the
+user for one known dimension instead of guessing pixels; silhouette scores
+still work without it.
 Import → parametric: import_dxf/import_svg bring a drawing in as a
 constraint-solved sketch, section/project cut or project a solid into sketch
 geometry, primitives lists planar faces, cylinder axes/radii and hole
@@ -420,6 +428,13 @@ export_step{doc,path,entities?} (STEP ISO 10303-21 AP214, world space: an
 render_offscreen{doc,width?,height?,eye?,target?,up?,fov_deg?,ortho?,background?,path?}
   (headless PNG; prefer the wright_render tool, which returns the image inline.
   ortho:true gives a parallel projection for front/top/side views).
+compare_render{doc,reference?,view?,views?,size?,regions?,tolerance?,min_iou?,volumetric?}
+  (score a render against a PNG or STL/OBJ/3MF: silhouette IoU, aspect delta,
+  pixel bbox, per-region mismatch, optional volume; views=[{view,reference?}]
+  checks several views. Read-only),
+set_calibration{doc,reference?,a?,b?,length_mm?,pixels?,mm_per_px?,clear?}
+  (bind a reference scale; a+b is two pixel points, pixels is a measured span,
+  mm_per_px is direct. Session state, not saved).
 Numeric arguments accept expression strings over parameters. Commands run in order;
 execution stops at the first error (reported with a recovery hint)."""
 

@@ -17,6 +17,7 @@
 
 pub mod boolean;
 pub mod assembly;
+pub mod compare;
 pub mod drawing;
 pub mod drawing_sheet;
 pub mod dxf;
@@ -59,10 +60,10 @@ use wright_protocol::{
     DocumentSnapshot, DrawingFormat, EdgeFilter, EntityChange, EntityId, EntitySnapshot,
     EntitySummary, IdChange, Mat4, MaterialSpec, Mesh, MirrorPlane,
     OrientationCandidate, OrientationReport, ParamInfo, ParameterChange, ProgramOp,
-    ReferenceChange, ReferenceCheck, ReferenceReport, Rgba, RevolveAxis, SavedParameter, Scalar,
-    SceneDiffReport, SketchConstraint, SketchElement, SketchPlane, SketchValidation,
-    SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3, WorkPlane, DOCUMENT_FORMAT,
-    DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
+    ReferenceChange, ReferenceCheck, ReferenceImage, ReferenceReport, Rgba, RevolveAxis,
+    SavedParameter, Scalar, SceneDiffReport, SketchConstraint, SketchElement, SketchPlane,
+    SketchValidation, SolidValidation, SourceDoc, SVec3, ValidationTotals, Vec3, WorkPlane,
+    DOCUMENT_FORMAT, DOCUMENT_VERSION, PROTOCOL_VERSION, SERVER_NAME,
 };
 
 /// Default tessellation segments for curved primitives.
@@ -1196,6 +1197,8 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::ExportStep { doc: d, .. }
         | Command::SaveDocument { doc: d, .. }
         | Command::RenderOffscreen { doc: d, .. }
+        | Command::SetCalibration { doc: d, .. }
+        | Command::CompareRender { doc: d, .. }
         | Command::CloseDocument { doc: d } => *d = doc,
         Command::Initialize
         | Command::ListDocuments
@@ -1216,11 +1219,15 @@ fn set_doc(command: &mut Command, doc: DocId) {
 pub struct Engine {
     docs: BTreeMap<DocId, Document>,
     next_doc: DocId,
+    /// Reference-image scales bound with `set_calibration`. Session state:
+    /// not part of a document program, not saved in `.wcad`, and dropped
+    /// when the document closes.
+    calibrations: BTreeMap<DocId, compare::Calibration>,
 }
 
 impl Engine {
     pub fn new() -> Self {
-        Self { docs: BTreeMap::new(), next_doc: 1 }
+        Self { docs: BTreeMap::new(), next_doc: 1, calibrations: BTreeMap::new() }
     }
 
     fn doc(&self, id: DocId) -> Result<&Document> {
@@ -1292,6 +1299,7 @@ impl Engine {
 
             Command::CloseDocument { doc } => {
                 self.docs.remove(doc).ok_or(Error::UnknownDocument(*doc))?;
+                self.calibrations.remove(doc);
                 Ok(CommandResult::Closed { doc: *doc })
             },
 
@@ -2678,6 +2686,111 @@ impl Engine {
                     path: resolved,
                 })
             },
+
+            Command::SetCalibration {
+                doc,
+                reference,
+                a,
+                b,
+                length_mm,
+                pixels,
+                mm_per_px,
+                clear,
+            } => {
+                self.doc(*doc)?;
+                if *clear {
+                    self.calibrations.remove(doc);
+                    return Ok(CommandResult::Calibrated {
+                        doc: *doc,
+                        cleared: true,
+                        reference: None,
+                        mm_per_px: None,
+                        pixels_per_mm: None,
+                        source: None,
+                        image: None,
+                    });
+                }
+                let (scale, source) =
+                    compare::compute_calibration(*a, *b, *length_mm, *pixels, *mm_per_px)?;
+                let reference = reference.as_deref().map(compare::canonical_path);
+                let image = match reference.as_deref() {
+                    Some(path) => {
+                        let (w, h) = compare::image_dimensions(path)?;
+                        Some(ReferenceImage {
+                            width: w,
+                            height: h,
+                            width_mm: w as f64 * scale,
+                            height_mm: h as f64 * scale,
+                        })
+                    },
+                    None => None,
+                };
+                self.calibrations.insert(
+                    *doc,
+                    compare::Calibration {
+                        mm_per_px: scale,
+                        reference: reference.clone(),
+                        source: source.to_string(),
+                    },
+                );
+                Ok(CommandResult::Calibrated {
+                    doc: *doc,
+                    cleared: false,
+                    reference,
+                    mm_per_px: Some(scale),
+                    pixels_per_mm: Some(1.0 / scale),
+                    source: Some(source.to_string()),
+                    image,
+                })
+            },
+
+            Command::CompareRender {
+                doc,
+                reference,
+                view,
+                views,
+                size,
+                regions,
+                tolerance,
+                min_iou,
+                volumetric,
+            } => {
+                let d = self.doc(*doc)?;
+                let items: Vec<render::RenderItem<'_>> = d
+                    .entities
+                    .values()
+                    .map(|e| render::RenderItem {
+                        mesh: &e.mesh,
+                        model: e.transform(),
+                        color: e.color,
+                    })
+                    .collect();
+                let options = compare::CompareOptions {
+                    reference: reference.clone(),
+                    view: view.clone(),
+                    views: views.clone(),
+                    size: *size,
+                    regions: *regions,
+                    tolerance: *tolerance,
+                    min_iou: *min_iou,
+                    volumetric: *volumetric,
+                };
+                let report =
+                    compare::compare(&items, &options, self.calibrations.get(doc))?;
+                Ok(CommandResult::RenderCompared {
+                    doc: *doc,
+                    views: report.views,
+                    iou: report.iou,
+                    min_iou: report.min_iou,
+                    worst_view: report.worst_view,
+                    aspect_delta: report.aspect_delta,
+                    passed: report.passed,
+                    threshold: report.threshold,
+                    needs_calibration: report.needs_calibration,
+                    message: report.message,
+                    volumes: report.volumes,
+                })
+            },
         }
     }
 }
@@ -3513,6 +3626,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::ExportSvg { doc, .. }
         | Command::ExportStep { doc, .. }
         | Command::RenderOffscreen { doc, .. }
+        | Command::SetCalibration { doc, .. }
+        | Command::CompareRender { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),
         Command::Batch { commands, .. } => commands.iter().find_map(doc_of),
         _ => None,
@@ -5712,7 +5827,8 @@ fn add_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wright_protocol::{Hand, MeasureTarget, SweepPath};
+    use std::path::Path;
+    use wright_protocol::{CompareView, Hand, MeasureTarget, SweepPath};
 
     fn engine() -> Engine {
         let mut e = Engine::new();
@@ -6270,9 +6386,372 @@ mod tests {
         }
     }
 
+    // --- M25: visual verification -------------------------------------------
+
+    fn render_reference(e: &mut Engine, doc: DocId, view: &str, path: &Path) {
+        let (eye, up) = match view {
+            "front" => ([0.0, -200.0, 10.0], [0.0, 0.0, 1.0]),
+            "top" => ([0.0, 0.0, 210.0], [0.0, 1.0, 0.0]),
+            "right" => ([200.0, 0.0, 10.0], [0.0, 0.0, 1.0]),
+            _ => panic!("test view {view}"),
+        };
+        e.execute(Command::RenderOffscreen {
+            doc,
+            width: Some(256),
+            height: Some(256),
+            eye: Some(eye),
+            target: Some([0.0, 0.0, 10.0]),
+            up: Some(up),
+            fov_deg: None,
+            ortho: Some(true),
+            background: None,
+            path: Some(path.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn compare_render_image_score_and_calibration() {
+        let mut e = engine();
+        e.execute(Command::AddBox {
+            doc: 1,
+            name: "plate".into(),
+            center: [num(0.0), num(0.0), num(10.0)],
+            size: [num(40.0), num(30.0), num(20.0)],
+            color: None,
+        })
+        .unwrap();
+        let path = std::env::temp_dir().join("wright_m25_front.png");
+        render_reference(&mut e, 1, "front", &path);
+        let reference = path.to_string_lossy().into_owned();
+
+        let report = match e
+            .execute(Command::CompareRender {
+                doc: 1,
+                reference: Some(reference.clone()),
+                view: Some("front".into()),
+                views: None,
+                size: Some(256),
+                regions: None,
+                tolerance: None,
+                min_iou: None,
+                volumetric: None,
+            })
+            .unwrap()
+        {
+            CommandResult::RenderCompared {
+                views,
+                iou,
+                passed,
+                needs_calibration,
+                min_iou,
+                worst_view,
+                volumes,
+                ..
+            } => {
+                assert_eq!(views.len(), 1);
+                assert_eq!(views[0].reference_kind, "image");
+                assert_eq!(views[0].reference_width, Some(256));
+                assert!(views[0].iou > 0.97, "same render should match: {}", views[0].iou);
+                assert!(iou > 0.97);
+                assert!(min_iou > 0.97);
+                assert_eq!(worst_view, "front");
+                assert!(passed);
+                assert!(needs_calibration, "an image reference has no scale yet");
+                assert!(volumes.is_empty());
+                let size = views[0].model_size_mm.expect("ortho model size");
+                assert!((size.width - 40.0).abs() < 0.5, "{size:?}");
+                assert!((size.height - 20.0).abs() < 0.5, "{size:?}");
+                assert!(views[0].reference_size_mm.is_none());
+                views
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(e.calibrations.get(&1).is_none());
+
+        // Use the silhouette's known 40 mm width as the two calibration points.
+        let bbox = &report[0].reference_bbox;
+        let a = [bbox.x as f64, bbox.y as f64];
+        let b = [(bbox.x + bbox.width) as f64, bbox.y as f64];
+        let calibrated = match e
+            .execute(Command::SetCalibration {
+                doc: 1,
+                reference: Some(reference.clone()),
+                a: Some(a),
+                b: Some(b),
+                length_mm: Some(40.0),
+                pixels: None,
+                mm_per_px: None,
+                clear: false,
+            })
+            .unwrap()
+        {
+            CommandResult::Calibrated { cleared, mm_per_px, image, source, .. } => {
+                assert!(!cleared);
+                let scale = mm_per_px.expect("scale");
+                assert!((scale - 40.0 / bbox.width as f64).abs() < 1e-12);
+                assert_eq!(source.as_deref(), Some("two_points"));
+                let image = image.expect("reference image info");
+                assert_eq!((image.width, image.height), (256, 256));
+                image
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert!(calibrated.width_mm > 0.0);
+
+        let report = match e
+            .execute(Command::CompareRender {
+                doc: 1,
+                reference: Some(reference),
+                view: Some("front".into()),
+                views: None,
+                size: Some(256),
+                regions: None,
+                tolerance: None,
+                min_iou: None,
+                volumetric: None,
+            })
+            .unwrap()
+        {
+            CommandResult::RenderCompared { views, needs_calibration, .. } => {
+                assert!(!needs_calibration);
+                let size = views[0].reference_size_mm.expect("calibrated reference size");
+                assert!((size.width - 40.0).abs() < 0.5, "{size:?}");
+                let delta = views[0].size_delta_mm.expect("delta");
+                assert!(delta.width.abs() < 0.5, "{delta:?}");
+                views
+            },
+            r => panic!("unexpected result {r:?}"),
+        };
+        assert_eq!(report[0].reference_kind, "image");
+
+        // Clearing forgets the scale again.
+        match e
+            .execute(Command::SetCalibration {
+                doc: 1,
+                reference: None,
+                a: None,
+                b: None,
+                length_mm: None,
+                pixels: None,
+                mm_per_px: None,
+                clear: true,
+            })
+            .unwrap()
+        {
+            CommandResult::Calibrated { cleared, mm_per_px, .. } => {
+                assert!(cleared);
+                assert!(mm_per_px.is_none());
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        assert!(e.calibrations.get(&1).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn compare_render_multi_view_and_mesh_volume() {
+        let mut e = engine();
+        let id = match e
+            .execute(Command::AddBox {
+                doc: 1,
+                name: "plate".into(),
+                center: [num(0.0), num(0.0), num(10.0)],
+                size: [num(40.0), num(30.0), num(20.0)],
+                color: None,
+            })
+            .unwrap()
+        {
+            CommandResult::EntityCreated { entity, .. } => entity,
+            r => panic!("unexpected result {r:?}"),
+        };
+        let front = std::env::temp_dir().join("wright_m25_multi_front.png");
+        let top = std::env::temp_dir().join("wright_m25_multi_top.png");
+        render_reference(&mut e, 1, "front", &front);
+        render_reference(&mut e, 1, "top", &top);
+
+        match e
+            .execute(Command::CompareRender {
+                doc: 1,
+                reference: None,
+                view: None,
+                views: Some(vec![
+                    CompareView {
+                        view: "front".into(),
+                        reference: Some(front.to_string_lossy().into_owned()),
+                    },
+                    CompareView {
+                        view: "top".into(),
+                        reference: Some(top.to_string_lossy().into_owned()),
+                    },
+                ]),
+                size: Some(192),
+                regions: Some(4),
+                tolerance: None,
+                min_iou: Some(0.9),
+                volumetric: None,
+            })
+            .unwrap()
+        {
+            CommandResult::RenderCompared { views, iou, min_iou, passed, .. } => {
+                assert_eq!(views.len(), 2);
+                assert!(views.iter().all(|v| v.iou > 0.97));
+                assert!(views[0].regions.len() == 16);
+                assert!(iou >= min_iou);
+                assert!(passed);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // A mesh reference is compared by silhouette *and* volume.
+        let stl = std::env::temp_dir().join("wright_m25_reference.stl");
+        match e
+            .execute(Command::ExportStl {
+                doc: 1,
+                path: stl.to_string_lossy().into_owned(),
+                entities: Some(vec![id]),
+            })
+            .unwrap()
+        {
+            CommandResult::StlExported { tris, .. } => assert_eq!(tris, 12),
+            r => panic!("unexpected result {r:?}"),
+        }
+        match e
+            .execute(Command::CompareRender {
+                doc: 1,
+                reference: Some(stl.to_string_lossy().into_owned()),
+                view: Some("front".into()),
+                views: None,
+                size: Some(192),
+                regions: None,
+                tolerance: None,
+                min_iou: None,
+                volumetric: None,
+            })
+            .unwrap()
+        {
+            CommandResult::RenderCompared { views, volumes, needs_calibration, .. } => {
+                assert_eq!(views[0].reference_kind, "mesh");
+                assert!(!needs_calibration, "a mesh reference carries its own scale");
+                assert_eq!(volumes.len(), 1);
+                let volume = &volumes[0];
+                assert!((volume.model_mm3 - 40.0 * 30.0 * 20.0).abs() < 1.0);
+                assert!((volume.reference_mm3 - volume.model_mm3).abs() < 1.0);
+                assert!((volume.ratio.unwrap() - 1.0).abs() < 1e-6);
+                assert!((volume.reference_size_mm.x - 40.0).abs() < 0.01);
+                let size = views[0].reference_size_mm.expect("mesh reference size");
+                assert!((size.width - 40.0).abs() < 0.5, "{size:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        match e
+            .execute(Command::CompareRender {
+                doc: 1,
+                reference: Some(stl.to_string_lossy().into_owned()),
+                view: Some("front".into()),
+                views: None,
+                size: Some(96),
+                regions: None,
+                tolerance: None,
+                min_iou: None,
+                volumetric: Some(false),
+            })
+            .unwrap()
+        {
+            CommandResult::RenderCompared { volumes, views, .. } => {
+                assert!(volumes.is_empty(), "volumetric:false skips the volume table");
+                assert_eq!(views[0].reference_kind, "mesh");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+        let _ = std::fs::remove_file(&front);
+        let _ = std::fs::remove_file(&top);
+        let _ = std::fs::remove_file(&stl);
+    }
+    #[test]
+    fn compare_render_rejects_blank_references_and_bad_views() {
+        let mut e = engine();
+        e.execute(Command::AddBox {
+            doc: 1,
+            name: "plate".into(),
+            center: vec3(0.0),
+            size: vec3(20.0),
+            color: None,
+        })
+        .unwrap();
+        let empty = std::env::temp_dir().join("wright_m25_empty.png");
+        match e.execute(Command::RenderOffscreen {
+            doc: 1,
+            width: Some(128),
+            height: Some(128),
+            eye: Some([0.0, 0.0, 200.0]),
+            target: Some([0.0, 0.0, 0.0]),
+            up: Some([0.0, 1.0, 0.0]),
+            fov_deg: None,
+            ortho: Some(true),
+            background: None,
+            path: Some(empty.to_string_lossy().into_owned()),
+        }) {
+            Ok(_) => {},
+            Err(_) => panic!("render failed"),
+        }
+        // The render above has the box; make a truly blank one from a second
+        // document instead.
+        e.execute(Command::CreateDocument { name: "empty".into(), doc: None }).unwrap();
+        let blank = std::env::temp_dir().join("wright_m25_blank.png");
+        e.execute(Command::RenderOffscreen {
+            doc: 2,
+            width: Some(64),
+            height: Some(64),
+            eye: None,
+            target: None,
+            up: None,
+            fov_deg: None,
+            ortho: Some(true),
+            background: None,
+            path: Some(blank.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+        let err = e
+            .execute(Command::CompareRender {
+                doc: 1,
+                reference: Some(blank.to_string_lossy().into_owned()),
+                view: Some("front".into()),
+                views: None,
+                size: None,
+                regions: None,
+                tolerance: None,
+                min_iou: None,
+                volumetric: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no foreground"), "{err}");
+
+        let err = e
+            .execute(Command::CompareRender {
+                doc: 1,
+                reference: Some(empty.to_string_lossy().into_owned()),
+                view: Some("diagonal".into()),
+                views: None,
+                size: None,
+                regions: None,
+                tolerance: None,
+                min_iou: None,
+                volumetric: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown view"), "{err}");
+        let _ = std::fs::remove_file(&empty);
+        let _ = std::fs::remove_file(&blank);
+    }
+
     /// The STL test from M4, kept near the render tests for symmetry.
     #[test]
     fn stl_export_writes_valid_binary() {
+
+
         let mut e = engine();
         let id = match e.execute(Command::AddBox {
             doc: 1, name: "cube".into(), center: vec3(0.0), size: vec3(10.0), color: None,

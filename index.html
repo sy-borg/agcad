@@ -272,7 +272,7 @@ footer{padding:0 0 48px}
     <ol class="loop">
       <li><strong>Read</strong>Derive 45 × 45 mm in plan, 15 mm arms, 50 mm tall from the 9 mm scale bar.</li>
       <li><strong>Author</strong>Write a parametric program: <code>span</code>, <code>arm</code>, <code>height</code>, twelve sketch lines, <code>extrude</code>.</li>
-      <li><strong>Check</strong>Call <code>render_offscreen</code> from the drawing's camera and compare silhouettes.</li>
+      <li><strong>Check</strong><code>compare_render</code> scores the model against the drawing's silhouette — IoU, aspect and region mismatch — instead of trusting a glance at the PNG.</li>
       <li><strong>Finish</strong>Round the top and bottom rims with <code>fillet</code> and a normals filter. Leave the sharp plan corners alone.</li>
       <li><strong>Deliver</strong>Export STL and 3MF for the slicer, plus a <code>.wcad</code> that reopens with its knobs.</li>
     </ol>
@@ -408,6 +408,7 @@ footer{padding:0 0 48px}
       <div><h3>Trust loop</h3><p><code>validate</code> checks watertightness, non-manifold edges, self-intersections, volume, thinnest wall and printability; <code>diff_scene</code> compares two revisions by entity signature and names what changed. <code>faces</code>/<code>edges</code> enumerate the groups a selector can address, and <code>validate</code> reports whether each stored reference is still the same feature (<code>moved</code>) or has drifted. All are read-only queries.</p></div>
       <div><h3>Printability preflight</h3><p><code>validate</code> adds overhangs, bridge spans, first-layer contact, minimum feature, shells/floating islands, trapped cavities with drainage suggestions and cups. <code>suggest_orientation</code> scores faces and axes, <code>arrange</code> packs the bed, <code>fit</code> maps clearance classes to modeled holes/shafts, and material presets give the BOM mass and cost.</p></div>
       <div><h3>Measurement and mass</h3><p><code>measure</code> answers exact or closest distance with the closest points, face angles and plane cross-section area, perimeter and loops. <code>mass_properties</code> rolls up surface area, centroid and inertia per solid and assembly, with mass from a material density; <code>clearance</code> classifies a measured gap against the same free/sliding/snug/press fits.</p></div>
+      <div><h3>Visual verification</h3><p><code>compare_render</code> scores a render against a reference PNG or STL/OBJ/3MF: silhouette IoU, aspect delta, pixel bbox, per-region missing/extra material and optional volume. <code>views</code> checks several directions with their own references, and <code>set_calibration</code> turns a known length into millimeters — no scale means the agent asks for one instead of guessing.</p></div>
       <div><h3>Program editing</h3><p><code>patch_program</code> inserts, removes, replaces and reorders steps; its dry run reports surviving and renumbered ids plus a scene diff. <code>suppress</code> flips features for A/B variants, pattern counts are parameter-driven, and <code>batch{atomic:true}</code> never leaves half a model behind.</p></div>
       <div><h3>Shape leverage</h3><p>Patterns, <code>mirror</code>, <code>shell</code>, <code>hole</code>, <code>sweep</code>, <code>loft</code> and <code>thread</code> cover the repetitive printable moves without manual copies.</p></div>
       <div><h3>Interoperability</h3><p><code>import_mesh</code> reads STL/OBJ/3MF, welds and repairs the mesh, and bakes it into an <code>add_mesh</code> step so the <code>.wcad</code> reopens without the source file.</p></div>
@@ -518,12 +519,12 @@ python3 -m venv .venv
           <li><b>M22 Import → parametric</b> <span>DXF/SVG sketches with auto-constraints, section/project, primitives, mesh repair</span></li>
           <li><b>M23 Printability preflight</b> <span>overhangs, bridges, cavities, orientation, bed layout, fits, material mass</span></li>
           <li><b>M24 Measurement and mass</b> <span>distance, clearance, section area, centroid, inertia</span></li>
+          <li><b>M25 Visual verification</b> <span>silhouette IoU, calibration, per-region and multi-view checks</span></li>
         </ul>
       </div>
       <div>
         <h3>Next</h3>
         <ul>
-          <li><b>M25 Visual verification</b> <span><code>compare_render</code>, calibration, multi-view</span></li>
           <li><b>M26 Variants and expressions</b> <span>configurations, units, functions, named datums</span></li>
           <li><b>M27 Sketch and solid vocabulary</b> <span>conics, text, split, thicken, draft, variable fillets</span></li>
           <li><b>M28 Assembly maturity</b> <span>mate solve, DOF, gear mates, exploded views</span></li>
@@ -544,7 +545,7 @@ python3 -m venv .venv
       <div><small>Project</small><span class="big">Wright CAD</span></div>
       <div><small>Licence</small><a href="https://github.com/sy-borg/wright-cad/blob/master/LICENSE">MIT</a></div>
       <div><small>Source</small><a href="https://github.com/sy-borg/wright-cad">sy-borg/wright-cad</a></div>
-      <div><small>Status</small>Milestone 24 · Measurement &amp; mass properties</div>
+      <div><small>Status</small>Milestone 25 · Visual verification</div>
     </div>
   </div>
 </footer>

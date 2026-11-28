@@ -157,10 +157,10 @@ fn edge_ink(background: Rgba) -> [u8; 3] {
     }
 }
 
-fn rasterize(items: &[RenderItem<'_>], camera: Camera, width: u32, height: u32, background: Rgba) -> Vec<u8> {
-    let (w, h) = (width as usize, height as usize);
+/// The shared projection used by both the shaded render and the silhouette
+/// mask, so comparison samples the same pixels the picture shows.
+fn view_projection(items: &[RenderItem<'_>], camera: Camera, width: u32, height: u32) -> Mat4 {
     let aspect = width as f64 / height.max(1) as f64;
-
     let (center, radius) = scene_bounds(items);
     let eye_dist = norm([camera.eye[0] - center[0], camera.eye[1] - center[1], camera.eye[2] - center[2]]);
     let near = ((eye_dist - radius) * 0.5).max(radius * 1e-3);
@@ -175,7 +175,86 @@ fn rasterize(items: &[RenderItem<'_>], camera: Camera, width: u32, height: u32, 
     } else {
         mat4::perspective(camera.fov_y_deg, aspect, near, far)
     };
-    let vp = mat4::mul(&proj, &view);
+    mat4::mul(&proj, &view)
+}
+
+/// Physical size of one screen pixel for an orthographic camera, using the
+/// same framing math as [`view_projection`]. `None` for a perspective camera,
+/// where the scale varies with depth.
+pub fn ortho_mm_per_px(camera: Camera, items: &[RenderItem<'_>], height: u32) -> Option<f64> {
+    if !camera.ortho {
+        return None;
+    }
+    let (center, _) = scene_bounds(items);
+    let eye_dist = norm([camera.eye[0] - center[0], camera.eye[1] - center[1], camera.eye[2] - center[2]]);
+    let half_h = eye_dist * (camera.fov_y_deg.to_radians() * 0.5).tan();
+    Some((2.0 * half_h / height.max(1) as f64).abs())
+}
+
+/// Rasterize a binary silhouette with the shaded renderer's camera and depth
+/// buffer. Used by `compare_render`: an exact mask is more robust than
+/// thresholding the shaded PNG, whose colors the document controls.
+pub fn render_mask(
+    items: &[RenderItem<'_>],
+    camera: Camera,
+    width: u32,
+    height: u32,
+) -> Vec<bool> {
+    let (w, h) = (width as usize, height as usize);
+    let vp = view_projection(items, camera, width, height);
+    let mut mask = vec![false; w * h];
+    let mut depth = vec![f64::INFINITY; w * h];
+
+    for item in items {
+        let world: Vec<[f64; 3]> = item
+            .mesh
+            .positions
+            .iter()
+            .map(|&p| mat4::transform_point(&item.model, p).map(|v| v as f64))
+            .collect();
+
+        for tri in item.mesh.indices.chunks_exact(3) {
+            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            if i0 >= world.len() || i1 >= world.len() || i2 >= world.len() {
+                continue;
+            }
+            let (p0, p1, p2) = (world[i0], world[i1], world[i2]);
+            let n = normalize(cross3(sub(p1, p0), sub(p2, p0)));
+            let view_dir = normalize(sub(camera.eye, p0));
+            if n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 0.5 && dot(n, view_dir) <= 0.0 {
+                continue;
+            }
+            let clip: Vec<[f64; 4]> = [p0, p1, p2].iter().map(|&p| mat4::transform_h(&vp, p)).collect();
+            let clipped = clip_near(&clip);
+            if clipped.len() < 3 {
+                continue;
+            }
+            let screen: Vec<([f64; 2], f64)> = clipped
+                .iter()
+                .map(|c| {
+                    let inv_w = 1.0 / c[3];
+                    (
+                        [
+                            (c[0] * inv_w * 0.5 + 0.5) * width as f64,
+                            (0.5 - c[1] * inv_w * 0.5) * height as f64,
+                        ],
+                        c[2] * inv_w,
+                    )
+                })
+                .collect();
+            for k in 1..screen.len().saturating_sub(1) {
+                raster_tri_mask(
+                    &screen[0], &screen[k], &screen[k + 1], &mut mask, &mut depth, w, h,
+                );
+            }
+        }
+    }
+    mask
+}
+
+fn rasterize(items: &[RenderItem<'_>], camera: Camera, width: u32, height: u32, background: Rgba) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let vp = view_projection(items, camera, width, height);
 
     let mut color = vec![0u8; w * h * 3];
     let bg: [u8; 3] = [0, 1, 2].map(|i| (background[i].clamp(0.0, 1.0) * 255.0) as u8);
@@ -545,8 +624,51 @@ fn raster_tri(
     }
 }
 
-fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
+#[allow(clippy::too_many_arguments)]
+fn raster_tri_mask(
+    v0: &([f64; 2], f64),
+    v1: &([f64; 2], f64),
+    v2: &([f64; 2], f64),
+    mask: &mut [bool],
+    depth: &mut [f64],
+    w: usize,
+    h: usize,
+) {
+    let ((p0, z0), (p1, z1), (p2, z2)) = (*v0, *v1, *v2);
+    let area2 = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+    if area2.abs() < 1e-12 {
+        return;
+    }
+    let inv = 1.0 / area2;
+    let min_x = p0[0].min(p1[0]).min(p2[0]).floor().max(0.0) as usize;
+    let max_x = (p0[0].max(p1[0]).max(p2[0]).ceil().min(w as f64 - 1.0)).max(0.0) as usize;
+    let min_y = p0[1].min(p1[1]).min(p2[1]).floor().max(0.0) as usize;
+    let max_y = (p0[1].max(p1[1]).max(p2[1]).ceil().min(h as f64 - 1.0)).max(0.0) as usize;
+
+    let edge = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
+        (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    };
+    for y in min_y..=max_y {
+        let py = y as f64 + 0.5;
+        for x in min_x..=max_x {
+            let p = [x as f64 + 0.5, py];
+            let b0 = edge(p1, p2, p) * inv;
+            let b1 = edge(p2, p0, p) * inv;
+            let b2 = edge(p0, p1, p) * inv;
+            if b0 < -1e-6 || b1 < -1e-6 || b2 < -1e-6 {
+                continue;
+            }
+            let z = b0 * z0 + b1 * z1 + b2 * z2;
+            let di = y * w + x;
+            if z < depth[di] {
+                depth[di] = z;
+                mask[di] = true;
+            }
+        }
+    }
+}
+
+fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {    let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, width, height);
         enc.set_color(png::ColorType::Rgb);
@@ -678,6 +800,28 @@ mod tests {
         let edges = display_edges(&mesh, &world);
         assert_eq!(edges.len(), 64, "two rims × 32 segments");
         assert!(edges.iter().all(|(a, b)| (a[2] - b[2]).abs() < 1e-6));
+    }
+
+    #[test]
+    fn silhouette_mask_fills_the_box_and_reports_scale() {
+        let mesh = crate::geo::box_mesh([10.0, 10.0, 10.0]);
+        let items = [RenderItem {
+            mesh: &mesh,
+            model: mat4::identity(),
+            color: [0.2, 0.2, 0.2, 1.0],
+        }];
+        let camera = Camera {
+            eye: [0.0, -40.0, 0.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 0.0, 1.0],
+            fov_y_deg: 40.0,
+            ortho: true,
+        };
+        let mask = render_mask(&items, camera, 64, 64);
+        assert!(mask[32 * 64 + 32], "center should be covered");
+        assert!(!mask[0], "corner should be background");
+        let scale = ortho_mm_per_px(camera, &items, 64).unwrap();
+        assert!(scale > 0.0);
     }
 
     #[test]

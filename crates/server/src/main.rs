@@ -225,6 +225,8 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::SaveDocument { doc, .. }
         | Command::GetProgram { doc }
         | Command::RenderOffscreen { doc, .. }
+        | Command::SetCalibration { doc, .. }
+        | Command::CompareRender { doc, .. }
         | Command::PatchProgram { doc, .. }
         | Command::Suppress { doc, .. }
         | Command::CloseDocument { doc } => Some(*doc),

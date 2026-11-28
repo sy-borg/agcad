@@ -2169,3 +2169,83 @@ class Wright:
             target=target, up=up, fov_deg=fov_deg, background=background, path=path,
             ortho=ortho,
         )
+
+    def set_calibration(
+        self,
+        doc: int,
+        reference: str | None = None,
+        two_points: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        a: tuple[float, float] | None = None,
+        b: tuple[float, float] | None = None,
+        length_mm: float | None = None,
+        pixels: float | None = None,
+        mm_per_px: float | None = None,
+        clear: bool = False,
+    ) -> dict[str, Any]:
+        """Bind a reference-image scale to a document (M25).
+
+        Give one known length as either two pixel points plus their real
+        distance (``two_points=((x1, y1), (x2, y2))``, or separate ``a``/``b``
+        with ``length_mm``), a pixel span plus ``length_mm`` (``pixels``), or
+        a direct ``mm_per_px``. Pass ``reference`` to bind the scale to one
+        PNG; ``compare_render`` will then only apply it to that image. The
+        result includes ``mm_per_px`` and, when the reference is readable, the
+        image's pixel and millimeter size. ``clear=True`` forgets the scale.
+
+        Calibration is session state: it is not a program step and is not
+        saved in ``.wcad``.
+        """
+        if two_points is not None:
+            if a is not None or b is not None:
+                raise ValueError("pass two_points or a/b, not both")
+            a, b = two_points
+        return self._request(
+            "set_calibration", doc=doc, reference=reference,
+            a=list(a) if a is not None else None,
+            b=list(b) if b is not None else None,
+            length_mm=length_mm, pixels=pixels, mm_per_px=mm_per_px,
+            clear=clear,
+        )
+
+    def compare_render(
+        self,
+        doc: int,
+        reference: str | None = None,
+        view: str | None = None,
+        views: list[str | dict[str, Any]] | None = None,
+        size: int | None = None,
+        regions: int | None = None,
+        tolerance: float | None = None,
+        min_iou: float | None = None,
+        volumetric: bool | None = None,
+    ) -> dict[str, Any]:
+        """Score a render against a reference image or mesh (M25).
+
+        ``reference`` is a PNG (silhouette extracted from its plain or
+        transparent background) or an STL/OBJ/3MF mesh. ``view`` is one of
+        ``front``/``back``/``left``/``right``/``top``/``bottom``/``iso``;
+        ``views`` compares several views, each optionally with its own
+        ``reference``. The result carries per-view silhouette ``iou``,
+        ``aspect_delta``, pixel bboxes, per-region mismatch and physical
+        ``model_size_mm``/``reference_size_mm`` when the scale is known.
+
+        Image references need ``set_calibration`` for millimeters; without it
+        the result sets ``needs_calibration`` (ask the user for one known
+        dimension instead of guessing). Mesh references also get a volume and
+        world-bbox comparison. Deterministic and read-only.
+        """
+        payload = None
+        if views is not None:
+            payload = []
+            for item in views:
+                if isinstance(item, str):
+                    payload.append({"view": item})
+                elif isinstance(item, dict):
+                    payload.append(dict(item))
+                else:
+                    raise TypeError("each view must be a name or a {'view': ..., 'reference': ...} dict")
+        return self._request(
+            "compare_render", doc=doc, reference=reference, view=view,
+            views=payload, size=size, regions=regions, tolerance=tolerance,
+            min_iou=min_iou, volumetric=volumetric,
+        )

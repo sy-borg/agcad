@@ -127,7 +127,7 @@ Commands, grouped by intent:
   `mass_properties`, `clearance`, `list_materials`, `diff_scene`, `export_stl`,
   `export_3mf`, `export_step`,
   `export_dxf`, `export_svg`, `export_drawing`, `render_offscreen`,
-  `save_document`, `open_document`
+  `compare_render`, `set_calibration`, `save_document`, `open_document`
 - **History**: `undo`, `redo`
 
 `get_program` returns the program, the parameters, the suppressed step indexes
@@ -708,6 +708,67 @@ and replay nothing. `examples/measure_mass.py` walks points, faces, a section,
 mass properties and a clearance fit; `bill_of_materials` keeps its material,
 mass and cost roll-up.
 
+## Visual verification (M25)
+
+The render is for the human; the agent needs a number. `compare_render` scores
+the model's silhouette against a reference and reports where it differs:
+
+```python
+cad.compare_render(doc, reference="reference_front.png", view="front")
+cad.compare_render(doc, views=[
+    {"view": "front", "reference": "front.png"},
+    {"view": "top",   "reference": "top.png"},
+    {"view": "right", "reference": "right.png"},
+])
+```
+
+`reference` is a PNG or an STL/OBJ/3MF mesh. A PNG's silhouette is everything
+that differs from the dominant border color; a transparent PNG uses its alpha
+channel. Both silhouettes are cropped to their own bbox and resampled onto a
+fixed grid, so a different reference resolution or framing does not dominate
+the score. What remains is exactly the part a designer cares about:
+
+- **`iou`** — bbox-normalized silhouette intersection-over-union. The
+  multi-view report has the mean `iou`, the worst view's `min_iou`,
+  `worst_view`, and `passed` against `min_iou` (default 0.85).
+- **`aspect_delta`** — relative difference between the model and reference
+  bbox aspect ratios, the "too tall / too wide" answer.
+- **`model_bbox` / `reference_bbox`** — pixel boxes with
+  x/y/width/height/aspect.
+- **`regions`** — per-region IoU and mismatch on a 3×3 grid (or `regions:N`),
+  with `missing`/`extra` fractions. A hole the silhouette hides shows up in
+  `center` even when the overall IoU is high.
+- **`volumes`** — for a mesh reference, model and reference volume, delta,
+  ratio and world bbox extents.
+
+Views are `front`, `back`, `left`, `right`, `top`, `bottom` and `iso`, all
+orthographic so projected size is meaningful. `size` sets the comparison
+render's edge length (default 512), `regions` the grid, `tolerance` the image
+foreground threshold (default 0.08) and `min_iou` the pass threshold.
+
+**Scale is an input, not a guess.** Image comparisons are scale-free until
+`set_calibration` supplies a known length:
+
+```python
+cad.set_calibration(doc, reference="front.png",
+                    two_points=((120, 40), (420, 40)), length_mm=80.0)
+# or: pixels=300, length_mm=80.0
+# or: mm_per_px=0.23
+```
+
+The result converts to `mm_per_px` and, when the reference is readable, reports
+the image's pixel and physical size. Later comparisons gain
+`model_size_mm`, `reference_size_mm` and `size_delta_mm`. Without a scale
+`compare_render` sets **`needs_calibration`** and a message asking for one
+known dimension — the agent should ask the user, not invent pixels.
+Calibration is session state (not a program step, not saved in `.wcad`) and can
+be cleared with `clear=true`.
+
+`examples/visual_verify.py` builds a reference with a through-hole, compares a
+hole-less candidate, sees the center region's mismatch, calibrates from the
+known base width, drills the hole, checks the improved score, then compares
+front/top/right images and an STL reference with volume.
+
 ## Live preview: MCP agent + viewer, one shared scene
 
 The TCP server runs **one shared document space** for all connections and
@@ -954,23 +1015,24 @@ editing is deliberately not a goal: replay is deterministic and
       material density; `clearance` reports the closest approach between two
       solids with the fit classes M23 uses. Agents stop estimating dimensions
       and fits, and the BOM keeps material, mass and cost.
+- [x] **M25 — Visual verification protocol**: `compare_render` scores the
+      model against a reference PNG or STL/OBJ/3MF by bbox-normalized
+      silhouette IoU, aspect delta, pixel bboxes and per-region
+      missing/extra material, with an optional mesh volume/bbox comparison.
+      `view` asks for one orthographic view and `views` for several, each with
+      its own reference, so an inner feature cannot hide behind one good
+      silhouette. `set_calibration` turns two pixel points or a measured span
+      into `mm_per_px`, and a comparison without a scale reports
+      `needs_calibration` so the agent asks for one known dimension instead of
+      guessing. The picture→part loop is now a deterministic number.
 
 ### Next
 
-The next milestone turns the render into a number an agent can optimize: how
-close is this picture to the reference?
+The next milestone makes one script serve a family: named configurations,
+table-driven variants and a richer, safe expression language.
 
 The remaining milestones, in dependency order:
 
-- [ ] **M25 — Visual verification protocol**:
-      `compare_render{doc, reference, view}` scores a render against a
-      reference image or mesh — silhouette IoU, aspect delta, bbox, per-region
-      mismatch and an optional volumetric comparison — so the picture→part loop
-      is a deterministic number instead of the agent's judgement.
-      `set_calibration` converts a reference scale (two points or a known
-      length) into millimeters, and a "no scale found → ask" convention moves
-      the fragile step out of model cleverness. Multi-view comparison keeps
-      inner features from hiding behind a good silhouette.
 - [ ] **M26 — Variants & expressions**: named configurations (design tables)
       apply parameter overrides and suppression sets, list and diff them, and
       export one variant at a time — families like S/M/L or left/right without
@@ -1009,10 +1071,11 @@ The remaining milestones, in dependency order:
 
 ## Status
 
-Milestone 24 is complete: the engine answers "how far apart?", "how big?",
-"at what angle?" and "what does it weigh?" as precisely as "is this
-watertight?" and "will this print?". The suite is **319 tests** (303 engine + 1
-server + 15 viewer), covering the solver and sketches,
+Milestone 25 is complete: the engine answers "does it match the reference?" as
+a deterministic number — silhouette IoU, aspect, region mismatch and, for a
+mesh reference, volume — instead of leaving the picture→part loop to the
+agent's judgement. The suite is **331 tests** (315 engine + 1 server + 15
+viewer), covering the solver and sketches,
 solids/booleans/edges, persistence and export, picking and script-as-source,
 validation and scene diffs, stable face/edge references, incremental rebuilds,
 program patching and suppression, parametric pattern counts, shape leverage,
@@ -1021,19 +1084,21 @@ parametric (DXF/SVG sketches with inferred constraints, sections,
 projections, primitive discovery and mesh repair), assemblies and drawing
 sheets, printability preflight (overhangs, bridges, bed contact, shells,
 cavities/cups, orientation scoring, bed layout, fit compensation and material
-mass/cost), and measurement (exact/closest distance, face angles, section
-area, mass properties and clearance fits) — including byte-stable saves and
-exports, cold-replay determinism, and self-contained assemblies that reopen
-without their part files.
+mass/cost), measurement (exact/closest distance, face angles, section area,
+mass properties and clearance fits), and visual verification (image/mesh
+reference masks, calibration, multi-view and per-region mismatch) — including
+byte-stable saves and exports, cold-replay determinism, and self-contained
+assemblies that reopen without their part files.
 
 End-to-end printable examples: `examples/printable_bracket.py`,
 `revolve_bushing.py`, `face_sketch.py`, `sketch_complete.py`, `pick.py`,
 `validate.py`, `print_preflight.py`, `measure_mass.py`,
 `stable_references.py`, `program_edit.py`, `shape_leverage.py`,
 `cross_block.py`, `save_load.py`, `incremental_rebuild.py`, `import_mesh.py`,
-`import_parametric.py`, `export_2d.py`, `step_export.py`, and
-`assembly_drawing.py`. Each runs profile → solid → validate → render → export;
-`cross_block.py` is the picture-to-part loop above.
+`import_parametric.py`, `export_2d.py`, `step_export.py`,
+`assembly_drawing.py`, and `visual_verify.py`. Each runs profile → solid →
+validate → render → export; `cross_block.py` is the picture-to-part loop above,
+and `visual_verify.py` turns that loop into a score.
 
 ## What agents say
 
