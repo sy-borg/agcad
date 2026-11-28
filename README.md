@@ -575,6 +575,26 @@ with the [`.wcad`](examples/differential/differential.wcad),
 
 <img src="examples/differential/preview.png" width="820" alt="Three views of the open car differential: a three-quarter view, a side view showing the bevel gear train, and a top view showing the crown ring gear and pinion">
 
+The skeleton watch in `examples/skeleton_watch/` is the mechanism showcase. A
+56-tooth barrel drives a 10-tooth centre pinion, a 48-tooth centre wheel drives
+a 9-tooth third pinion, a 36-tooth third wheel drives a 7-tooth escape pinion,
+and a 15-tooth club-tooth escape wheel waits under a pallet-fork anchor, balance
+wheel and hairspring. The tooth profiles are 20° involute with backlash, the
+centre distances are exact pitch sums, and every mesh is phased so a tooth
+enters a gap. The wheels sit on descending levels above their pinions, so the
+whole going train stays legible from the open bridge side. The `train_deg`
+parameter rolls the barrel and every wheel follows at its own ratio; the
+minute and hour hands keep a 12:1 display ratio. It ships with the
+[`.wcad`](examples/skeleton_watch/skeleton_watch.wcad),
+[STL](examples/skeleton_watch/skeleton_watch.stl),
+[3MF](examples/skeleton_watch/skeleton_watch.3mf),
+[top view](examples/skeleton_watch/top.png),
+[detail view](examples/skeleton_watch/detail.png) and a
+[posed frame](examples/skeleton_watch/in_motion.png);
+`examples/skeleton_watch.py` regenerates them.
+
+<img src="examples/skeleton_watch/iso.png" width="820" alt="Skeleton watch movement: a blue mainspring in a 56-tooth barrel, the visible centre, third and escape wheels with their pinions, a pallet-fork anchor beside a spoked balance wheel and hairspring, all held by polished bridges in an open case">
+
 ## Trust: prove the rebuild and see what changed
 
 Regeneration is only a substitute for feature editing if the agent can prove the

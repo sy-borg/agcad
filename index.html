@@ -393,6 +393,38 @@ footer{padding:0 0 48px}
   </div>
 </section>
 
+<section id="showcase-watch" class="alt">
+  <div class="wrap">
+    <h2>A skeleton watch with the going train left open</h2>
+    <p class="intro">A mechanical watch is a reduction train you can read: the barrel turns slowly, each wheel drives a smaller pinion, and the last pinion carries the escape wheel under a pallet fork. This one leaves the bridges narrow and the dial open so every stage stays visible. The 56-tooth barrel drives a 10-tooth centre pinion, the 48-tooth centre wheel drives a 9-tooth third pinion, the 36-tooth third wheel drives a 7-tooth escape pinion, and a 15-tooth club-tooth escape wheel waits under the anchor. A spoked balance and a flat hairspring sit beside it.</p>
+
+    <ol class="loop">
+      <li><strong>Teeth</strong>Each wheel is a closed 20° involute profile with 0.08 mm of backlash, extruded as one solid; pinions get the same treatment at their own tooth counts.</li>
+      <li><strong>Mesh</strong>Centre distances are the exact pitch sums, and every mesh is phased so a tooth enters a gap. Driver wheels point a tooth at the next pinion; pinions point a gap back.</li>
+      <li><strong>Train</strong>The wheels sit on descending levels above their pinions, so the barrel, centre, third and escape stages all read from the open side. <code>train_deg</code> rolls the barrel through a turn and every wheel follows at its own ratio.</li>
+      <li><strong>Escapement</strong>A steel lever carries two ruby pallets to the escape wheel and a fork to the balance roller; the balance is a three-spoke brass wheel over a blued hairspring.</li>
+      <li><strong>Check</strong>All 66 solids validate watertight, and the meshing pairs plus the anchor/escape pair stay clear through a full barrel revolution.</li>
+    </ol>
+
+    <div class="pair">
+      <figure>
+        <img src="examples/skeleton_watch/iso.png" alt="Skeleton watch movement with a blue mainspring in a 56-tooth barrel, visible centre, third and escape wheels, a pallet-fork anchor, and a spoked balance wheel in an open case" width="1300" height="1100" loading="lazy" decoding="async">
+        <figcaption>The open movement: barrel and mainspring at upper left, the descending train through the centre and third wheels, and the escapement at lower right.</figcaption>
+      </figure>
+      <figure>
+        <img src="examples/skeleton_watch/detail.png" alt="Close view of the pallet-fork anchor with two ruby pallets, the club-tooth escape wheel, and the spoked balance wheel with its blued hairspring" width="1200" height="1000" loading="lazy" decoding="async">
+        <figcaption>Close view: the anchor's ruby pallets meet the escape wheel, while its fork reaches the balance roller below the hairspring.</figcaption>
+      </figure>
+    </div>
+
+    <aside class="note">
+      <p><b>A posed movement, not a running watch.</b> Wright models rigid parts, not joints or spring dynamics. The going train is kinematically correct and can be rolled with one parameter; the anchor and balance are posed at rest, and the parts are separate solids for a viewer or a slicer.</p>
+    </aside>
+
+    <p class="intro" style="margin-top:24px">Files live in <code>examples/skeleton_watch/</code>; run <code>.venv/bin/python examples/skeleton_watch.py</code> to regenerate them. The <a href="examples/skeleton_watch/skeleton_watch.wcad"><code>skeleton_watch.wcad</code></a> carries its recipe and the <code>train_deg</code> knob, the <a href="examples/skeleton_watch/skeleton_watch.stl">STL</a> and <a href="examples/skeleton_watch/skeleton_watch.3mf">3MF</a> are ready for a viewer or slicer, and the <a href="examples/skeleton_watch/top.png">top</a> and <a href="examples/skeleton_watch/in_motion.png">posed</a> renders show the train at rest and in motion.</p>
+  </div>
+</section>
+
 <section id="protocol">
   <div class="wrap">
     <h2>A protocol an agent can learn in a minute</h2>
@@ -510,7 +542,7 @@ python3 -m venv .venv
 # R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a printability preflight (overhangs, bridges, orientation, bed layout, fits and BOM mass), a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, an import → parametric loop (DXF/SVG sketches, section/project, primitive discovery and mesh repair), an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet, and an open car differential with visible bevel gears and a crown ring gear.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a printability preflight (overhangs, bridges, orientation, bed layout, fits and BOM mass), a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, an import → parametric loop (DXF/SVG sketches, section/project, primitive discovery and mesh repair), an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet, an open car differential with visible bevel gears and a crown ring gear, and a skeleton mechanical watch with a visible going train, pallet-fork anchor and balance wheel.</p>
   </div>
 </section>
 
