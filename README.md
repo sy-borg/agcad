@@ -123,8 +123,9 @@ Commands, grouped by intent:
   `add_sketch_curves` (baked sketch step), `section`/`project` (solid → sketch
   geometry), `primitives` (planar faces, cylinders, holes), `repair_mesh`
 - **Queries and I/O**: `get_scene`, `get_program`, `pick`, `faces`, `edges`,
-  `validate`, `suggest_orientation`, `arrange`, `fit`, `list_materials`,
-  `diff_scene`, `export_stl`, `export_3mf`, `export_step`,
+  `validate`, `suggest_orientation`, `arrange`, `fit`, `measure`,
+  `mass_properties`, `clearance`, `list_materials`, `diff_scene`, `export_stl`,
+  `export_3mf`, `export_step`,
   `export_dxf`, `export_svg`, `export_drawing`, `render_offscreen`,
   `save_document`, `open_document`
 - **History**: `undo`, `redo`
@@ -656,6 +657,57 @@ presets (or a custom density/price); it is a program step, so it replays, and
 `bill_of_materials` rows gain materials, mass in grams and cost. `list_materials`
 exposes the presets.
 
+## Measurement and mass properties (M24)
+
+An agent should not read a dimension off a render. `measure` answers the three
+questions directly — "how far apart are these?", "how big is this?", "at what
+angle?" — and carries the evidence (closest points, deltas, section frame) so
+the next command can act on the number.
+
+Targets are points, planar faces or whole solids:
+
+```python
+cad.measure(doc, [0, 0, 0], [60, 0, 0])              # 60.000 mm, delta [60,0,0]
+cad.measure(doc, 4, {"solid": 5})                    # closest surface approach
+cad.measure(doc, {"face": {"entity": 4, "normal": [0, 0, 1]}},
+                 {"face": {"entity": 4, "normal": [1, 0, 0]}})  # 90° plane angle
+cad.measure(doc, part, plane={"plane": "xy", "offset": 3})      # section area
+```
+
+Distance is exact for two points and the true minimum surface-to-surface
+distance for faces and solids (a deterministic triangle BVH, not a vertex
+sample). The report includes `closest` points, `delta`, `direction`,
+`angles_to_axes` for a point pair, `angle_deg`/`normal_angle_deg` for two
+faces, and `plane_distance` for parallel face planes. A face is selected by
+outward normal and/or `near`, exactly like a sketch plane; omit both for the
+largest face.
+
+`plane` asks for the section of the first target. The area integrates the
+oriented cut, so holes subtract and islands add; `perimeter`, `loops`,
+`centroid` and the plane frame come with it. A plane coincident with a face is
+reported as coplanar (not a cut) instead of silently inventing an area.
+
+`mass_properties` returns volume, surface area, volume centroid, bbox and the
+inertia tensor about the centroid per solid, plus a volume-weighted assembly
+roll-up (`centroid`, `center_of_mass`, mass and inertia about the center of
+mass). Density comes from `set_material`, a `material` preset for the report,
+or an explicit `density_g_cm3`; when any selected solid has no density the
+geometry is still reported but mass and inertia are omitted rather than faked.
+Units are mm, mm², mm³, grams and g·mm².
+
+`clearance` is the fit question with geometry as the input: it reports the
+closest approach between two solids, whether they touch or overlap (with the
+boolean intersection volume), and the same `free`/`sliding`/`snug`/`press`
+table `fit` uses. Material hole shrink and `printer_tolerance_mm` are added to
+the required radial clearance, `class` repeats that class's verdict, and
+`nearest_class` names the closest match. A modeled 0.30 mm gap in PLA is
+therefore a sliding fit (0.20 class + 0.05 shrink), not a guess.
+
+These are session commands: they change no state, are not part of the program,
+and replay nothing. `examples/measure_mass.py` walks points, faces, a section,
+mass properties and a clearance fit; `bill_of_materials` keeps its material,
+mass and cost roll-up.
+
 ## Live preview: MCP agent + viewer, one shared scene
 
 The TCP server runs **one shared document space** for all connections and
@@ -895,21 +947,21 @@ editing is deliberately not a goal: replay is deterministic and
       `snug`/`press` to modeled hole/shaft sizes with material hole-shrink and
       elephant-foot compensation, and `set_material` presets turn
       `bill_of_materials` into mass and cost.
-
-### Next
-
-The next milestone closes the measurement gap: an agent should be able to ask
-"how far apart are these?", "how big is this?" and "what does it weigh?"
-
-The remaining milestones, in dependency order:
-
-- [ ] **M24 — Measurement & mass properties**: `measure` answers distance and
+- [x] **M24 — Measurement & mass properties**: `measure` answers distance and
       angle between points, faces and solids, minimum distance (closest
       approach) and cross-section area; `mass_properties` adds surface area,
       centroid and inertia per solid and per assembly, with mass from a
       material density; `clearance` reports the closest approach between two
       solids with the fit classes M23 uses. Agents stop estimating dimensions
-      and fits, and the BOM finishes with material and mass.
+      and fits, and the BOM keeps material, mass and cost.
+
+### Next
+
+The next milestone turns the render into a number an agent can optimize: how
+close is this picture to the reference?
+
+The remaining milestones, in dependency order:
+
 - [ ] **M25 — Visual verification protocol**:
       `compare_render{doc, reference, view}` scores a render against a
       reference image or mesh — silhouette IoU, aspect delta, bbox, per-region
@@ -957,28 +1009,31 @@ The remaining milestones, in dependency order:
 
 ## Status
 
-Milestone 23 is complete: the engine answers "will this print?" as well as
-"is this watertight?". The suite is **309 tests** (293 engine + 1 server + 15
-viewer), covering the solver and sketches,
+Milestone 24 is complete: the engine answers "how far apart?", "how big?",
+"at what angle?" and "what does it weigh?" as precisely as "is this
+watertight?" and "will this print?". The suite is **319 tests** (303 engine + 1
+server + 15 viewer), covering the solver and sketches,
 solids/booleans/edges, persistence and export, picking and script-as-source,
 validation and scene diffs, stable face/edge references, incremental rebuilds,
 program patching and suppression, parametric pattern counts, shape leverage,
 interoperability (STL/OBJ/3MF, DXF/SVG import and export, STEP), import →
 parametric (DXF/SVG sketches with inferred constraints, sections,
 projections, primitive discovery and mesh repair), assemblies and drawing
-sheets, and printability preflight (overhangs, bridges, bed contact, shells,
+sheets, printability preflight (overhangs, bridges, bed contact, shells,
 cavities/cups, orientation scoring, bed layout, fit compensation and material
-mass/cost) — including byte-stable saves and exports, cold-replay determinism,
-and self-contained assemblies that reopen without their part files.
+mass/cost), and measurement (exact/closest distance, face angles, section
+area, mass properties and clearance fits) — including byte-stable saves and
+exports, cold-replay determinism, and self-contained assemblies that reopen
+without their part files.
 
 End-to-end printable examples: `examples/printable_bracket.py`,
 `revolve_bushing.py`, `face_sketch.py`, `sketch_complete.py`, `pick.py`,
-`validate.py`, `print_preflight.py`, `stable_references.py`, `program_edit.py`,
-`shape_leverage.py`, `cross_block.py`, `save_load.py`,
-`incremental_rebuild.py`, `import_mesh.py`, `import_parametric.py`,
-`export_2d.py`, `step_export.py`, and `assembly_drawing.py`. Each runs profile
-→ solid → validate → render → export; `cross_block.py` is the picture-to-part
-loop above.
+`validate.py`, `print_preflight.py`, `measure_mass.py`,
+`stable_references.py`, `program_edit.py`, `shape_leverage.py`,
+`cross_block.py`, `save_load.py`, `incremental_rebuild.py`, `import_mesh.py`,
+`import_parametric.py`, `export_2d.py`, `step_export.py`, and
+`assembly_drawing.py`. Each runs profile → solid → validate → render → export;
+`cross_block.py` is the picture-to-part loop above.
 
 ## What agents say
 

@@ -1018,6 +1018,73 @@ pub enum Command {
         elephant_foot_mm: Option<f64>,
     },
 
+    /// Measure distance, closest approach, angle and cross-section area
+    /// between points, planar faces and solids (M24). `a` and `b` are the
+    /// operands; `plane` asks for the section of `a` with that plane.
+    /// Distance is exact for two points and the minimum surface-to-surface
+    /// approach for faces and solids. Angles use face normals (or the
+    /// direction of a point-to-point segment). A session command: it changes
+    /// no state and is not part of the program.
+    Measure {
+        doc: DocId,
+        a: MeasureTarget,
+        /// Second operand. Omit it when only a cross-section is requested.
+        #[serde(default)]
+        b: Option<MeasureTarget>,
+        /// Section plane for `a` (default: no section). Datum-plane offsets
+        /// may be expressions and are resolved against the document.
+        #[serde(default)]
+        plane: Option<WorkPlane>,
+    },
+
+    /// Surface area, volume, centroid and inertia (M24) for selected solids
+    /// and their assembly roll-up. Mass and inertia need a density: the
+    /// document's `set_material` assignment, a `material` override for this
+    /// report, or an explicit `density_g_cm3`. A session command: it changes
+    /// no state and is not part of the program.
+    MassProperties {
+        doc: DocId,
+        /// Solids to measure. Omit for every solid in the document.
+        #[serde(default)]
+        entities: Option<Vec<EntityId>>,
+        /// Material preset (or custom name with `density_g_cm3`) applied to
+        /// every selected solid for this report only.
+        #[serde(default)]
+        material: Option<String>,
+        /// Density override in g/cm³, applied to every selected solid. Wins
+        /// over `material` and per-entity assignments.
+        #[serde(default)]
+        density_g_cm3: Option<f64>,
+    },
+
+    /// Closest approach between two solids, classified against the M23 fit
+    /// classes (M24). The measured minimum surface distance is the radial
+    /// clearance; each class is compared against its recommended radial
+    /// clearance plus optional printer tolerance and material hole shrink.
+    /// A session command: it changes no state and is not part of the program.
+    Clearance {
+        doc: DocId,
+        a: EntityId,
+        b: EntityId,
+        /// Requested fit class. Omit to report the full class table and the
+        /// nearest class only.
+        #[serde(default)]
+        class: Option<FitClass>,
+        /// Material preset whose hole shrink is added to the requirement.
+        #[serde(default)]
+        material: Option<String>,
+        /// Extra per-side machine tolerance (mm, default 0).
+        #[serde(default)]
+        printer_tolerance_mm: Option<f64>,
+        /// Override the material's hole-shrink allowance (mm per side).
+        #[serde(default)]
+        hole_shrink_mm: Option<f64>,
+        /// Distance at or below which the solids count as touching
+        /// (mm, default 1e-6).
+        #[serde(default)]
+        tolerance: Option<f64>,
+    },
+
     /// List the built-in print material presets (density and price), the
     /// vocabulary `set_material` accepts. A session command.
     ListMaterials,
@@ -2204,6 +2271,258 @@ pub struct FitReport {
     pub notes: Vec<String>,
 }
 
+/// One operand of [`Command::Measure`] (M24).
+///
+/// Wire forms are internally tagged on `kind`:
+///
+/// ```json
+/// {"kind": "point", "point": [0, 0, 0]}
+/// {"kind": "face", "entity": 1, "normal": [0, 0, 1], "near": [0, 0, 10]}
+/// {"kind": "solid", "entity": 1}
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MeasureTarget {
+    /// A world-space point.
+    Point { point: Vec3 },
+    /// A planar face of a solid. Without `normal`, the largest face is used;
+    /// `near` chooses between parallel faces, exactly like a sketch plane.
+    Face {
+        entity: EntityId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        normal: Option<Vec3>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        near: Option<Vec3>,
+        /// Angular tolerance for `normal` in degrees (default 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle_tol_deg: Option<f64>,
+    },
+    /// A whole solid, measured by its surface.
+    Solid { entity: EntityId },
+}
+
+/// What a [`MeasureTarget`] resolved to, for the report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeasureTargetInfo {
+    /// `point`, `face` or `solid`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<EntityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Representative world-space point: the point itself, the face center,
+    /// or the solid's volume centroid.
+    pub point: Vec3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<Vec3>,
+    /// Planar face area (mm²).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area: Option<f64>,
+    /// Solid volume (mm³).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<Bbox>,
+}
+
+/// The closest points between two measured targets (M24).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClosestApproach {
+    /// Point on target `a`.
+    pub a: Vec3,
+    /// Point on target `b`.
+    pub b: Vec3,
+    pub distance: f64,
+    /// Unit direction from `a` to `b`; omitted at zero distance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Vec3>,
+}
+
+/// A plane cross-section of a solid (M24).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SectionReport {
+    /// Resolved plane frame: origin, outward normal and in-plane X.
+    pub origin: Vec3,
+    pub normal: Vec3,
+    pub x_axis: Vec3,
+    /// Section area (mm²), holes excluded by the signed cut orientation.
+    pub area: f64,
+    /// Total cut boundary length (mm), holes included.
+    pub perimeter: f64,
+    /// Closed loops in the cut.
+    pub loops: usize,
+    /// Oriented cut segments before loop chaining.
+    pub segments: usize,
+    /// Area centroid in world space. Omitted for a zero-area cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centroid: Option<Vec3>,
+    /// Bounds of the cut geometry in world space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<Bbox>,
+    /// Triangles lying exactly in the plane. A plane coincident with a face
+    /// is not a cut and contributes no area.
+    pub coplanar_tris: usize,
+}
+
+/// Result of [`Command::Measure`] (M24). The report answers everything the
+/// target pair makes meaningful, so a caller does not need a separate
+/// "distance" or "angle" mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeasureReport {
+    pub doc: DocId,
+    pub a: MeasureTargetInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<MeasureTargetInfo>,
+    /// Minimum distance (mm): exact for points, closest approach for faces
+    /// and solids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f64>,
+    /// `b.point - a.point` between the representative points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closest: Option<ClosestApproach>,
+    /// Distance between the two face planes when both targets are faces with
+    /// parallel normals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane_distance: Option<f64>,
+    /// Acute angle between two face planes (0–90°).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle_deg: Option<f64>,
+    /// Angle between the two face normals (0–180°).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_angle_deg: Option<f64>,
+    /// Unit direction from `a` to `b` for point targets and closest
+    /// approaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Vec3>,
+    /// For two points: the segment direction's angle from world +X, +Y and +Z
+    /// in degrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angles_to_axes: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<SectionReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Mass properties of one solid (M24). Volume, area, centroid and bbox are
+/// geometry only; mass and inertia are present when a density is known.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolidMassProperties {
+    pub entity: EntityId,
+    pub name: String,
+    pub kind: String,
+    /// Positive volume in mm³.
+    pub volume: f64,
+    /// World-space surface area in mm².
+    pub surface_area: f64,
+    /// Volume centroid in world space.
+    pub centroid: Vec3,
+    pub bbox: Bbox,
+    pub tris: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density_g_cm3: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mass_g: Option<f64>,
+    /// Inertia tensor about the centroid in world axes, in g·mm². Present
+    /// when the density is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inertia: Option<[[f64; 3]; 3]>,
+}
+
+/// Assembly roll-up of [`SolidMassProperties`] (M24). `centroid` is
+/// volume-weighted; `center_of_mass` and `inertia` need a density for every
+/// selected solid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssemblyMassProperties {
+    pub solids: usize,
+    pub volume: f64,
+    pub surface_area: f64,
+    pub bbox: Bbox,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centroid: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center_of_mass: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mass_g: Option<f64>,
+    /// Inertia tensor about `center_of_mass` in world axes, in g·mm².
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inertia: Option<[[f64; 3]; 3]>,
+    /// Distinct materials among the selected solids, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<String>,
+    /// Solids with no density material (mass and inertia are then omitted).
+    pub unassigned: usize,
+}
+
+/// Result of [`Command::MassProperties`] (M24).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MassPropertiesReport {
+    pub doc: DocId,
+    pub solids: Vec<SolidMassProperties>,
+    pub assembly: AssemblyMassProperties,
+    /// The material override used for this report, when one was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    /// The density override used for this report, when one was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density_g_cm3: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// One fit class compared against a measured clearance (M24).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClearanceClassInfo {
+    pub class: FitClass,
+    /// Radial clearance to model, including printer tolerance and material
+    /// hole shrink (mm).
+    pub required_radial_mm: f64,
+    /// Measured minimum surface distance (mm).
+    pub measured_radial_mm: f64,
+    /// `measured - required`; positive means looser than the class.
+    pub delta_mm: f64,
+    pub fits: bool,
+    pub description: String,
+}
+
+/// Result of [`Command::Clearance`] (M24).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClearanceReport {
+    pub doc: DocId,
+    pub a: EntityId,
+    pub a_name: String,
+    pub b: EntityId,
+    pub b_name: String,
+    /// Minimum surface-to-surface distance (mm); 0 when they touch or
+    /// intersect.
+    pub distance: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closest: Option<ClosestApproach>,
+    /// Distance is at or below the requested contact tolerance.
+    pub contact: bool,
+    /// The solids overlap volumetrically.
+    pub interference: bool,
+    /// Boolean-kernel intersection volume (mm³); 0 when separate or when the
+    /// operands cannot be intersected reliably.
+    pub overlap_volume: f64,
+    /// The requested class, repeated from `classes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<ClearanceClassInfo>,
+    /// Class with the smallest absolute delta.
+    pub nearest_class: FitClass,
+    pub classes: Vec<ClearanceClassInfo>,
+    pub material: Option<String>,
+    pub printer_tolerance_mm: f64,
+    pub hole_shrink_mm: f64,
+    pub elephant_foot_mm: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
 /// A print material preset or a `set_material` value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaterialSpec {
@@ -2900,6 +3219,12 @@ pub enum CommandResult {
     },
     /// A fit calculation (see [`Command::Fit`]).
     FitComputed { doc: DocId, report: FitReport },
+    /// A measurement (see [`Command::Measure`]).
+    Measured(MeasureReport),
+    /// Mass properties (see [`Command::MassProperties`]).
+    MassPropertiesMeasured(MassPropertiesReport),
+    /// Closest approach between two solids (see [`Command::Clearance`]).
+    ClearanceMeasured(ClearanceReport),
     /// Material presets (see [`Command::ListMaterials`]).
     Materials {
         materials: Vec<MaterialSpec>,

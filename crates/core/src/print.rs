@@ -830,7 +830,7 @@ pub fn resolve_material(
     })
 }
 
-fn print_profile(material: Option<&str>) -> crate::Result<(String, f64, f64)> {
+pub(crate) fn print_profile(material: Option<&str>) -> crate::Result<(String, f64, f64)> {
     let key = material.unwrap_or("pla").trim().to_ascii_lowercase();
     let (shrink, elephant) = match key.as_str() {
         "pla" => (0.05, 0.20),

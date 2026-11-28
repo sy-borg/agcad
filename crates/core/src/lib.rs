@@ -28,6 +28,7 @@ pub mod hole;
 pub mod import2d;
 pub mod loft;
 pub mod mat4;
+pub mod measure;
 pub mod mesh_import;
 pub mod pattern;
 pub mod pick;
@@ -1183,6 +1184,9 @@ fn set_doc(command: &mut Command, doc: DocId) {
         | Command::SuggestOrientation { doc: d, .. }
         | Command::Arrange { doc: d, .. }
         | Command::Fit { doc: d, .. }
+        | Command::Measure { doc: d, .. }
+        | Command::MassProperties { doc: d, .. }
+        | Command::Clearance { doc: d, .. }
         | Command::DiffScene { doc: d, .. }
         | Command::GetProgram { doc: d }
         | Command::ExportStl { doc: d, .. }
@@ -2160,6 +2164,55 @@ impl Engine {
                     *elephant_foot_mm,
                 )?;
                 Ok(CommandResult::FitComputed { doc: *doc, report })
+            },
+
+            Command::Measure { doc, a, b, plane } => {
+                let d = self.doc(*doc)?;
+                let frame = plane
+                    .as_ref()
+                    .map(|p| resolve_work_plane(d, Some(p)))
+                    .transpose()?;
+                measure::measure(d, *doc, a, b.as_ref(), frame.as_ref())
+            },
+
+            Command::MassProperties {
+                doc,
+                entities,
+                material,
+                density_g_cm3,
+            } => {
+                let d = self.doc(*doc)?;
+                measure::mass_properties(
+                    d,
+                    *doc,
+                    entities.as_deref(),
+                    material.as_deref(),
+                    *density_g_cm3,
+                )
+            },
+
+            Command::Clearance {
+                doc,
+                a,
+                b,
+                class,
+                material,
+                printer_tolerance_mm,
+                hole_shrink_mm,
+                tolerance,
+            } => {
+                let d = self.doc(*doc)?;
+                measure::clearance(
+                    d,
+                    *doc,
+                    *a,
+                    *b,
+                    *class,
+                    material.as_deref(),
+                    *printer_tolerance_mm,
+                    *hole_shrink_mm,
+                    *tolerance,
+                )
             },
 
             Command::DiffScene { doc, against, path } => {
@@ -3450,6 +3503,9 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::SuggestOrientation { doc, .. }
         | Command::Arrange { doc, .. }
         | Command::Fit { doc, .. }
+        | Command::Measure { doc, .. }
+        | Command::MassProperties { doc, .. }
+        | Command::Clearance { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::ExportStl { doc, .. }
         | Command::Export3mf { doc, .. }
@@ -5656,7 +5712,7 @@ fn add_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wright_protocol::{Hand, SweepPath};
+    use wright_protocol::{Hand, MeasureTarget, SweepPath};
 
     fn engine() -> Engine {
         let mut e = Engine::new();
@@ -9223,6 +9279,260 @@ mod tests {
                 assert!((report.hole_shrink_mm - 0.05).abs() < 1e-9);
                 assert!((report.modeled_hole_mm.unwrap() - 10.9).abs() < 1e-9);
                 assert!((report.elephant_foot_mm - 0.20).abs() < 1e-9);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn measure_answers_points_faces_solids_and_sections() {
+        let mut e = engine();
+        let cube = add_box(&mut e, [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+
+        match e
+            .execute(Command::Measure {
+                doc: 1,
+                a: MeasureTarget::Point { point: [-20.0, 0.0, 0.0] },
+                b: Some(MeasureTarget::Point { point: [-10.0, 0.0, 0.0] }),
+                plane: None,
+            })
+            .unwrap()
+        {
+            CommandResult::Measured(report) => {
+                assert!((report.distance.unwrap() - 10.0).abs() < 1e-9);
+                assert_eq!(report.delta, Some([10.0, 0.0, 0.0]));
+                assert_eq!(report.angles_to_axes, Some([0.0, 90.0, 90.0]));
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Point to the solid's nearest face: the box is 10 mm wide, so a point
+        // at x=20 is 15 mm from its +X surface.
+        match e
+            .execute(Command::Measure {
+                doc: 1,
+                a: MeasureTarget::Point { point: [20.0, 0.0, 0.0] },
+                b: Some(MeasureTarget::Solid { entity: cube }),
+                plane: None,
+            })
+            .unwrap()
+        {
+            CommandResult::Measured(report) => {
+                assert!((report.distance.unwrap() - 15.0).abs() < 1e-9);
+                let closest = report.closest.unwrap();
+                assert!((closest.b[0] - 5.0).abs() < 1e-9, "{closest:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // The +X and +Z faces of a box are perpendicular.
+        let face = |normal: [f64; 3]| MeasureTarget::Face {
+            entity: cube,
+            normal: Some(normal),
+            near: None,
+            angle_tol_deg: None,
+        };
+        match e
+            .execute(Command::Measure {
+                doc: 1,
+                a: face([1.0, 0.0, 0.0]),
+                b: Some(face([0.0, 0.0, 1.0])),
+                plane: None,
+            })
+            .unwrap()
+        {
+            CommandResult::Measured(report) => {
+                assert!((report.angle_deg.unwrap() - 90.0).abs() < 1e-9);
+                assert!((report.normal_angle_deg.unwrap() - 90.0).abs() < 1e-9);
+                assert!((report.distance.unwrap() - 0.0).abs() < 1e-9);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // The XY section through the center of a 10 mm cube is 100 mm².
+        match e
+            .execute(Command::Measure {
+                doc: 1,
+                a: MeasureTarget::Solid { entity: cube },
+                b: None,
+                plane: Some(wright_protocol::WorkPlane::Datum {
+                    plane: wright_protocol::DatumPlane::Xy,
+                    offset: None,
+                }),
+            })
+            .unwrap()
+        {
+            CommandResult::Measured(report) => {
+                let section = report.section.unwrap();
+                assert!((section.area - 100.0).abs() < 1e-9, "{section:?}");
+                assert!((section.perimeter - 40.0).abs() < 1e-9);
+                assert_eq!(section.loops, 1);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn mass_properties_report_area_centroid_mass_and_inertia() {
+        let mut e = engine();
+        let cube = add_box(&mut e, [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        match e
+            .execute(Command::MassProperties {
+                doc: 1,
+                entities: None,
+                material: Some("pla".into()),
+                density_g_cm3: None,
+            })
+            .unwrap()
+        {
+            CommandResult::MassPropertiesMeasured(report) => {
+                assert_eq!(report.solids.len(), 1);
+                let solid = &report.solids[0];
+                assert_eq!(solid.entity, cube);
+                assert!((solid.volume - 1000.0).abs() < 1e-9);
+                assert!((solid.surface_area - 600.0).abs() < 1e-9);
+                assert_eq!(solid.centroid, [0.0, 0.0, 0.0]);
+                assert!((solid.mass_g.unwrap() - 1.24).abs() < 1e-9);
+                let inertia = solid.inertia.unwrap();
+                for i in 0..3 {
+                    let want = 1.24 * 100.0 / 6.0;
+                    assert!((inertia[i][i] - want).abs() < 1e-9, "{inertia:?}");
+                }
+                assert!((report.assembly.volume - 1000.0).abs() < 1e-9);
+                assert!((report.assembly.mass_g.unwrap() - 1.24).abs() < 1e-9);
+                assert_eq!(report.assembly.materials, vec!["pla".to_string()]);
+                assert_eq!(report.assembly.unassigned, 0);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Without a density the geometry is still there; mass and inertia are
+        // honestly absent instead of zero.
+        match e
+            .execute(Command::MassProperties {
+                doc: 1,
+                entities: Some(vec![cube]),
+                material: None,
+                density_g_cm3: None,
+            })
+            .unwrap()
+        {
+            CommandResult::MassPropertiesMeasured(report) => {
+                assert!(report.solids[0].mass_g.is_none());
+                assert!(report.solids[0].inertia.is_none());
+                assert!(report.assembly.mass_g.is_none());
+                assert_eq!(report.assembly.unassigned, 1);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Two identical cubes at x=0 and x=20: the assembly centroid is the
+        // midpoint, and the parallel-axis term moves the inertia outward.
+        add_box(&mut e, [20.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        match e
+            .execute(Command::MassProperties {
+                doc: 1,
+                entities: None,
+                material: Some("pla".into()),
+                density_g_cm3: None,
+            })
+            .unwrap()
+        {
+            CommandResult::MassPropertiesMeasured(report) => {
+                assert_eq!(report.solids.len(), 2);
+                assert!((report.assembly.volume - 2000.0).abs() < 1e-9);
+                assert!((report.assembly.mass_g.unwrap() - 2.48).abs() < 1e-9);
+                let centroid = report.assembly.centroid.unwrap();
+                assert!((centroid[0] - 10.0).abs() < 1e-9, "{centroid:?}");
+                let com = report.assembly.center_of_mass.unwrap();
+                assert!((com[0] - 10.0).abs() < 1e-9, "{com:?}");
+                let inertia = report.assembly.inertia.unwrap();
+                let own = 1.24 * 100.0 / 6.0;
+                let shifted = own + 1.24 * 100.0;
+                assert!((inertia[0][0] - 2.0 * own).abs() < 1e-9, "{inertia:?}");
+                assert!((inertia[1][1] - 2.0 * shifted).abs() < 1e-9, "{inertia:?}");
+                assert!((inertia[2][2] - 2.0 * shifted).abs() < 1e-9, "{inertia:?}");
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // A set_material assignment supplies the density without an override.
+        e.execute(Command::SetMaterial {
+            doc: 1,
+            entity: cube,
+            material: "petg".into(),
+            density_g_cm3: None,
+            cost_per_kg: None,
+        })
+        .unwrap();
+        match e
+            .execute(Command::MassProperties {
+                doc: 1,
+                entities: Some(vec![cube]),
+                material: None,
+                density_g_cm3: None,
+            })
+            .unwrap()
+        {
+            CommandResult::MassPropertiesMeasured(report) => {
+                assert_eq!(report.solids[0].material.as_deref(), Some("petg"));
+                assert!((report.solids[0].mass_g.unwrap() - 1.27).abs() < 1e-9);
+                assert_eq!(report.assembly.materials, vec!["petg".to_string()]);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+    }
+
+    #[test]
+    fn clearance_reports_the_gap_and_fit_classes() {
+        let mut e = engine();
+        let a = add_box(&mut e, [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        let b = add_box(&mut e, [13.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        match e
+            .execute(Command::Clearance {
+                doc: 1,
+                a,
+                b,
+                class: Some(wright_protocol::FitClass::Sliding),
+                material: Some("petg".into()),
+                printer_tolerance_mm: Some(0.0),
+                hole_shrink_mm: None,
+                tolerance: None,
+            })
+            .unwrap()
+        {
+            CommandResult::ClearanceMeasured(report) => {
+                assert!((report.distance - 3.0).abs() < 1e-9, "{report:?}");
+                assert!(!report.contact && !report.interference);
+                let fit = report.fit.unwrap();
+                assert!((fit.required_radial_mm - 0.25).abs() < 1e-9);
+                assert!((fit.delta_mm - 2.75).abs() < 1e-9);
+                assert!(fit.fits);
+                assert_eq!(report.classes.len(), 4);
+            },
+            r => panic!("unexpected result {r:?}"),
+        }
+
+        // Overlapping boxes touch at distance 0 and report the intersection
+        // volume, so a clearance query cannot call an interference fit "fine".
+        let c = add_box(&mut e, [8.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        match e
+            .execute(Command::Clearance {
+                doc: 1,
+                a,
+                b: c,
+                class: None,
+                material: None,
+                printer_tolerance_mm: None,
+                hole_shrink_mm: None,
+                tolerance: None,
+            })
+            .unwrap()
+        {
+            CommandResult::ClearanceMeasured(report) => {
+                assert!(report.distance.abs() < 1e-9);
+                assert!(report.contact && report.interference);
+                assert!((report.overlap_volume - 200.0).abs() < 1e-6, "{report:?}");
             },
             r => panic!("unexpected result {r:?}"),
         }

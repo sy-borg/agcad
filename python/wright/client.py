@@ -92,6 +92,44 @@ def _work_plane_payload(plane: Any) -> dict | None:
     )
 
 
+def _measure_target_payload(value: Any) -> dict:
+    """Normalize a measurement target into the wire ``MeasureTarget``.
+
+    Accepted forms:
+      * an ``int`` → a solid entity id;
+      * ``[x, y, z]`` → a world-space point;
+      * ``{"point": [x, y, z]}`` → a point;
+      * ``{"solid": id}`` or ``{"entity": id}`` → a whole solid;
+      * ``{"face": {"entity": id, "normal": [...], "near": [...]}}`` → a face;
+      * a dict with ``entity`` plus ``normal``/``near`` → a face;
+      * an already-normalized ``{"kind": "point"|"face"|"solid", ...}``.
+    """
+    if isinstance(value, int):
+        return {"kind": "solid", "entity": value}
+    if isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise ValueError("a point target must be [x, y, z]")
+        return {"kind": "point", "point": list(value)}
+    if not isinstance(value, dict):
+        raise TypeError("measure target must be an int, [x, y, z], or a dict")
+    if "kind" in value:
+        return dict(value)
+    if "point" in value:
+        return {"kind": "point", "point": list(value["point"])}
+    if "face" in value:
+        return {"kind": "face", **value["face"]}
+    if "solid" in value:
+        return {"kind": "solid", "entity": value["solid"]}
+    if "entity" in value:
+        spec = dict(value)
+        if "normal" in spec or "near" in spec or "angle_tol_deg" in spec:
+            return {"kind": "face", **spec}
+        return {"kind": "solid", "entity": spec["entity"]}
+    raise ValueError(
+        "measure target dict must contain 'point', 'solid', 'face' or 'kind'"
+    )
+
+
 def _sweep_path_payload(path: Any) -> dict:
     """Normalize a sweep path into the wire form.
 
@@ -1727,6 +1765,80 @@ class Wright:
             printer_tolerance_mm=printer_tolerance_mm,
             hole_shrink_mm=hole_shrink_mm,
             elephant_foot_mm=elephant_foot_mm,
+        )
+
+    def measure(
+        self,
+        doc: int,
+        a: Any,
+        b: Any = None,
+        plane: Any = None,
+    ) -> dict[str, Any]:
+        """Measure distance, closest approach, angle and cross-section area.
+
+        Targets are an entity id, ``[x, y, z]``, ``{"point": [...]}``,
+        ``{"solid": id}``, ``{"face": {"entity": id, "normal": [...]}}`` or
+        the wire ``{"kind": ...}`` form. Distance is exact for two points and
+        the minimum surface-to-surface approach for faces and solids. Angles
+        come from face normals (or a point-pair direction's angles to the
+        axes). Pass ``plane`` (``"xy"``, ``{"plane": "xy", "offset": 5}``,
+        ``{"origin": [...], "normal": [...]}``) to section ``a`` and get its
+        area, perimeter and loops. A read-only session query.
+        """
+        target_b = _measure_target_payload(b) if b is not None else None
+        return self._request(
+            "measure",
+            doc=doc,
+            a=_measure_target_payload(a),
+            b=target_b,
+            plane=_work_plane_payload(plane),
+        )
+
+    def mass_properties(
+        self,
+        doc: int,
+        entities: list[int] | None = None,
+        material: str | None = None,
+        density_g_cm3: float | None = None,
+    ) -> dict[str, Any]:
+        """Volume, surface area, centroid and inertia per solid and assembly.
+
+        Density comes from ``set_material``, from ``material`` (a preset such
+        as ``"pla"``), or from an explicit ``density_g_cm3``. Without a
+        density the geometry is still reported but mass and inertia are
+        omitted. ``entities`` restricts the measurement. A read-only session
+        query.
+        """
+        return self._request(
+            "mass_properties", doc=doc, entities=entities,
+            material=material, density_g_cm3=density_g_cm3,
+        )
+
+    def clearance(
+        self,
+        doc: int,
+        a: int,
+        b: int,
+        class_: str | None = None,
+        material: str | None = None,
+        printer_tolerance_mm: float | None = None,
+        hole_shrink_mm: float | None = None,
+        tolerance: float | None = None,
+    ) -> dict[str, Any]:
+        """Closest approach between two solids, classified as an M23 fit.
+
+        Returns the minimum surface distance and points, whether they touch
+        or overlap (with the intersection volume), the full free/sliding/
+        snug/press table, and the class nearest the measured gap. Give
+        ``class_`` to repeat that class's verdict in ``fit``. Material hole
+        shrink and ``printer_tolerance_mm`` are added to the required radial
+        clearance exactly as :meth:`fit` does. A read-only session query.
+        """
+        return self._request(
+            "clearance", doc=doc, a=a, b=b,
+            **{"class": class_}, material=material,
+            printer_tolerance_mm=printer_tolerance_mm,
+            hole_shrink_mm=hole_shrink_mm, tolerance=tolerance,
         )
 
     def diff_scene(

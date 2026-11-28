@@ -212,6 +212,9 @@ fn doc_of(command: &Command) -> Option<DocId> {
         | Command::SuggestOrientation { doc, .. }
         | Command::Arrange { doc, .. }
         | Command::Fit { doc, .. }
+        | Command::Measure { doc, .. }
+        | Command::MassProperties { doc, .. }
+        | Command::Clearance { doc, .. }
         | Command::DiffScene { doc, .. }
         | Command::GetParameters { doc }
         | Command::ExportStl { doc, .. }

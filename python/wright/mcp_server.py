@@ -90,6 +90,13 @@ build orientations from planar faces, arrange shelf-packs solids onto the bed,
 set_material assigns a preset/custom material, and fit turns a nominal shaft or
 hole into a modeled size (free/sliding/snug/press) with hole-shrink and
 elephant-foot compensation.
+Measurement is a first-class answer, not a screenshot estimate: measure takes
+two points/faces/solids and returns the exact or closest distance with the
+closest points, angles from face normals, and (with plane=) the cross-section
+area/perimeter/loops; mass_properties gives surface area, centroid and inertia
+per solid and for the assembly, with mass from a material density; clearance
+is the closest approach between two solids classified against the same
+free/sliding/snug/press fits. Read-only, so agents can ask before they cut.
 Import → parametric: import_dxf/import_svg bring a drawing in as a
 constraint-solved sketch, section/project cut or project a solid into sketch
 geometry, primitives lists planar faces, cylinder axes/radii and hole
@@ -362,6 +369,25 @@ fit{doc,class:"free"|"sliding"|"snug"|"press",nominal_mm?,hole_mm?,material?,
   printer_tolerance_mm?,hole_shrink_mm?,elephant_foot_mm?} (convert a nominal
   shaft or hole into a modeled hole/shaft with clearance, material hole-shrink
   and an elephant-foot recommendation; session query),
+measure{doc,a,b?,plane?} (session query: distance, closest approach, angle and
+  cross-section area. a/b are {"kind":"point","point":[x,y,z]},
+  {"kind":"solid","entity":id}, or {"kind":"face","entity":id,normal?,near?,
+  angle_tol_deg?}. Distance is exact for points and the minimum
+  surface-to-surface approach for faces/solids, with closest points; face
+  normals give angle_deg (acute plane angle) and normal_angle_deg; two points
+  give angles_to_axes. Pass plane (same datum/custom form as section) to
+  section `a`: area (holes excluded), perimeter, loops, centroid and bbox),
+mass_properties{doc,entities?,material?,density_g_cm3?} (session query: per
+  solid volume, surface_area, centroid, bbox and inertia about the centroid,
+  plus the assembly roll-up (volume centroid, center_of_mass, mass and inertia
+  about the center of mass). Density comes from set_material, the material
+  preset, or density_g_cm3; without one, mass/inertia are omitted rather than
+  invented),
+clearance{doc,a,b,class?,material?,printer_tolerance_mm?,hole_shrink_mm?,
+  tolerance?=1e-6} (session query: closest approach between two solids, contact
+  and interference with overlap volume, and the free/sliding/snug/press table
+  with required vs measured radial clearance. Material hole shrink and printer
+  tolerance are added like fit; class repeats that verdict in `fit`),
 diff_scene{doc,against?:doc_id,path?:".wcad"} (compare two revisions by
   entity signature; pass exactly one baseline: another open document or a
   saved file, which is replayed read-only and not added to the document list.
