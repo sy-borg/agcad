@@ -564,6 +564,17 @@ from a plate and a post, the
 
 <img src="examples/assembly_drawing/assembly_drawing.svg" width="820" alt="Dimensioned front, top, right and isometric views of the two-post clamp with balloons and a BOM">
 
+The open differential example in `examples/differential/` is the gear-train
+showcase: 14-tooth bevel side gears, 8-tooth spider gears, a 36-tooth crown
+ring gear and a 12-tooth pinion, left visible by an open carrier cage. It ships
+with the [`.wcad`](examples/differential/differential.wcad),
+[STL](examples/differential/differential.stl),
+[3MF](examples/differential/differential.3mf) and
+[three-view render](examples/differential/preview.png);
+`examples/differential.py` regenerates them.
+
+<img src="examples/differential/preview.png" width="820" alt="Three views of the open car differential: a three-quarter view, a side view showing the bevel gear train, and a top view showing the crown ring gear and pinion">
+
 ## Trust: prove the rebuild and see what changed
 
 Regeneration is only a substitute for feature editing if the agent can prove the
@@ -1098,7 +1109,10 @@ End-to-end printable examples: `examples/printable_bracket.py`,
 `import_parametric.py`, `export_2d.py`, `step_export.py`,
 `assembly_drawing.py`, and `visual_verify.py`. Each runs profile → solid →
 validate → render → export; `cross_block.py` is the picture-to-part loop above,
-and `visual_verify.py` turns that loop into a score.
+and `visual_verify.py` turns that loop into a score. `differential.py` is an
+assembly demo: an open car differential with visible bevel side/spider gears,
+a crown ring gear and drive pinion, and an open carrier cage; its artifacts
+live in `examples/differential/`.
 
 ## What agents say
 

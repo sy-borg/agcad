@@ -361,6 +361,38 @@ footer{padding:0 0 48px}
   </div>
 </section>
 
+<section id="showcase-differential" class="alt">
+  <div class="wrap">
+    <h2>From a gear train to an open differential</h2>
+    <p class="intro">A differential is a puzzle in plain sight: two side gears, two spider gears, a ring gear and a pinion, all turning on three axes. This one leaves the housing off. The agent built the bevel teeth as one lofted trapezoid repeated around each cone, used a crown ring gear and spur pinion for the 90° drive, and kept the carrier as an open hoop-and-bars cage.</p>
+
+    <ol class="loop">
+      <li><strong>Bevels</strong>Revolve a conical blank with a bore, then loft one trapezoidal tooth and <code>circular_pattern</code> it 14 times for each side gear and 8 times for each spider.</li>
+      <li><strong>Drive</strong>A 36-tooth crown ring gear on the axle axis meets a 12-tooth spur pinion on a perpendicular axis; the pinion root circle just clears the crown tooth tips.</li>
+      <li><strong>Cage</strong>A revolved hoop and four longitudinal bars make the carrier, so no housing hides the mesh.</li>
+      <li><strong>Check</strong>All 12 solids come back watertight: 0 open edges, 0 non-manifold edges, 0 self-intersections. <code>check_interference</code> finds only the intended tooth-mesh overlap.</li>
+      <li><strong>Deliver</strong>STL, 3MF and a replayable <code>.wcad</code>, plus three deterministic renders and a contact sheet.</li>
+    </ol>
+
+    <div class="pair">
+      <figure>
+        <img src="examples/differential/front.png" alt="Side view of the open differential showing the two bronze bevel side gears, copper spider gears and cross pin" width="607" height="745" loading="lazy" decoding="async">
+        <figcaption>Side view: the 14-tooth side gears, 8-tooth spider gears and cross pin. The carrier hoop and bars are the only structure around them.</figcaption>
+      </figure>
+      <figure>
+        <img src="examples/differential/top.png" alt="Three-quarter view of the open differential showing the 36-tooth crown ring gear, 12-tooth drive pinion, carrier cage and bronze bevel gears" width="606" height="718" loading="lazy" decoding="async">
+        <figcaption>Three-quarter view: the 36-tooth crown ring gear, the 12-tooth drive pinion, and the open carrier cage.</figcaption>
+      </figure>
+    </div>
+
+    <aside class="note">
+      <p><b>Gears, not textures.</b> Every tooth is a solid: a trapezoidal loft, circular-patterned and unioned into the blank. The ring gear is a crown/face gear with axial teeth; the pinion is a spur gear positioned so its root circle just clears the crown tooth tips. The only <code>check_interference</code> hits are those meshing teeth.</p>
+    </aside>
+
+    <p class="intro" style="margin-top:24px">Files live in <code>examples/differential/</code>; run <code>.venv/bin/python examples/differential.py</code> to regenerate them. The <a href="examples/differential/differential.wcad"><code>differential.wcad</code></a> carries its recipe, the <a href="examples/differential/differential.stl">STL</a> and <a href="examples/differential/differential.3mf">3MF</a> are ready for a viewer or slicer, and the <a href="examples/differential/preview.png">three-view contact sheet</a> bundles the renders.</p>
+  </div>
+</section>
+
 <section id="protocol">
   <div class="wrap">
     <h2>A protocol an agent can learn in a minute</h2>
@@ -478,7 +510,7 @@ python3 -m venv .venv
 # R = refresh</span></pre>
       </div>
     </div>
-    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a printability preflight (overhangs, bridges, orientation, bed layout, fits and BOM mass), a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, an import → parametric loop (DXF/SVG sketches, section/project, primitive discovery and mesh repair), and an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet.</p>
+    <p style="margin-top:24px">More examples live in <a href="https://github.com/sy-borg/wright-cad/tree/master/examples"><code>examples/</code></a>: a printable bracket, a revolved bushing, face sketches, a sketch-completeness tour (arcs, splines, construction geometry, trim/offset and conflict diagnostics), a face/edge pick that drives a sketch and a fillet, a stable-references loop that lists faces and edges, binds a selector and reports movement and ambiguity, a validate-and-diff trust loop, a printability preflight (overhangs, bridges, orientation, bed layout, fits and BOM mass), a save and load round trip, an STL/3MF import round trip that reopens after the source files are gone, an import → parametric loop (DXF/SVG sketches, section/project, primitive discovery and mesh repair), an assembly of reusable parts with mates, a BOM and a dimensioned drawing sheet, and an open car differential with visible bevel gears and a crown ring gear.</p>
   </div>
 </section>
 

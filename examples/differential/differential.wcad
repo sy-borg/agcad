@@ -1,0 +1,1598 @@
+{
+  "format": "wright-document",
+  "version": 7,
+  "protocol": 1,
+  "name": "open_differential",
+  "parameters": {},
+  "program": [
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "side_gear_L_blank",
+      "plane": {
+        "datum": {
+          "plane": "xy"
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 1,
+      "p1": [
+        5.0,
+        4.0
+      ],
+      "p2": [
+        5.0,
+        8.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 1,
+      "p1": [
+        5.0,
+        8.0
+      ],
+      "p2": [
+        15.0,
+        24.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 1,
+      "p1": [
+        15.0,
+        24.0
+      ],
+      "p2": [
+        15.0,
+        4.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 1,
+      "p1": [
+        15.0,
+        4.0
+      ],
+      "p2": [
+        5.0,
+        4.0
+      ]
+    },
+    {
+      "method": "revolve",
+      "doc": 1,
+      "sketch": 1,
+      "angle_deg": 360.0,
+      "axis": "x",
+      "segments": 128,
+      "name": "side_gear_L_blank_solid",
+      "color": [
+        0.82,
+        0.54,
+        0.2,
+        1.0
+      ]
+    },
+    {
+      "method": "repair_mesh",
+      "doc": 1,
+      "entity": 2,
+      "fill_holes": null,
+      "fix_winding": true,
+      "remove_non_manifold": null,
+      "smooth_angle_deg": null
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "side_gear_L_tooth_in",
+      "plane": {
+        "custom": {
+          "origin": [
+            5.0,
+            0.0,
+            0.0
+          ],
+          "normal": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "x_axis": [
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 3,
+      "p1": [
+        -0.8078381109230897,
+        7.2
+      ],
+      "p2": [
+        0.8078381109230897,
+        7.2
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 3,
+      "p1": [
+        0.8078381109230897,
+        7.2
+      ],
+      "p2": [
+        0.44431096100769935,
+        10.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 3,
+      "p1": [
+        0.44431096100769935,
+        10.0
+      ],
+      "p2": [
+        -0.44431096100769935,
+        10.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 3,
+      "p1": [
+        -0.44431096100769935,
+        10.0
+      ],
+      "p2": [
+        -0.8078381109230897,
+        7.2
+      ]
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "side_gear_L_tooth_out",
+      "plane": {
+        "custom": {
+          "origin": [
+            15.0,
+            0.0,
+            0.0
+          ],
+          "normal": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "x_axis": [
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 4,
+      "p1": [
+        -2.423514332769269,
+        23.2
+      ],
+      "p2": [
+        2.423514332769269,
+        23.2
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 4,
+      "p1": [
+        2.423514332769269,
+        23.2
+      ],
+      "p2": [
+        1.332932883023098,
+        26.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 4,
+      "p1": [
+        1.332932883023098,
+        26.0
+      ],
+      "p2": [
+        -1.332932883023098,
+        26.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 4,
+      "p1": [
+        -1.332932883023098,
+        26.0
+      ],
+      "p2": [
+        -2.423514332769269,
+        23.2
+      ]
+    },
+    {
+      "method": "loft",
+      "doc": 1,
+      "sketches": [
+        3,
+        4
+      ],
+      "segments": null,
+      "name": "side_gear_L_tooth",
+      "color": [
+        0.82,
+        0.54,
+        0.2,
+        1.0
+      ]
+    },
+    {
+      "method": "circular_pattern",
+      "doc": 1,
+      "entities": [
+        5
+      ],
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "angle_deg": 360.0,
+      "count": 14.0,
+      "name": "side_gear_L_tooth",
+      "color": [
+        0.82,
+        0.54,
+        0.2,
+        1.0
+      ]
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "union",
+      "entities": [
+        2,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "name": "side_gear_L",
+      "color": [
+        0.82,
+        0.54,
+        0.2,
+        1.0
+      ]
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 1
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 5
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 3
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 4
+    },
+    {
+      "method": "mirror",
+      "doc": 1,
+      "entities": [
+        19
+      ],
+      "plane": {
+        "datum": {
+          "plane": "yz"
+        }
+      },
+      "name": "side_gear_R",
+      "color": [
+        0.82,
+        0.54,
+        0.2,
+        1.0
+      ]
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "spider_gear_P_blank",
+      "plane": {
+        "datum": {
+          "plane": "xz"
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 21,
+      "p1": [
+        2.0,
+        6.0
+      ],
+      "p2": [
+        3.75,
+        6.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 21,
+      "p1": [
+        3.75,
+        6.0
+      ],
+      "p2": [
+        8.75,
+        14.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 21,
+      "p1": [
+        8.75,
+        14.0
+      ],
+      "p2": [
+        2.0,
+        14.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 21,
+      "p1": [
+        2.0,
+        14.0
+      ],
+      "p2": [
+        2.0,
+        6.0
+      ]
+    },
+    {
+      "method": "revolve",
+      "doc": 1,
+      "sketch": 21,
+      "angle_deg": 360.0,
+      "axis": "y",
+      "segments": 128,
+      "name": "spider_gear_P_blank_solid",
+      "color": [
+        0.72,
+        0.36,
+        0.16,
+        1.0
+      ]
+    },
+    {
+      "method": "repair_mesh",
+      "doc": 1,
+      "entity": 22,
+      "fill_holes": null,
+      "fix_winding": true,
+      "remove_non_manifold": null,
+      "smooth_angle_deg": null
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "spider_gear_P_tooth_in",
+      "plane": {
+        "custom": {
+          "origin": [
+            0.0,
+            0.0,
+            6.0
+          ],
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "x_axis": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 23,
+      "p1": [
+        2.95,
+        -0.662679700366597
+      ],
+      "p2": [
+        5.25,
+        -0.3644738352016283
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 23,
+      "p1": [
+        5.25,
+        -0.3644738352016283
+      ],
+      "p2": [
+        5.25,
+        0.3644738352016283
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 23,
+      "p1": [
+        5.25,
+        0.3644738352016283
+      ],
+      "p2": [
+        2.95,
+        0.662679700366597
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 23,
+      "p1": [
+        2.95,
+        0.662679700366597
+      ],
+      "p2": [
+        2.95,
+        -0.662679700366597
+      ]
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "spider_gear_P_tooth_out",
+      "plane": {
+        "custom": {
+          "origin": [
+            0.0,
+            0.0,
+            14.0
+          ],
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "x_axis": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 24,
+      "p1": [
+        7.95,
+        -1.5462526341887264
+      ],
+      "p2": [
+        10.25,
+        -0.8504389488037996
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 24,
+      "p1": [
+        10.25,
+        -0.8504389488037996
+      ],
+      "p2": [
+        10.25,
+        0.8504389488037996
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 24,
+      "p1": [
+        10.25,
+        0.8504389488037996
+      ],
+      "p2": [
+        7.95,
+        1.5462526341887264
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 24,
+      "p1": [
+        7.95,
+        1.5462526341887264
+      ],
+      "p2": [
+        7.95,
+        -1.5462526341887264
+      ]
+    },
+    {
+      "method": "loft",
+      "doc": 1,
+      "sketches": [
+        23,
+        24
+      ],
+      "segments": null,
+      "name": "spider_gear_P_tooth",
+      "color": [
+        0.72,
+        0.36,
+        0.16,
+        1.0
+      ]
+    },
+    {
+      "method": "circular_pattern",
+      "doc": 1,
+      "entities": [
+        25
+      ],
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "angle_deg": 360.0,
+      "count": 8.0,
+      "name": "spider_gear_P_tooth",
+      "color": [
+        0.72,
+        0.36,
+        0.16,
+        1.0
+      ]
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "union",
+      "entities": [
+        22,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32
+      ],
+      "name": "spider_gear_P",
+      "color": [
+        0.72,
+        0.36,
+        0.16,
+        1.0
+      ]
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 21
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 25
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 23
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 24
+    },
+    {
+      "method": "transform",
+      "doc": 1,
+      "entity": 33,
+      "translation": null,
+      "rotation_deg": [
+        0.0,
+        0.0,
+        22.5
+      ],
+      "scale": null
+    },
+    {
+      "method": "mirror",
+      "doc": 1,
+      "entities": [
+        33
+      ],
+      "plane": {
+        "datum": {
+          "plane": "xy"
+        }
+      },
+      "name": "spider_gear_N",
+      "color": [
+        0.72,
+        0.36,
+        0.16,
+        1.0
+      ]
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "ring_gear_blank",
+      "plane": {
+        "datum": {
+          "plane": "xy"
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 35,
+      "p1": [
+        12.0,
+        28.0
+      ],
+      "p2": [
+        12.0,
+        44.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 35,
+      "p1": [
+        12.0,
+        44.0
+      ],
+      "p2": [
+        17.0,
+        44.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 35,
+      "p1": [
+        17.0,
+        44.0
+      ],
+      "p2": [
+        17.0,
+        28.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 35,
+      "p1": [
+        17.0,
+        28.0
+      ],
+      "p2": [
+        12.0,
+        28.0
+      ]
+    },
+    {
+      "method": "revolve",
+      "doc": 1,
+      "sketch": 35,
+      "angle_deg": 360.0,
+      "axis": "x",
+      "segments": 160,
+      "name": "ring_gear_blank_solid",
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "repair_mesh",
+      "doc": 1,
+      "entity": 36,
+      "fill_holes": null,
+      "fix_winding": true,
+      "remove_non_manifold": null,
+      "smooth_angle_deg": null
+    },
+    {
+      "method": "add_box",
+      "doc": 1,
+      "name": "ring_gear_tooth",
+      "center": [
+        19.0,
+        0.0,
+        36.0
+      ],
+      "size": [
+        6.0,
+        3.267256359733385,
+        8.0
+      ],
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "circular_pattern",
+      "doc": 1,
+      "entities": [
+        37
+      ],
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "angle_deg": 360.0,
+      "count": 36.0,
+      "name": "ring_gear_tooth",
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "union",
+      "entities": [
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72
+      ],
+      "name": "ring_gear",
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 35
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 37
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "drive_pinion_blank",
+      "plane": {
+        "datum": {
+          "plane": "xz"
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 74,
+      "p1": [
+        4.0,
+        32.0
+      ],
+      "p2": [
+        12.0,
+        32.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 74,
+      "p1": [
+        12.0,
+        32.0
+      ],
+      "p2": [
+        12.0,
+        40.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 74,
+      "p1": [
+        12.0,
+        40.0
+      ],
+      "p2": [
+        4.0,
+        40.0
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 74,
+      "p1": [
+        4.0,
+        40.0
+      ],
+      "p2": [
+        4.0,
+        32.0
+      ]
+    },
+    {
+      "method": "revolve",
+      "doc": 1,
+      "sketch": 74,
+      "angle_deg": 360.0,
+      "axis": "y",
+      "segments": 128,
+      "name": "drive_pinion_blank_solid",
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "repair_mesh",
+      "doc": 1,
+      "entity": 75,
+      "fill_holes": null,
+      "fix_winding": true,
+      "remove_non_manifold": null,
+      "smooth_angle_deg": null
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "drive_pinion_tooth_in",
+      "plane": {
+        "custom": {
+          "origin": [
+            0.0,
+            0.0,
+            32.0
+          ],
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "x_axis": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 76,
+      "p1": [
+        11.2,
+        -1.413716694115407
+      ],
+      "p2": [
+        13.8,
+        -0.7775441817634738
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 76,
+      "p1": [
+        13.8,
+        -0.7775441817634738
+      ],
+      "p2": [
+        13.8,
+        0.7775441817634738
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 76,
+      "p1": [
+        13.8,
+        0.7775441817634738
+      ],
+      "p2": [
+        11.2,
+        1.413716694115407
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 76,
+      "p1": [
+        11.2,
+        1.413716694115407
+      ],
+      "p2": [
+        11.2,
+        -1.413716694115407
+      ]
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "drive_pinion_tooth_out",
+      "plane": {
+        "custom": {
+          "origin": [
+            0.0,
+            0.0,
+            40.0
+          ],
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "x_axis": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 77,
+      "p1": [
+        11.2,
+        -1.413716694115407
+      ],
+      "p2": [
+        13.8,
+        -0.7775441817634738
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 77,
+      "p1": [
+        13.8,
+        -0.7775441817634738
+      ],
+      "p2": [
+        13.8,
+        0.7775441817634738
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 77,
+      "p1": [
+        13.8,
+        0.7775441817634738
+      ],
+      "p2": [
+        11.2,
+        1.413716694115407
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 77,
+      "p1": [
+        11.2,
+        1.413716694115407
+      ],
+      "p2": [
+        11.2,
+        -1.413716694115407
+      ]
+    },
+    {
+      "method": "loft",
+      "doc": 1,
+      "sketches": [
+        76,
+        77
+      ],
+      "segments": null,
+      "name": "drive_pinion_tooth",
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "circular_pattern",
+      "doc": 1,
+      "entities": [
+        78
+      ],
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "angle_deg": 360.0,
+      "count": 12.0,
+      "name": "drive_pinion_tooth",
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "union",
+      "entities": [
+        75,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89
+      ],
+      "name": "drive_pinion",
+      "color": [
+        0.56,
+        0.61,
+        0.69,
+        1.0
+      ]
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 74
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 78
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 76
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 77
+    },
+    {
+      "method": "transform",
+      "doc": 1,
+      "entity": 90,
+      "translation": [
+        34.0,
+        0.0,
+        36.0
+      ],
+      "rotation_deg": [
+        0.0,
+        0.0,
+        15.0
+      ],
+      "scale": null
+    },
+    {
+      "method": "add_sketch",
+      "doc": 1,
+      "name": "carrier_hoop_profile",
+      "plane": {
+        "datum": {
+          "plane": "xy"
+        }
+      }
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 91,
+      "p1": [
+        -2.2,
+        26.5
+      ],
+      "p2": [
+        -2.2,
+        29.5
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 91,
+      "p1": [
+        -2.2,
+        29.5
+      ],
+      "p2": [
+        2.2,
+        29.5
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 91,
+      "p1": [
+        2.2,
+        29.5
+      ],
+      "p2": [
+        2.2,
+        26.5
+      ]
+    },
+    {
+      "method": "add_sketch_line",
+      "doc": 1,
+      "sketch": 91,
+      "p1": [
+        2.2,
+        26.5
+      ],
+      "p2": [
+        -2.2,
+        26.5
+      ]
+    },
+    {
+      "method": "revolve",
+      "doc": 1,
+      "sketch": 91,
+      "angle_deg": 360.0,
+      "axis": "x",
+      "segments": 128,
+      "name": "carrier_hoop_solid",
+      "color": [
+        0.2,
+        0.22,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "method": "repair_mesh",
+      "doc": 1,
+      "entity": 92,
+      "fill_holes": null,
+      "fix_winding": true,
+      "remove_non_manifold": null,
+      "smooth_angle_deg": null
+    },
+    {
+      "method": "add_box",
+      "doc": 1,
+      "name": "carrier_bar_0",
+      "center": [
+        0.0,
+        0.0,
+        28.0
+      ],
+      "size": [
+        30.0,
+        4.0,
+        4.0
+      ],
+      "color": [
+        0.2,
+        0.22,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "method": "add_box",
+      "doc": 1,
+      "name": "carrier_bar_1",
+      "center": [
+        0.0,
+        0.0,
+        -28.0
+      ],
+      "size": [
+        30.0,
+        4.0,
+        4.0
+      ],
+      "color": [
+        0.2,
+        0.22,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "method": "add_box",
+      "doc": 1,
+      "name": "carrier_bar_2",
+      "center": [
+        0.0,
+        28.0,
+        0.0
+      ],
+      "size": [
+        30.0,
+        4.0,
+        4.0
+      ],
+      "color": [
+        0.2,
+        0.22,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "method": "add_box",
+      "doc": 1,
+      "name": "carrier_bar_3",
+      "center": [
+        0.0,
+        -28.0,
+        0.0
+      ],
+      "size": [
+        30.0,
+        4.0,
+        4.0
+      ],
+      "color": [
+        0.2,
+        0.22,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "method": "boolean",
+      "doc": 1,
+      "op": "union",
+      "entities": [
+        92,
+        93,
+        94,
+        95,
+        96
+      ],
+      "name": "carrier",
+      "color": [
+        0.2,
+        0.22,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 92
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 93
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 94
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 95
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 96
+    },
+    {
+      "method": "delete",
+      "doc": 1,
+      "entity": 91
+    },
+    {
+      "method": "add_cylinder",
+      "doc": 1,
+      "name": "cross_pin",
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "radius": 2.0,
+      "height": 56.0,
+      "segments": 48,
+      "color": [
+        0.74,
+        0.76,
+        0.8,
+        1.0
+      ]
+    },
+    {
+      "method": "add_cylinder",
+      "doc": 1,
+      "name": "axle_L",
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "radius": 3.2,
+      "height": 20.0,
+      "segments": 48,
+      "color": [
+        0.74,
+        0.76,
+        0.8,
+        1.0
+      ]
+    },
+    {
+      "method": "transform",
+      "doc": 1,
+      "entity": 99,
+      "translation": [
+        -25.0,
+        0.0,
+        0.0
+      ],
+      "rotation_deg": [
+        0.0,
+        90.0,
+        0.0
+      ],
+      "scale": null
+    },
+    {
+      "method": "add_cylinder",
+      "doc": 1,
+      "name": "axle_R",
+      "center": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "radius": 3.2,
+      "height": 20.0,
+      "segments": 48,
+      "color": [
+        0.74,
+        0.76,
+        0.8,
+        1.0
+      ]
+    },
+    {
+      "method": "transform",
+      "doc": 1,
+      "entity": 100,
+      "translation": [
+        25.0,
+        0.0,
+        0.0
+      ],
+      "rotation_deg": [
+        0.0,
+        90.0,
+        0.0
+      ],
+      "scale": null
+    },
+    {
+      "method": "add_cylinder",
+      "doc": 1,
+      "name": "pinion_shaft",
+      "center": [
+        34.0,
+        0.0,
+        48.0
+      ],
+      "radius": 3.5,
+      "height": 16.0,
+      "segments": 48,
+      "color": [
+        0.74,
+        0.76,
+        0.8,
+        1.0
+      ]
+    },
+    {
+      "method": "add_cylinder",
+      "doc": 1,
+      "name": "pinion_flange",
+      "center": [
+        34.0,
+        0.0,
+        56.5
+      ],
+      "radius": 7.0,
+      "height": 3.0,
+      "segments": 48,
+      "color": [
+        0.74,
+        0.76,
+        0.8,
+        1.0
+      ]
+    }
+  ],
+  "source": {
+    "language": "python",
+    "text": "\"\"\"An open car differential with the gears left visible.\n\nThe model is a classic two-pinion open differential: two side (sun) gears on\nthe axle axis, two spider (planet) pinions on the cross pin, a crown ring gear\ndriven by a spur pinion, and an open carrier cage instead of a housing.  The\nbevel gears share one helper: a conical blank plus one trapezoidal tooth that\nis circular-patterned and unioned.  The constants at the top drive the build;\nedit them and rerun the script to regenerate the gear.\n\nThe gears are deliberately not enclosed: the carrier is a ring and four\nlongitudinal bars, so the bronze side/spider gears stay in view.\n\nUsage: .venv/bin/python examples/differential.py\nWrites examples/differential/{differential.wcad,iso.png,front.png,top.png,\npreview.png,differential.stl,differential.3mf}\n\"\"\"\n\nimport math\nimport os\nimport shutil\nimport subprocess\nimport sys\n\nsys.path.insert(0, \"python\")  # noqa: E402\n\nfrom wright import Wright  # noqa: E402\n\nOUT = os.path.join(\"examples\", \"differential\")\n\nBRONZE = (0.82, 0.54, 0.20, 1.0)\nCOPPER = (0.72, 0.36, 0.16, 1.0)\nSTEEL = (0.56, 0.61, 0.69, 1.0)\nDARK = (0.20, 0.22, 0.25, 1.0)\nSHAFT = (0.74, 0.76, 0.80, 1.0)\n\n# Side gears: 58 deg pitch cone, 14 teeth, on the X axle axis.\nSIDE_X0, SIDE_X1 = 5.0, 15.0\nSIDE_R0, SIDE_R1 = 8.0, 24.0\nSIDE_BORE = 4.0\nSIDE_TEETH = 14\n\n# Spider gears: 32 deg pitch cone, 8 teeth, on the Z cross-pin axis.\nSPIDER_Z0, SPIDER_Z1 = 6.0, 14.0\nSPIDER_R0, SPIDER_R1 = 3.75, 8.75\nSPIDER_BORE = 2.0\nSPIDER_TEETH = 8\n\n# Ring gear: a crown/face gear, 36 axial teeth at a 36 mm pitch radius.\nRING_X0, RING_X1 = 12.0, 17.0\nRING_R0, RING_R1 = 28.0, 44.0\nRING_PITCH_R = 36.0\nRING_TEETH = 36\n\n# Drive pinion: a 12-tooth spur gear on a Z axis, meshing with the crown face.\nPINION_Z0, PINION_Z1 = 32.0, 40.0\nPINION_R = 12.0\nPINION_BORE = 4.0\nPINION_TEETH = 12\n\nROOT = 0.8  # tooth root sinks this far into the blank\nTIP_W = 0.55  # tooth tip width as a fraction of its root width\n\n\ndef _loop(cad, doc, sketch, points):\n    for i, p1 in enumerate(points):\n        cad.add_sketch_line(doc, sketch, p1, points[(i + 1) % len(points)])\n\n\ndef _x_gear(cad, doc, name, x0, x1, r0, r1, bore, teeth, tooth_h, color):\n    \"\"\"A straight bevel gear whose axis is world +X, opening toward +X.\"\"\"\n    body_sk = cad.add_sketch(doc, f\"{name}_blank\", plane=\"xy\")[\"entity\"]\n    _loop(cad, doc, body_sk, [(x0, bore), (x0, r0), (x1, r1), (x1, bore)])\n    body = cad.revolve(\n        doc, body_sk, angle_deg=360, axis=\"x\", segments=128,\n        name=f\"{name}_blank_solid\", color=color,\n    )[\"entity\"]\n    cad.repair_mesh(doc, body, fix_winding=True)\n\n    w0 = 2 * math.pi * r0 / teeth * 0.45\n    w1 = 2 * math.pi * r1 / teeth * 0.45\n    t0, t1 = w0 * TIP_W, w1 * TIP_W\n    sk0 = cad.add_sketch(\n        doc, f\"{name}_tooth_in\",\n        plane={\"origin\": [x0, 0, 0], \"normal\": [1, 0, 0], \"x_axis\": [0, 1, 0]},\n    )[\"entity\"]\n    _loop(cad, doc, sk0, [(-w0 / 2, r0 - ROOT), (w0 / 2, r0 - ROOT),\n                          (t0 / 2, r0 + tooth_h), (-t0 / 2, r0 + tooth_h)])\n    sk1 = cad.add_sketch(\n        doc, f\"{name}_tooth_out\",\n        plane={\"origin\": [x1, 0, 0], \"normal\": [1, 0, 0], \"x_axis\": [0, 1, 0]},\n    )[\"entity\"]\n    _loop(cad, doc, sk1, [(-w1 / 2, r1 - ROOT), (w1 / 2, r1 - ROOT),\n                          (t1 / 2, r1 + tooth_h), (-t1 / 2, r1 + tooth_h)])\n    tooth = cad.loft(doc, [sk0, sk1], name=f\"{name}_tooth\", color=color)[\"entity\"]\n    copies = cad.circular_pattern(\n        doc, [tooth], count=teeth, axis=[1, 0, 0],\n        name=f\"{name}_tooth\", color=color,\n    )[\"entities\"]\n    gear = cad.boolean(\n        doc, \"union\", [body, tooth, *copies], name=name, color=color,\n    )[\"entity\"]\n\n    # Drop the construction geometry; the union is baked and independent.\n    cad.delete(doc, body_sk)\n    cad.delete(doc, tooth)  # also removes the circular-pattern copies\n    cad.delete(doc, sk0)\n    cad.delete(doc, sk1)\n    return gear\n\n\ndef _z_gear(cad, doc, name, z0, z1, r0, r1, bore, teeth, tooth_h, color):\n    \"\"\"A straight bevel gear whose axis is world +Z, opening toward +Z.\"\"\"\n    body_sk = cad.add_sketch(doc, f\"{name}_blank\", plane=\"xz\")[\"entity\"]\n    _loop(cad, doc, body_sk, [(bore, z0), (r0, z0), (r1, z1), (bore, z1)])\n    body = cad.revolve(\n        doc, body_sk, angle_deg=360, axis=\"y\", segments=128,\n        name=f\"{name}_blank_solid\", color=color,\n    )[\"entity\"]\n    cad.repair_mesh(doc, body, fix_winding=True)\n\n    w0 = 2 * math.pi * r0 / teeth * 0.45\n    w1 = 2 * math.pi * r1 / teeth * 0.45\n    t0, t1 = w0 * TIP_W, w1 * TIP_W\n    sk0 = cad.add_sketch(\n        doc, f\"{name}_tooth_in\",\n        plane={\"origin\": [0, 0, z0], \"normal\": [0, 0, 1], \"x_axis\": [1, 0, 0]},\n    )[\"entity\"]\n    _loop(cad, doc, sk0, [(r0 - ROOT, -w0 / 2), (r0 + tooth_h, -t0 / 2),\n                          (r0 + tooth_h, t0 / 2), (r0 - ROOT, w0 / 2)])\n    sk1 = cad.add_sketch(\n        doc, f\"{name}_tooth_out\",\n        plane={\"origin\": [0, 0, z1], \"normal\": [0, 0, 1], \"x_axis\": [1, 0, 0]},\n    )[\"entity\"]\n    _loop(cad, doc, sk1, [(r1 - ROOT, -w1 / 2), (r1 + tooth_h, -t1 / 2),\n                          (r1 + tooth_h, t1 / 2), (r1 - ROOT, w1 / 2)])\n    tooth = cad.loft(doc, [sk0, sk1], name=f\"{name}_tooth\", color=color)[\"entity\"]\n    copies = cad.circular_pattern(\n        doc, [tooth], count=teeth, axis=[0, 0, 1],\n        name=f\"{name}_tooth\", color=color,\n    )[\"entities\"]\n    gear = cad.boolean(\n        doc, \"union\", [body, tooth, *copies], name=name, color=color,\n    )[\"entity\"]\n\n    cad.delete(doc, body_sk)\n    cad.delete(doc, tooth)  # also removes the circular-pattern copies\n    cad.delete(doc, sk0)\n    cad.delete(doc, sk1)\n    return gear\n\n\ndef _crown_ring(cad, doc, name, x0, x1, r_in, r_out, pitch_r, teeth, color):\n    \"\"\"A flat crown (face) gear: an annular body with axial teeth on +X.\"\"\"\n    body_sk = cad.add_sketch(doc, f\"{name}_blank\", plane=\"xy\")[\"entity\"]\n    _loop(cad, doc, body_sk, [(x0, r_in), (x0, r_out), (x1, r_out), (x1, r_in)])\n    body = cad.revolve(\n        doc, body_sk, angle_deg=360, axis=\"x\", segments=160,\n        name=f\"{name}_blank_solid\", color=color,\n    )[\"entity\"]\n    cad.repair_mesh(doc, body, fix_winding=True)\n\n    width = 2 * math.pi * pitch_r / teeth * 0.52\n    depth = 8.0\n    height = 6.0\n    tooth = cad.add_box(\n        doc, name=f\"{name}_tooth\",\n        center=(x1 + height / 2 - 1.0, 0, pitch_r),\n        size=(height, width, depth), color=color,\n    )[\"entity\"]\n    copies = cad.circular_pattern(\n        doc, [tooth], count=teeth, axis=[1, 0, 0],\n        name=f\"{name}_tooth\", color=color,\n    )[\"entities\"]\n    ring = cad.boolean(\n        doc, \"union\", [body, tooth, *copies], name=name, color=color,\n    )[\"entity\"]\n\n    cad.delete(doc, body_sk)\n    cad.delete(doc, tooth)\n    return ring\n\n\ndef _shaft_x(cad, doc, name, center_x, length, radius):\n    e = cad.add_cylinder(\n        doc, name=name, center=(0, 0, 0), radius=radius, height=length,\n        segments=48, color=SHAFT,\n    )[\"entity\"]\n    cad.transform(doc, e, rotation_deg=(0, 90, 0), translation=(center_x, 0, 0))\n    return e\n\n\ndef main() -> None:\n    os.makedirs(OUT, exist_ok=True)\n\n    cad = Wright.spawn()\n    doc = cad.create_document(\"open_differential\")[\"doc\"]\n\n    # --- bevel gear set ------------------------------------------------------\n    side_l = _x_gear(\n        cad, doc, \"side_gear_L\", SIDE_X0, SIDE_X1, SIDE_R0, SIDE_R1,\n        SIDE_BORE, SIDE_TEETH, 2.0, BRONZE,\n    )\n    side_r = cad.mirror(\n        doc, [side_l], plane=\"yz\", name=\"side_gear_R\", color=BRONZE,\n    )[\"entities\"][0]\n\n    spider_p = _z_gear(\n        cad, doc, \"spider_gear_P\", SPIDER_Z0, SPIDER_Z1, SPIDER_R0, SPIDER_R1,\n        SPIDER_BORE, SPIDER_TEETH, 1.5, COPPER,\n    )\n    # Half a tooth pitch puts a spider gap where a side-gear tooth arrives.\n    cad.transform(doc, spider_p, rotation_deg=(0, 0, 180 / SPIDER_TEETH))\n    spider_n = cad.mirror(\n        doc, [spider_p], plane=\"xy\", name=\"spider_gear_N\", color=COPPER,\n    )[\"entities\"][0]\n\n    ring = _crown_ring(\n        cad, doc, \"ring_gear\", RING_X0, RING_X1, RING_R0, RING_R1,\n        RING_PITCH_R, RING_TEETH, STEEL,\n    )\n    pinion = _z_gear(\n        cad, doc, \"drive_pinion\", PINION_Z0, PINION_Z1, PINION_R, PINION_R,\n        PINION_BORE, PINION_TEETH, 1.8, STEEL,\n    )\n    # The pinion root circle sits just outside the crown tooth tips; its\n    # teeth then reach back into the crown tooth spaces.\n    pinion_x = RING_X1 + 5.0 + PINION_R\n    cad.transform(\n        doc, pinion,\n        rotation_deg=(0, 0, 180 / PINION_TEETH),\n        translation=(pinion_x, 0, (PINION_Z0 + PINION_Z1) / 2),\n    )\n\n    # --- open carrier --------------------------------------------------------\n    hoop_sk = cad.add_sketch(doc, \"carrier_hoop_profile\", plane=\"xy\")[\"entity\"]\n    _loop(cad, doc, hoop_sk, [(-2.2, 26.5), (-2.2, 29.5),\n                              (2.2, 29.5), (2.2, 26.5)])\n    hoop = cad.revolve(\n        doc, hoop_sk, angle_deg=360, axis=\"x\", segments=128,\n        name=\"carrier_hoop_solid\", color=DARK,\n    )[\"entity\"]\n    cad.repair_mesh(doc, hoop, fix_winding=True)\n\n    bars = []\n    for i, (cy, cz) in enumerate([(0, 28), (0, -28), (28, 0), (-28, 0)]):\n        bars.append(\n            cad.add_box(\n                doc, name=f\"carrier_bar_{i}\", center=(0, cy, cz),\n                size=(30, 4, 4), color=DARK,\n            )[\"entity\"]\n        )\n    carrier = cad.boolean(\n        doc, \"union\", [hoop, *bars], name=\"carrier\", color=DARK,\n    )[\"entity\"]\n    cad.delete(doc, hoop)\n    for b in bars:\n        cad.delete(doc, b)\n    cad.delete(doc, hoop_sk)\n\n    # --- cross pin and shafts ----------------------------------------------\n    cross_pin = cad.add_cylinder(\n        doc, name=\"cross_pin\", center=(0, 0, 0), radius=2.0, height=56,\n        segments=48, color=SHAFT,\n    )[\"entity\"]\n\n    axle_l = _shaft_x(cad, doc, \"axle_L\", -25.0, 20.0, 3.2)\n    axle_r = _shaft_x(cad, doc, \"axle_R\", 25.0, 20.0, 3.2)\n    pinion_shaft = cad.add_cylinder(\n        doc, name=\"pinion_shaft\", center=(pinion_x, 0, 48),\n        radius=3.5, height=16, segments=48, color=SHAFT,\n    )[\"entity\"]\n    pinion_flange = cad.add_cylinder(\n        doc, name=\"pinion_flange\", center=(pinion_x, 0, 56.5),\n        radius=7.0, height=3.0, segments=48, color=SHAFT,\n    )[\"entity\"]\n\n    # --- report and save ----------------------------------------------------\n    gears = [side_l, side_r, spider_p, spider_n, ring, pinion]\n    for eid in gears:\n        info = next(e for e in cad.get_scene(doc)[\"entities\"] if e[\"id\"] == eid)\n        print(f\"{info['name']:16s} id={eid:3d} \"\n              f\"bbox={info['world_bbox']['min']}..{info['world_bbox']['max']}\")\n\n    report = cad.validate(doc, entities=gears)\n    print(f\"validate gears: ok={report['ok']} solids={len(report['solids'])}\")\n    for s in report[\"solids\"]:\n        if not s[\"ok\"]:\n            print(f\"  {s['name']}: open={s['open_edges']} \"\n                  f\"nonmanifold={s['non_manifold_edges']} \"\n                  f\"self={s['self_intersections']} vol={s['volume']:.0f}\")\n\n    stl = os.path.abspath(os.path.join(OUT, \"differential.stl\"))\n    mf = os.path.abspath(os.path.join(OUT, \"differential.3mf\"))\n    print(\"stl:\", cad.export_stl(doc, stl))\n    print(\"3mf:\", cad.export_3mf(doc, mf))\n\n    with open(__file__, encoding=\"utf-8\") as f:\n        source = {\"language\": \"python\", \"text\": f.read()}\n    wcad = os.path.abspath(os.path.join(OUT, \"differential.wcad\"))\n    saved = cad.save_document(doc, wcad, source=source)\n    print(f\"saved {saved['path']} ({saved['bytes']} bytes, {saved['params']} params)\")\n\n    views = [\n        (\"iso\", (-80, -145, 75), (4, 0, 12), 42, False),\n        (\"front\", (-30, -170, 35), (4, 0, 14), 40, True),\n        (\"top\", (-40, -120, 120), (4, 0, 8), 42, False),\n    ]\n    for name, eye, target, fov, ortho in views:\n        png = cad.render_offscreen(\n            doc, width=1000, height=850,\n            eye=eye, target=target, up=(0, 0, 1),\n            fov_deg=fov, ortho=ortho,\n            background=(1.0, 1.0, 1.0, 1.0),\n            path=os.path.join(OUT, f\"{name}.png\"),\n        )\n        print(f\"rendered {name}: {png['path']}\")\n\n    magick = shutil.which(\"magick\")\n    if magick:\n        for name in (\"iso\", \"front\", \"top\"):\n            path = os.path.join(OUT, f\"{name}.png\")\n            subprocess.run(\n                [magick, path, \"-fuzz\", \"2%\", \"-trim\", \"+repage\",\n                 \"-bordercolor\", \"white\", \"-border\", \"30\",\n                 \"-strip\", \"-define\", \"png:exclude-chunks=date,time\", path],\n                check=True,\n            )\n        subprocess.run(\n            [magick, *[os.path.join(OUT, f\"{n}.png\") for n in (\"iso\", \"front\", \"top\")],\n             \"-resize\", \"620x527\", \"-background\", \"white\", \"-gravity\", \"center\",\n             \"-extent\", \"620x527\", \"+append\",\n             \"-strip\", \"-define\", \"png:exclude-chunks=date,time\",\n             os.path.join(OUT, \"preview.png\")],\n            check=True,\n        )\n        print(f\"rendered preview: {os.path.join(OUT, 'preview.png')}\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  }
+}
