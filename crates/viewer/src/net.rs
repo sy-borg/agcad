@@ -91,14 +91,75 @@ impl Connection {
             params: serde_json::from_str(params).unwrap(),
         };
         writeln!(self.writer, "{}", serde_json::to_string(&req).unwrap()).map_err(|e| e.to_string())?;
-        let mut line = String::new();
-        self.reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        if line.is_empty() {
-            return Err("server closed the connection".into());
+        loop {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            if line.is_empty() {
+                return Err("server closed the connection".into());
+            }
+            let value: serde_json::Value =
+                serde_json::from_str(&line).map_err(|e| e.to_string())?;
+            // The server fans `scene_changed` out to every open connection,
+            // including this short-lived one. A mutation made by another
+            // client can therefore put a notification (no `id`) on the wire
+            // before our response; skip it instead of failing to parse it as
+            // an `RpcResponse`.
+            if value.get("id").is_none() {
+                continue;
+            }
+            let resp: RpcResponse = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            if resp.id != id {
+                continue;
+            }
+            return resp.result.ok_or_else(|| {
+                resp.error.map(|e| e.message).unwrap_or_else(|| "empty response".into())
+            });
         }
-        let resp: RpcResponse = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-        resp.result.ok_or_else(|| {
-            resp.error.map(|e| e.message).unwrap_or_else(|| "empty response".into())
-        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// A mutation by another client is broadcast to every open connection,
+    /// including the viewer's one-shot scene fetch. The notification can land
+    /// before (or between) our responses; it must be skipped, not reported as
+    /// `missing field id`.
+    #[test]
+    fn notifications_do_not_break_a_scene_fetch() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake backend");
+        let port = listener.local_addr().expect("local addr").port();
+
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut writer = stream.try_clone().expect("clone stream");
+            let mut reader = BufReader::new(stream);
+            for id in 1..=2 {
+                let mut request = String::new();
+                reader.read_line(&mut request).expect("read request");
+                assert!(request.contains("\"list_documents\""), "{request}");
+                // Another client mutates while this connection waits.
+                writeln!(
+                    writer,
+                    r#"{{"jsonrpc":"2.0","method":"scene_changed","params":{{"doc":{id}}}}}"#
+                )
+                .expect("write notification");
+                writeln!(
+                    writer,
+                    r#"{{"jsonrpc":"2.0","id":{id},"result":{{"documents":{{"docs":[]}}}}}}"#
+                )
+                .expect("write response");
+            }
+        });
+
+        let mut conn = Connection::open("127.0.0.1", port).expect("connect");
+        for _ in 0..2 {
+            match conn.call("list_documents", "{}").expect("response despite notification") {
+                CommandResult::Documents { docs } => assert!(docs.is_empty()),
+                other => panic!("unexpected result: {other:?}"),
+            }
+        }
     }
 }
